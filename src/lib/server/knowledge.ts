@@ -266,8 +266,15 @@ export async function processDocumentKnowledge(docId: number, chunks: string[]) 
     const droppedRelTypes = new Map<string, number>();
 
     for (const chunk of chunks) {
-        // Note: No need to check if document exists — we're now running within a transaction
-        // that holds a write lock, preventing concurrent deletes until COMMIT
+        // Re-check on every iteration: processDocumentKnowledge runs outside any
+        // transaction (Phase 3 of addDocument), so an await gap between chunks lets
+        // a concurrent sync or an admin deletion remove the document. Without this
+        // check, every subsequent INSERT that references doc_id throws a FK error.
+        if (!db.prepare('SELECT id FROM documents WHERE id = ?').get(docId)) {
+            console.log(`Document ${docId} was deleted during knowledge processing — aborting.`);
+            return;
+        }
+
         const existingNames = getCanonicalTopicNames(80);
         const knowledge = await extractKnowledge(chunk, existingNames);
         if (!knowledge || !knowledge.topics) continue;
@@ -319,7 +326,12 @@ export async function processDocumentKnowledge(docId: number, chunks: string[]) 
                     docId,
                     topicId
                 );
-            } catch (err) {
+            } catch (err: any) {
+                if (err?.code === 'SQLITE_CONSTRAINT_FOREIGNKEY') {
+                    // Document was deleted between the per-chunk check and this insert.
+                    console.log(`Document ${docId} removed mid-chunk — aborting knowledge processing.`);
+                    return;
+                }
                 console.error(`Failed to process topic ${topic.name}:`, err);
             }
         }
@@ -421,7 +433,11 @@ export async function processDocumentKnowledge(docId: number, chunks: string[]) 
                 } catch (err) {
                     console.error(`Failed to embed claim ${claimId}:`, err);
                 }
-            } catch (err) {
+            } catch (err: any) {
+                if (err?.code === 'SQLITE_CONSTRAINT_FOREIGNKEY') {
+                    console.log(`Document ${docId} removed mid-chunk — aborting knowledge processing.`);
+                    return;
+                }
                 console.error('Failed to insert claim:', err);
             }
         }
