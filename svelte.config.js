@@ -11,7 +11,19 @@ const config = {
 		// If your environment is not supported, or you settled on a specific environment, switch out the adapter.
 		// See https://svelte.dev/docs/kit/adapters for more information about adapters.
 		adapter: adapter(),
-		csp: { mode: 'nonce' }
+		csp: {
+			mode: 'nonce',
+			directives: {
+				'default-src': ['self'],
+				'script-src': ['self'],
+				'style-src': ['self', 'unsafe-inline'],
+				'img-src': ['self', 'data:', 'blob:'],
+				'font-src': ['self'],
+				'connect-src': ['self', 'https://generativelanguage.googleapis.com'],
+				'frame-ancestors': ['none'],
+				'base-uri': ['self']
+			}
+		}
 	}
 };
 

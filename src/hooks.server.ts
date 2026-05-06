@@ -1,5 +1,4 @@
 import 'dotenv/config';
-import { randomBytes } from 'crypto';
 
 import { initAutoSync } from '$lib/server/git';
 
@@ -65,23 +64,7 @@ export async function handle({ event, resolve }) {
         }
     }
 
-    // Content Security Policy
-    const nonce = randomBytes(16).toString('base64');
-    const isDev = process.env.NODE_ENV !== 'production';
-    const response = await resolve(event, {
-        transformPageChunk: ({ html }) => html.replace(/%sveltekit\.nonce%/g, nonce)
-    });
-    response.headers.set(
-        'Content-Security-Policy',
-        "default-src 'self'; " +
-        (isDev ? "script-src 'self' 'unsafe-inline'; " : `script-src 'self' 'nonce-${nonce}'; `) +
-        "style-src 'self' 'unsafe-inline'; " +
-        "img-src 'self' data: blob:; " +
-        "font-src 'self'; " +
-        "connect-src 'self' https://generativelanguage.googleapis.com; " +
-        "frame-ancestors 'none'; " +
-        "base-uri 'self'"
-    );
+    const response = await resolve(event);
     response.headers.set('X-Content-Type-Options', 'nosniff');
     response.headers.set('X-Frame-Options', 'DENY');
     response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
