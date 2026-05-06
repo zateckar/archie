@@ -73,9 +73,11 @@ export async function analyzeQuery(prompt: string, history: { role: string, cont
         }
 
         Rules:
-        - If query is vague/broad (e.g., "how does it work?", "tell me about security"), set needsClarification: true
-        - Ask 1-3 specific clarifying questions that would help narrow the search
-        - Always provide a searchableQuery (best interpretation of user intent)
+        - Set needsClarification: true ONLY when the query is completely unresolvable without more context — e.g., a bare pronoun with no referent ("how does it work?" with zero conversation history), a single character, or pure gibberish
+        - NEVER flag broad-but-valid queries such as "tell me about security", "what are the guidelines", "explain the process", "how does X work" — these should be sent directly to the knowledge graph
+        - The bar for clarification is very high; when in doubt, always set needsClarification: false and rely on searchableQuery
+        - clarificationQuestions should only appear when the query literally cannot be searched in any meaningful way
+        - Always provide a searchableQuery (best guess at user intent)
         - confidence: high if query is specific, medium if somewhat vague, low if very unclear
     `;
 
@@ -155,10 +157,10 @@ export async function chatStream(prompt: string, context: string, history: { rol
             ? '- Reference specific claims as evidence (e.g., "According to the claims under Topic X...")\n           - Each claim is a verified fact - treat it as authoritative\n           - When multiple claims exist, synthesize them coherently'
             : '- Always cite sources using [Source Name] format when using information from context'}
 
-        3. **Be Conversational & Interactive**:
-           - Engage in dialog, don't just dump information
-           - Ask clarifying questions when the query is broad or ambiguous
-           - If context doesn't fully answer the question, acknowledge it and ask what specific aspect they need
+        3. **Answer from Context First**:
+           - Always answer using the provided knowledge context when relevant topics or claims are present — do not ask for clarification if the knowledge graph returned information
+           - Deliver the information you have clearly and completely; only acknowledge gaps when the context is genuinely empty or entirely off-topic
+           - Be conversational in tone but prioritise giving answers over requesting more input
 
         4. **Navigate the Graph**:
            ${isKnowledgeContext

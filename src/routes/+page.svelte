@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onMount, untrack } from 'svelte';
     import { 
         FileText, Send, Trash2, Upload, Loader2, Bot, 
         User as UserIcon, Settings, X, GitBranch, RefreshCw, 
@@ -15,7 +15,7 @@
 
     let { data } = $props();
     let user = $derived(data.user);
-    let conversations = $state<Conversation[]>([]);
+    let conversations = $state<Conversation[]>(untrack(() => (data.conversations as Conversation[]) || []));
     let currentConversationId = $state<string | null>(null);
     let messages: Message[] = $state([]);
     let currentPrompt = $state('');
@@ -82,8 +82,6 @@
                 const data = await res.json();
 
                 if (data.type === 'clarification') {
-                    // Remove the user message we just added and show clarification instead
-                    messages = messages.slice(0, -1);
                     messages = [...messages, {
                         role: 'assistant',
                         content: `I need a bit more context to help you better:\n\n${data.questions.map((q: string, i: number) => `${i + 1}. ${q}`).join('\n')}\n\nCould you provide more details?`
