@@ -37,6 +37,9 @@
 		"typescript": "^6.0.2",
 		"vite": "^8.0.7"
 	},
+	"optionalDependencies": {
+		"@sqliteai/sqlite-vector-linux-x64": "^0.9.95"
+	},
 	"dependencies": {
 		"@google/generative-ai": "^0.24.1",
 		"@sqliteai/sqlite-vector": "^0.9.95",
