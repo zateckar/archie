@@ -5,14 +5,59 @@ import { getEmbedding, rerank, semanticChunk } from './gemini';
 
 export async function addDocument(filename: string, content: string, metadata: { repoId?: number, path?: string } = {}) {
     const context = `doc_${Date.now()}`;
-
-    // Store original document - wrap in BEGIN IMMEDIATE to prevent concurrent modifications
     const contentHash = crypto.createHash('sha256').update(content).digest('hex');
 
-    // Begin transaction to ensure atomicity
-    db.prepare('BEGIN IMMEDIATE').run();
+    // ── Phase 1: async AI work (no transaction held) ──────────────────────────
+    // All expensive async operations (LLM calls, embeddings) run here so that
+    // a SQLite transaction is never held open while awaiting network I/O.
+    // This prevents "cannot start a transaction within a transaction" when the
+    // auto-sync timer fires a second time before the first document finishes.
 
-    try {
+    // Semantic Chunking using LLM, fallback to regex.
+    // We require the LLM result to cover at least 80% of the source character
+    // count. The previous implementation accepted *any* non-empty array, which
+    // led to documents being silently truncated to 7-50% coverage when the LLM
+    // hit output token limits or returned partial JSON.
+    let chunks: string[] = [];
+    const COVERAGE_THRESHOLD = 0.8;
+    if (content.length < 50000) {
+        const semantic = await semanticChunk(content);
+        const coveredChars = semantic.reduce((n: number, c: string) => n + (c?.length ?? 0), 0);
+        if (semantic.length > 0 && coveredChars >= content.length * COVERAGE_THRESHOLD) {
+            chunks = semantic;
+        } else if (semantic.length > 0) {
+            console.warn(
+                `Semantic chunking covered only ${Math.round(
+                    (100 * coveredChars) / content.length
+                )}% of "${filename}" (${semantic.length} chunks); falling back to markdown-aware chunker.`
+            );
+        }
+    }
+    if (!chunks || chunks.length === 0) {
+        chunks = chunkText(content, 1500, 200);
+    }
+
+    // Enrich chunks with metadata for better embedding context
+    const chunksWithMetadata = chunks.map(chunk => `Document: ${metadata.path || filename}\n\n${chunk}`);
+
+    // Fetch all embeddings before opening any transaction
+    const embeddings: number[][] = [];
+    for (let i = 0; i < chunks.length; i++) {
+        const embedding = await getEmbedding(chunksWithMetadata[i], "RETRIEVAL_DOCUMENT", filename);
+        embeddings.push(embedding);
+    }
+
+    // Ensure vector index is initialised before the transaction
+    if (embeddings.length > 0) {
+        try {
+            db.prepare("SELECT vector_init('chunks', 'embedding', ?)").get(`dimension=${embeddings[0].length},distance=cosine`);
+        } catch (e) {
+            // Already initialised
+        }
+    }
+
+    // ── Phase 2: fast synchronous DB writes (transaction is brief) ────────────
+    const docId = db.transaction(() => {
         // Explicitly delete to avoid unique constraint issues with partial indexes
         if (metadata.repoId && metadata.path) {
             db.prepare('DELETE FROM documents WHERE repo_id = ? AND path = ?').run(metadata.repoId, metadata.path);
@@ -26,68 +71,20 @@ export async function addDocument(filename: string, content: string, metadata: {
             metadata.path || null,
             contentHash
         );
-        const docId = result.lastInsertRowid;
-
-        // Semantic Chunking using LLM, fallback to regex.
-        // We require the LLM result to cover at least 80% of the source character
-        // count. The previous implementation accepted *any* non-empty array, which
-        // led to documents being silently truncated to 7-50% coverage when the LLM
-        // hit output token limits or returned partial JSON.
-        let chunks: string[] = [];
-        const COVERAGE_THRESHOLD = 0.8;
-        if (content.length < 50000) {
-            const semantic = await semanticChunk(content);
-            const coveredChars = semantic.reduce((n: number, c: string) => n + (c?.length ?? 0), 0);
-            if (semantic.length > 0 && coveredChars >= content.length * COVERAGE_THRESHOLD) {
-                chunks = semantic;
-            } else if (semantic.length > 0) {
-                console.warn(
-                    `Semantic chunking covered only ${Math.round(
-                        (100 * coveredChars) / content.length
-                    )}% of "${filename}" (${semantic.length} chunks); falling back to markdown-aware chunker.`
-                );
-            }
-        }
-        if (!chunks || chunks.length === 0) {
-            chunks = chunkText(content, 1500, 200);
-        }
-        // Enrich chunks with metadata for better embedding context
-        const chunksWithMetadata = chunks.map(chunk => `Document: ${metadata.path || filename}\n\n${chunk}`);
-
-        // Note: chunks table is created at db init time (db.ts) — no lazy creation needed here.
+        const newDocId = result.lastInsertRowid;
 
         for (let i = 0; i < chunks.length; i++) {
-            const chunk = chunks[i];
-            const chunkWithMetadata = chunksWithMetadata[i];
-            const embedding = await getEmbedding(chunkWithMetadata, "RETRIEVAL_DOCUMENT", filename);
-            const dimension = embedding.length;
-
-            try {
-                db.prepare("SELECT vector_init('chunks', 'embedding', ?)").get(`dimension=${dimension},distance=cosine`);
-            } catch (e) {
-                // Might already be initialized
-            }
-
             db.prepare('INSERT INTO chunks (doc_id, content, embedding) VALUES (?, ?, vector_as_f32(?))')
-                .run(docId, chunk, JSON.stringify(embedding));
+                .run(newDocId, chunks[i], JSON.stringify(embeddings[i]));
         }
 
-        // Process knowledge graph synchronously within transaction
-        await processDocumentKnowledge(Number(docId), chunks);
+        return newDocId;
+    })();
 
-        // Commit transaction
-        db.prepare('COMMIT').run();
+    // ── Phase 3: async knowledge processing (outside any transaction) ─────────
+    await processDocumentKnowledge(Number(docId), chunks);
 
-        return docId;
-    } catch (err) {
-        // Rollback on error
-        try {
-            db.prepare('ROLLBACK').run();
-        } catch (rollbackErr) {
-            console.error('Rollback failed:', rollbackErr);
-        }
-        throw err;
-    }
+    return docId;
 }
 
 async function ensureVectorInit() {

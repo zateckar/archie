@@ -1,20 +1,38 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+
+// Path inside the data volume where the auto-generated key is persisted
+const KEY_FILE = path.join(process.cwd(), 'data', '.encryption_key');
 
 /**
- * Derives an AES-256-GCM encryption key from an ENCRYPTION_KEY env var.
- * If not set, generates one on first run (warns in dev, exits in prod).
+ * Resolves the AES-256-GCM encryption key with the following priority:
+ *  1. ENCRYPTION_KEY env var (explicit override)
+ *  2. Persisted key file in data/ volume (auto-generated on first run)
+ *  3. Generate a new random key, save it to data/, and use it
+ *
+ * The key file lives inside the mounted data volume so it survives restarts.
  */
 function getEncryptionKey(): Buffer {
     let key = process.env.ENCRYPTION_KEY;
+
     if (!key) {
-        if (process.env.NODE_ENV === 'production') {
-            console.error('[FATAL] ENCRYPTION_KEY must be set in production for PAT encryption.');
-            process.exit(1);
+        // Try reading a previously generated key from the data volume
+        if (fs.existsSync(KEY_FILE)) {
+            key = fs.readFileSync(KEY_FILE, 'utf8').trim();
+        } else {
+            // First run: generate a secure random key and persist it
+            key = crypto.randomBytes(32).toString('hex');
+            try {
+                fs.mkdirSync(path.dirname(KEY_FILE), { recursive: true });
+                fs.writeFileSync(KEY_FILE, key, { mode: 0o600 });
+                console.log(`[INFO] Generated new ENCRYPTION_KEY and saved to ${KEY_FILE}`);
+            } catch (err) {
+                console.error('[ERROR] Could not persist ENCRYPTION_KEY to data directory:', err);
+            }
         }
-        // Dev fallback: derive from a known value so existing PATs remain decryptable
-        key = 'dev-only-not-secure-change-in-production-!!';
-        console.warn('[WARN] ENCRYPTION_KEY not set — using insecure dev fallback for PAT encryption.');
     }
+
     // Use SHA-256 to normalize any key length to exactly 32 bytes (AES-256)
     return crypto.createHash('sha256').update(key).digest();
 }
