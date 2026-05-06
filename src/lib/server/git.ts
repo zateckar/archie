@@ -16,23 +16,37 @@ if (!fs.existsSync(REPOS_DIR)) {
 
 let autoSyncInterval: NodeJS.Timeout;
 
+// Tracks repos currently being synced so the timer never starts a second
+// concurrent sync for the same repo (which would also cause the "last_sync_at
+// not yet updated" false-positive that triggers every-minute re-syncing).
+const syncingRepos = new Set<number>();
+
 export function initAutoSync() {
     if (autoSyncInterval) clearInterval(autoSyncInterval);
     
     // Check every minute for repos that need syncing
-    autoSyncInterval = setInterval(async () => {
-        const now = new Date().getTime();
+    autoSyncInterval = setInterval(() => {
+        const now = Date.now();
         const repos = db.prepare('SELECT id, sync_interval, last_sync_at FROM git_repos').all() as any[];
         
         for (const repo of repos) {
-            const lastSync = repo.last_sync_at ? new Date(repo.last_sync_at).getTime() : 0;
+            if (syncingRepos.has(repo.id)) continue; // already in progress
+
+            // CURRENT_TIMESTAMP in SQLite is "YYYY-MM-DD HH:MM:SS" (UTC, space-separated).
+            // Parsing it with plain `new Date()` treats it as local time in V8, which
+            // causes the elapsed-time check to be off by the host's UTC offset.
+            // Appending 'Z' forces correct UTC interpretation.
+            const lastSyncStr = repo.last_sync_at
+                ? repo.last_sync_at.replace(' ', 'T') + 'Z'
+                : null;
+            const lastSync = lastSyncStr ? new Date(lastSyncStr).getTime() : 0;
+
             if (now - lastSync >= repo.sync_interval) {
+                syncingRepos.add(repo.id);
                 console.log(`Auto-syncing repo ${repo.id}...`);
-                try {
-                    await syncGitRepo(repo.id);
-                } catch (err) {
-                    console.error(`Failed to auto-sync repo ${repo.id}:`, err);
-                }
+                syncGitRepo(repo.id)
+                    .catch(err => console.error(`Failed to auto-sync repo ${repo.id}:`, err))
+                    .finally(() => syncingRepos.delete(repo.id));
             }
         }
     }, 60000); // Check every minute
