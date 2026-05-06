@@ -1,0 +1,31 @@
+services:
+  chatbot:
+    image: ghcr.io/zateckar/archie:latest
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_PATH=/app/data/rag.db
+      - NODE_ENV=production
+      - PORT=3000
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - TEXT_MODEL=${TEXT_MODEL}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - RERANK_MODEL=${RERANK_MODEL}
+      - CHUNK_MODEL=${CHUNK_MODEL}
+    volumes:
+      - ./data:/app/data
+    restart: always
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r => r.json()).then(d => process.exit(d.status === 'ok' ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'

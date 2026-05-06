@@ -1,0 +1,45 @@
+node_modules
+
+# Output
+.output
+.vercel
+.netlify
+.wrangler
+/.svelte-kit
+/build
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Data (git repo clones, etc.)
+data/repos/
+data/*.db
+
+# E2E auth state (contains session cookies / tokens)
+e2e/.auth/
+
+# Logs
+*.log
+logs/
+
+# Extensions (downloaded .dll/.so files)
+extensions/
+docs/*
+e2e/*

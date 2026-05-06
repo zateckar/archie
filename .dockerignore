@@ -1,0 +1,14 @@
+node_modules
+data/
+e2e/.auth/
+.env
+.env.*
+*.db
+*.log
+logs/
+.git
+.gitignore
+.dockerignore
+README.md
+.vscode
+extensions/

@@ -1,0 +1,53 @@
+{
+	"name": "chatbot-sqlite",
+	"private": true,
+	"version": "0.0.1",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"test": "playwright test",
+		"test:ui": "playwright test --ui",
+		"test:headed": "playwright test --headed",
+		"test:report": "playwright show-report",
+		"test:auth": "playwright test e2e/01-auth.spec.ts",
+		"test:chat": "playwright test e2e/02-chat.spec.ts",
+		"test:knowledge": "playwright test e2e/03-knowledge.spec.ts",
+		"test:admin": "playwright test e2e/04-admin-dashboard.spec.ts e2e/05-admin-repos.spec.ts e2e/06-admin-documents.spec.ts e2e/07-admin-users.spec.ts",
+		"test:repos": "playwright test e2e/05-admin-repos.spec.ts",
+		"test:debug": "playwright test --debug"
+	},
+	"devDependencies": {
+		"@playwright/test": "^1.59.1",
+		"@sveltejs/adapter-auto": "^7.0.1",
+		"@sveltejs/adapter-node": "^5.5.4",
+		"@sveltejs/kit": "^2.57.0",
+		"@sveltejs/vite-plugin-svelte": "^7.0.0",
+		"@tailwindcss/vite": "^4.2.2",
+		"@types/better-sqlite3": "^7.6.13",
+		"@types/node": "^25.6.0",
+		"svelte": "^5.55.2",
+		"svelte-check": "^4.4.6",
+		"tailwindcss": "^4.2.2",
+		"tsx": "^4.21.0",
+		"typescript": "^6.0.2",
+		"vite": "^8.0.7"
+	},
+	"dependencies": {
+		"@google/generative-ai": "^0.24.1",
+		"@sqliteai/sqlite-vector": "^0.9.95",
+		"@types/marked": "^5.0.2",
+		"better-sqlite3": "^12.9.0",
+		"clsx": "^2.1.1",
+		"dotenv": "^17.4.2",
+		"isomorphic-git": "^1.37.6",
+		"lucide-svelte": "^1.0.1",
+		"marked": "^18.0.2",
+		"pdf-parse": "^2.4.5",
+		"tailwind-merge": "^3.5.0"
+	}
+}
