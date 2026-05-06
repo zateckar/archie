@@ -1,22 +1,32 @@
 import 'dotenv/config';
 
 import Database from 'better-sqlite3';
-import { platform } from 'os';
+import { platform, arch } from 'os';
 import { join } from 'path';
 import fs from 'fs';
 
-// Path to extensions
 const isWindows = platform() === 'win32';
-const ext = isWindows ? '.dll' : '.so';
 
-// For vector extension, we try to find it in node_modules based on platform
+// For vector extension, find the correct platform-specific binary.
+// @sqliteai/sqlite-vector installs the right arch package as an optionalDependency.
 let VECTOR_EXTENSION_PATH = '';
 if (isWindows) {
     VECTOR_EXTENSION_PATH = join(process.cwd(), 'node_modules/@sqliteai/sqlite-vector-win32-x86_64/vector.dll');
 } else {
-    const linuxPath = join(process.cwd(), 'node_modules/@sqliteai/sqlite-vector-linux-x64/vector.so');
-    const genericPath = join(process.cwd(), 'node_modules/@sqliteai/sqlite-vector/vector.so');
-    VECTOR_EXTENSION_PATH = fs.existsSync(linuxPath) ? linuxPath : genericPath;
+    const cpuArch = arch(); // 'x64', 'arm64', etc.
+    const candidates: string[] = [];
+    if (cpuArch === 'x64') {
+        candidates.push(
+            join(process.cwd(), 'node_modules/@sqliteai/sqlite-vector-linux-x86_64/vector.so'),
+            join(process.cwd(), 'node_modules/@sqliteai/sqlite-vector-linux-x86_64-musl/vector.so'),
+        );
+    } else if (cpuArch === 'arm64') {
+        candidates.push(
+            join(process.cwd(), 'node_modules/@sqliteai/sqlite-vector-linux-arm64/vector.so'),
+            join(process.cwd(), 'node_modules/@sqliteai/sqlite-vector-linux-arm64-musl/vector.so'),
+        );
+    }
+    VECTOR_EXTENSION_PATH = candidates.find(p => fs.existsSync(p)) ?? '';
 }
 
 // Note: sqlite-memory extension is no longer used as we handle chunking and storage manually in TypeScript.
