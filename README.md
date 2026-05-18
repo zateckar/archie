@@ -6,8 +6,10 @@ Archie is a sophisticated Retrieval-Augmented Generation (RAG) chatbot built wit
 
 - **Document Management:** Sync documents from Git repositories or upload them manually.
 - **Advanced RAG Pipeline:** Uses hybrid search (Vector + Keyword) with LLM-based reranking.
+- **Document Preprocessing:** LLM-powered cleaning removes boilerplate, fixes formatting, and restructures content before ingestion.
 - **Semantic Knowledge Layer:** Automatically extracts a knowledge graph (topics, relationships, claims) from documents.
 - **LLM-Driven Topic Taxonomy:** Hybrid taxonomy system — incremental placement after each import + full LLM-powered hierarchy rebuild on demand or after git sync.
+- **Community Detection:** Unsupervised graph clustering (Louvain) groups related topics into functional domains for exploration and visualization.
 - **Consistency Checking:** Detects conflicts and updates in factual claims across your knowledge base.
 - **Conflict Resolution UI:** Admin interface with side-by-side comparison of active vs. conflicting claims, with accept/dismiss/reject actions.
 - **Knowledge Graph Visualization:** Interactive force-directed graph in the admin dashboard with pan, zoom, node selection, and relationship exploration.
@@ -15,6 +17,7 @@ Archie is a sophisticated Retrieval-Augmented Generation (RAG) chatbot built wit
 - **Relationship Validation Logging:** Out-of-vocabulary relationship types are tracked and summarized, helping expand the synonym dictionary over time.
 - **Semantic Chunking:** Uses LLM to split documents into meaningful sections rather than arbitrary fixed sizes.
 - **Real-time Chat:** Conversational interface with streaming responses and source citations.
+- **Rich Markdown Responses:** Chat responses are automatically formatted with headers, tables, code blocks, lists, and relationship arrows for maximum readability.
 - **Sleek UI:** Modern dark theme with a terminal-inspired aesthetic.
 - **Admin Dashboard:** Manage users, repositories, documents, and the knowledge graph through a protected administrative interface.
   - **Knowledge Graph Visualization:** Interactive force-directed canvas graph with category-colored nodes, directed edges, zoom/pan, and node detail panels.
@@ -27,14 +30,104 @@ Archie is a sophisticated Retrieval-Augmented Generation (RAG) chatbot built wit
 
 ### 1. Document Processing & Ingestion
 
-The ingestion pipeline is designed to transform raw text into searchable, structured data.
+The ingestion pipeline transforms raw text into searchable, structured knowledge through four distinct phases:
 
-*   **Git Sync:** The system can monitor Git repositories for changes. It uses commit hashes and SHA-256 content hashes to detect new, modified, or deleted files, ensuring the knowledge base stays in sync with your source of truth. Personal Access Tokens (PATs) are encrypted at rest using AES-256-GCM.
-*   **Chunking Strategy:**
-    *   **Semantic Chunking:** For documents under 50k characters, Archie uses Gemini to identify logical boundaries and split the text into semantically coherent sections.
-    *   **Markdown-Aware Fallback:** For larger documents, it falls back to a regex-based approach that respects Markdown headers, paragraphs, and sentences, with configurable overlap.
-*   **Vectorization:** Each chunk is embedded using Gemini's embedding model. These embeddings are stored in a SQLite database using the `sqlite-vector` extension for efficient similarity search.
-*   **Full-Text Search (FTS5):** In addition to vectors, chunks are indexed using SQLite's FTS5 for high-precision keyword matching.
+```
+Raw Document
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 0: Cleaning & Summarization  (LLM-powered preprocessing)  │
+│  ─────────────────────────────────────────────────────────────── │
+│  • Remove boilerplate, nav elements, page numbers, metadata      │
+│  • Strip TODOs, empty sections, template instructions            │
+│  • Restructure into logical markdown sections with proper headers│
+│  • Preserve ALL substantive content (no condensation)            │
+│  • Translate non-English content to English                      │
+│  • Safety guard: if >90% would be removed, keep original         │
+│  • Large documents split by headers/paragraphs (80K char chunks) │
+│  • Save cleaned version to Clean/ folder in repo                 │
+│  • Generate comprehensive document summary for context           │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 1: Async AI Work  (no SQLite transaction held)            │
+│  ─────────────────────────────────────────────────────────────── │
+│  • Semantic chunking via LLM (under 50K chars)                   │
+│  • Fallback: markdown-aware regex chunker (1500 char windows)    │
+│  • 200-char overlap between chunks for context preservation      │
+│  • Generate vector embeddings for each chunk                     │
+│  • All LLM calls & network I/O occur here — transactions never   │
+│    held open during async operations (prevents nested transaction │
+│    conflicts when auto-sync timer fires during ingestion)         │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 2: Fast Synchronous DB Writes  (brief transaction)        │
+│  ─────────────────────────────────────────────────────────────── │
+│  • Store document metadata (filename, path, content hash)        │
+│  • Persist chunks with vector embeddings                         │
+│  • FTS5 index auto-populated via SQLite triggers                 │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 3: Knowledge Extraction  (async, no transaction)          │
+│  ─────────────────────────────────────────────────────────────── │
+│  • LLM extracts topics, relationships & claims per chunk         │
+│  • Topic name normalization & deduplication                      │
+│  • Relationship validation against canonical vocabulary          │
+│  • Batch consistency checking for claims                         │
+│  • Incremental taxonomy placement for new topics                 │
+│  • Per-chunk safety checks: if document was deleted mid-pipeline,│
+│    processing aborts gracefully (prevents FK constraint errors)  │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 4: Community Detection  (full graph recompute)            │
+│  ─────────────────────────────────────────────────────────────── │
+│  • Run graph diagnostics to select best clustering strategy      │
+│  • Louvain algorithm on relationship graph (if dense enough)     │
+│  • Fallback: k-NN similarity graph on topic embeddings           │
+│  • Assign community_id per topic, noise topics labeled as NULL   │
+│  • Full recompute only — no incremental heuristics               │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+                    Structured Knowledge Base
+    ┌───────────────┬───────────────┬───────────────┬──────────────┐
+    │  Chunks with  │  Knowledge    │  Topic        │  Community   │
+    │  embeddings   │  Graph        │  Taxonomy     │  Clusters    │
+    │  & FTS5 index │  (topics,     │  (parent-     │  (graph-     │
+    │               │   relations,  │   child       │   derived    │
+    │               │   claims)     │   hierarchy)  │   domains)   │
+    └───────────────┴───────────────┴───────────────┴──────────────┘
+```
+
+#### Phase 0: Document Cleaning & Summarization
+
+Before any chunking or extraction, Archie preprocesses every document using Gemini (the `cleanDocument` function in `gemini.ts`). This step transforms raw, noisy documents — which may contain boilerplate headers/footers, auto-generated metadata, page numbers, table-of-contents artifacts, broken formatting, template instructions, or garbled Unicode — into clean, well-structured markdown.
+
+The LLM receives a seven-point cleaning instruction:
+
+1. **Remove noise** — strip headers/footers, navigation elements, page numbers, repetitive disclaimers, auto-generated metadata, ToC entries, formatting artifacts.
+2. **Remove valueless content** — strip empty sections, placeholder text, TODO markers, template instructions, content with no informational value.
+3. **Restructure for clarity** — organize into logical sections with clear markdown headers (`##`, `###`), group related information, ensure coherent flow from general to specific.
+4. **Improve formatting** — proper markdown throughout (lists, tables, bold for key terms), fix broken line breaks, normalize whitespace.
+5. **Enhance readability** — clear topic sentences, logical paragraph flow, break up walls of text.
+6. **Preserve ALL substantive content** — every meaningful fact, procedure, requirement, and technical detail must be kept intact. No condensation or summarization.
+7. **Standardize to English** — if the document is in any language other than English, translate all content to English while preserving original meaning, terminology, and technical accuracy.
+
+**Safety guard:** If the cleaning process would remove more than 90% of the original content (indicating an LLM error or hallucination), Archie falls back to the original raw document. Large documents (>80K chars) are split by markdown headers or paragraphs and cleaned piecewise, then reassembled.
+
+**Clean folder:** After cleaning, the polished version is saved to a `Clean/` subfolder within the source repository (for git-synced documents) or locally on disk (for manually uploaded documents). This preserves the original alongside the cleaned version. The cleaned documents in `Clean/` are automatically staged and committed to git when syncing repositories.
+
+After cleaning, a **document summary** is generated (200-500 words) that captures the document's purpose, major themes, key entities, and relationships. This summary is used to provide context during knowledge extraction, improving the quality of extracted topics and claims.
+
+---
 
 ### 2. Semantic Layer (Knowledge Graph)
 
@@ -59,7 +152,96 @@ Archie automatically organizes topics into a meaningful hierarchy using a two-ph
 *   **Full Rebuild:** A comprehensive taxonomy review can be triggered from the admin UI ("Rebuild Taxonomy" button) or runs automatically after each git repo sync.
 *   **Design Principles:** Shallow hierarchies (2-3 levels, max 4), stability, and safety (circular dependencies are detected and broken).
 
-### 4. Chatbot & RAG Pipeline
+### 4. Community Detection (Graph Clustering)
+
+Alongside the LLM-driven taxonomy (a top-down hierarchical organization), Archie performs **unsupervised community detection** on the topic relationship graph to discover latent functional groupings. While the taxonomy answers "what category does this belong to?", communities answer "what topics are structurally connected in the graph?"
+
+#### Dual Strategy: Relationship Graph vs. Embedding Similarity
+
+Archie uses two complementary approaches, selected automatically based on graph density:
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  Strategy Selection (getGraphStats → recomputeCommunities)      │
+│  ─────────────────────────────────────────────────────────────  │
+│                                                                │
+│  Run graph diagnostics:                                        │
+│  • Node count, edge count, average degree                      │
+│  • Connected components (BFS)                                  │
+│  • Isolated node ratio                                         │
+│                                                                │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  avgDegree > 3  AND  largestComponent > 60%  AND         │   │
+│  │  isolated < 20%                                          │   │
+│  │                                                          │   │
+│  │  YES ──► Method 1: Louvain on relationship graph         │   │
+│  │  NO  ──► Method 2: k-NN graph on embedding similarities  │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                │
+│  Both methods feed into the same Louvain engine.               │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Method 1: Louvain on the Relationship Graph (default when graph is dense)**
+
+When topics have sufficient relational connections (average degree > 3, at least 60% of nodes in a single connected component, fewer than 20% isolated), Archie builds a weighted undirected graph from the `topic_relationships` table:
+
+| Relationship Type | Edge Weight | Semantic Strength |
+|-------------------|-------------|-------------------|
+| `is_part_of` | 1.0 | Structural composition |
+| `is_a` | 1.0 | Taxonomic classification |
+| `governs`, `enforces`, `constrains` | 0.8 | Regulatory/control relationships |
+| `depends_on`, `manages`, `defines`, `implements` | 0.7 | Operational dependencies |
+| `complies_with`, `includes` | 0.6 | Compliance/inclusion |
+| `supports`, `enables` | 0.5 | Auxiliary support |
+| `uses` | 0.4 | Usage relationships |
+| `references` | 0.3 | Weak referential links |
+
+**Method 2: Embedding-Based Clustering (fallback for sparse graphs)**
+
+When the relationship graph is too sparse for meaningful community detection, Archie falls back to building a k-nearest-neighbor graph from topic embeddings:
+
+1. For each topic with a vector embedding (stored via `sqlite-vector`), compute cosine similarity against all other topics.
+2. For each topic, find its top-k neighbors (k = min(10, √n)) with similarity ≥ 0.4.
+3. Build a weighted graph from these similarity edges.
+4. Run Louvain on this similarity graph.
+5. Singleton clusters (size < 2) are labeled as noise (`community_id = NULL`).
+
+This approach works for **every topic with an embedding**, including completely isolated topics. The clustering becomes a proxy for semantic relatedness when structural graph connectivity is insufficient.
+
+#### The Louvain Algorithm
+
+Archie implements Louvain community detection from scratch (no external library dependency) in `src/lib/server/communities.ts`:
+
+*   **Phase 1 (Local Optimization):** Each node starts in its own community. Nodes are iterated in seeded-random order and moved to the neighboring community that maximizes modularity gain. This repeats until no improvement is possible (max 20 iterations, typically converges in 3-5).
+*   **Phase 2 (Aggregation):** Communities are collapsed into super-nodes. For Archie's scale (hundreds to low-thousands of nodes), a single pass is sufficient — Phase 2 aggregation is skipped as an optimization.
+*   **Seeded PRNG:** A linear congruential generator with a fixed seed (42) ensures deterministic results across runs.
+*   **Full recompute only:** No incremental heuristic — after every ingestion batch, the full graph is recomputed. At Archie's scale this completes in under 100ms.
+
+#### How Communities Relate to the Existing Taxonomy
+
+| Dimension | Taxonomy (`parent_topic_id`) | Communities (`community_id`) |
+|-----------|------------------------------|------------------------------|
+| **Source** | LLM-generated (top-down) | Graph-algorithm (bottom-up) |
+| **Structure** | Tree (parent-child) | Clusters (many-to-many) |
+| **Granularity** | Coarse categories | Functional domains |
+| **Human-readable** | Yes (category names) | No (numeric IDs, needs labeling) |
+| **Deterministic** | No (LLM-dependent) | Yes (same graph = same communities) |
+| **Update cost** | Incremental per document | Full recompute per batch |
+
+The two are complementary. A topic like "IT-PEP" might have a taxonomy category of "Methodology" but belong to a community of related process/governance topics — revealing functional groupings that aren't captured by high-level categories.
+
+#### What Communities Are NOT Used For
+
+- **RAG ranking:** Communities do not boost or filter search results. The most valuable queries (those crossing domains, e.g., "How does authentication comply with data governance?") intentionally span communities, and community-based boosting would be counterproductive.
+- **Replacing categories:** Categories remain the primary semantic label for UX coloring, filtering, and embedding context.
+
+Communities are used exclusively for **exploration and visualization**:
+- Community-aware graph coloring (toggleable alongside category coloring)
+- "Explore this domain" feature showing all topics in a community
+- Knowledge gap detection: isolated communities with no cross-community edges indicate missing connections
+
+### 5. Chatbot & RAG Pipeline
 
 The chat interface provides a natural way to interact with the knowledge base.
 

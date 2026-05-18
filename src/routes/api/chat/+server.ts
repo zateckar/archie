@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { searchChunks, buildKnowledgeContext } from '$lib/server/rag';
-import { chatStream, condenseQuery, analyzeQuery, assessRelevance } from '$lib/server/gemini';
+import { chatStream, condenseQuery, analyzeQuery, evaluateContext } from '$lib/server/gemini';
 import { db } from '$lib/server/db';
 
 export async function POST({ request, locals }) {
@@ -27,18 +27,51 @@ export async function POST({ request, locals }) {
         }
     }
 
-    // Step 2: Build knowledge-first context from knowledge graph
+    // Step 2: Condense query with conversation history
     const searchPrompt = await condenseQuery(history, prompt);
-    const knowledgeContext = await buildKnowledgeContext(searchPrompt, 5, 15);
 
-    // Step 3: Optionally fetch a few chunks for verbatim quotes as supplementary context
-    const relevantChunks = await searchChunks(searchPrompt, 3); // Reduced to top 3 for quotes only
+    // Step 3: Multi-pass context gathering
+    // Pass 1: Primary search — knowledge graph + verbatim chunks in parallel
+    const [knowledgeContext, relevantChunks] = await Promise.all([
+        buildKnowledgeContext(searchPrompt, 5, 15),
+        searchChunks(searchPrompt, 3)
+    ]);
 
-    // Build combined context: knowledge graph primary, chunks supplementary
     let context = knowledgeContext;
     if (relevantChunks.length > 0) {
         const chunkContext = relevantChunks.map(c => `[${c.path || c.filename}]\n${c.content}`).join('\n\n');
         context += `\n\n---\n\nVERBATIM EXCERPTS (for direct quotes if needed):\n\n${chunkContext}`;
+    }
+
+    // Pass 2: Evaluate context quality — if insufficient, refine and search again
+    const evaluation = await evaluateContext(searchPrompt, context);
+
+    if (!evaluation.sufficient && evaluation.refinedQueries.length > 0) {
+        console.log(`[MultiPassRAG] Context insufficient for "${searchPrompt.slice(0, 60)}". Missing: ${evaluation.missingAspects.join(', ')}. Refining with: ${evaluation.refinedQueries.join(', ')}`);
+
+        const additionalContexts = await Promise.all(
+            evaluation.refinedQueries.slice(0, 2).map(async (refinedQuery) => {
+                const [addlKnowledge, addlChunks] = await Promise.all([
+                    buildKnowledgeContext(refinedQuery, 3, 10),
+                    searchChunks(refinedQuery, 2)
+                ]);
+                let addlContext = '';
+                if (addlKnowledge && !addlKnowledge.includes('No relevant knowledge found')) {
+                    addlContext += addlKnowledge;
+                }
+                if (addlChunks.length > 0) {
+                    addlContext += '\n' + addlChunks.map(c => `[${c.path || c.filename}]\n${c.content}`).join('\n\n');
+                    // Merge additional chunks into relevantChunks for source display
+                    relevantChunks.push(...addlChunks);
+                }
+                return addlContext;
+            })
+        );
+
+        const additionalContext = additionalContexts.filter(c => c.trim()).join('\n\n---\n\n');
+        if (additionalContext) {
+            context += `\n\n---\n\nADDITIONAL CONTEXT (from refined searches for: ${evaluation.missingAspects.join(', ')}):\n\n${additionalContext}`;
+        }
     }
 
     // Save user prompt to history

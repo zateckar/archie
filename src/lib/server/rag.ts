@@ -1,11 +1,19 @@
 import { db } from './db';
 import { processDocumentKnowledge } from './knowledge';
+import { recomputeCommunities } from './communities';
 import crypto from 'crypto';
-import { getEmbedding, rerank, semanticChunk } from './gemini';
+import { getEmbedding, rerank, semanticChunk, cleanDocument, summarizeDocument } from './gemini';
 
 export async function addDocument(filename: string, content: string, metadata: { repoId?: number, path?: string } = {}) {
-    const context = `doc_${Date.now()}`;
     const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+
+    // ── Phase 0: Document preprocessing ──────────────────────────────────────
+    // Clean the document to remove noise, then generate a comprehensive summary.
+    // Cleaning removes boilerplate, formatting artifacts, and valueless content.
+    // The summary captures the document's overall meaning and aids knowledge extraction.
+    const cleanedContent = await cleanDocument(content);
+    const summary = await summarizeDocument(cleanedContent, filename);
+    console.log(`[DocPreprocess] "${filename}": cleaned ${content.length} → ${cleanedContent.length} chars, summary: ${summary.length} chars`);
 
     // ── Phase 1: async AI work (no transaction held) ──────────────────────────
     // All expensive async operations (LLM calls, embeddings) run here so that
@@ -20,23 +28,22 @@ export async function addDocument(filename: string, content: string, metadata: {
     // hit output token limits or returned partial JSON.
     let chunks: string[] = [];
     const COVERAGE_THRESHOLD = 0.8;
-    if (content.length < 50000) {
-        const semantic = await semanticChunk(content);
+    if (cleanedContent.length < 50000) {
+        const semantic = await semanticChunk(cleanedContent);
         const coveredChars = semantic.reduce((n: number, c: string) => n + (c?.length ?? 0), 0);
-        if (semantic.length > 0 && coveredChars >= content.length * COVERAGE_THRESHOLD) {
+        if (semantic.length > 0 && coveredChars >= cleanedContent.length * COVERAGE_THRESHOLD) {
             chunks = semantic;
         } else if (semantic.length > 0) {
             console.warn(
                 `Semantic chunking covered only ${Math.round(
-                    (100 * coveredChars) / content.length
+                    (100 * coveredChars) / cleanedContent.length
                 )}% of "${filename}" (${semantic.length} chunks); falling back to markdown-aware chunker.`
             );
         }
     }
     if (!chunks || chunks.length === 0) {
-        chunks = chunkText(content, 1500, 200);
+        chunks = chunkText(cleanedContent, 1500, 200);
     }
-
     // Enrich chunks with metadata for better embedding context
     const chunksWithMetadata = chunks.map(chunk => `Document: ${metadata.path || filename}\n\n${chunk}`);
 
@@ -63,10 +70,11 @@ export async function addDocument(filename: string, content: string, metadata: {
             db.prepare('DELETE FROM documents WHERE repo_id = ? AND path = ?').run(metadata.repoId, metadata.path);
         }
 
-        const result = db.prepare('INSERT INTO documents (filename, content, context, repo_id, path, content_hash) VALUES (?, ?, ?, ?, ?, ?)').run(
+        const result = db.prepare('INSERT INTO documents (filename, content, context, summary, repo_id, path, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
             filename,
             content,
-            context,
+            `doc_${Date.now()}`,
+            summary,
             metadata.repoId || null,
             metadata.path || null,
             contentHash
@@ -82,9 +90,18 @@ export async function addDocument(filename: string, content: string, metadata: {
     })();
 
     // ── Phase 3: async knowledge processing (outside any transaction) ─────────
-    await processDocumentKnowledge(Number(docId), chunks);
+    await processDocumentKnowledge(Number(docId), chunks, summary);
 
-    return docId;
+    // ── Phase 4: Community detection (outside any transaction) ─────────────────
+    // Recompute communities after knowledge extraction. Full recompute is fast
+    // (<100ms for <5000 nodes) so no incremental heuristic is needed.
+    try {
+        await recomputeCommunities();
+    } catch (err) {
+        console.error('[CommunityDetection] Recompute failed:', err);
+    }
+
+    return { docId, cleanedContent };
 }
 
 async function ensureVectorInit() {
@@ -267,8 +284,8 @@ export async function reprocessKnowledge(
     }
 
     const docs = options.docId
-        ? (db.prepare('SELECT id, filename, content FROM documents WHERE id = ?').all(options.docId) as { id: number; filename: string; content: string }[])
-        : (db.prepare('SELECT id, filename, content FROM documents ORDER BY id').all() as { id: number; filename: string; content: string }[]);
+        ? (db.prepare('SELECT id, filename, content, summary FROM documents WHERE id = ?').all(options.docId) as { id: number; filename: string; content: string; summary: string | null }[])
+        : (db.prepare('SELECT id, filename, content, summary FROM documents ORDER BY id').all() as { id: number; filename: string; content: string; summary: string | null }[]);
 
     let processed = 0;
     for (const doc of docs) {
@@ -287,7 +304,7 @@ export async function reprocessKnowledge(
             continue;
         }
 
-        await processDocumentKnowledge(doc.id, chunkRows.map((c) => c.content));
+        await processDocumentKnowledge(doc.id, chunkRows.map((c) => c.content), doc.summary ?? undefined);
         processed++;
     }
 
@@ -401,7 +418,7 @@ export async function searchTopics(query: string, limit = 10): Promise<{ id: num
         const results = db.prepare(`
             SELECT t.id, t.name, t.description, t.category,
                    (1 - v.distance) as score
-            FROM vector_full_scan('topics', 'embedding', vector_as_f32(?), ?) v
+            FROM vector_full_scan('topics', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
             JOIN topics t ON t.id = v.rowid
             WHERE t.embedding IS NOT NULL
             ORDER BY v.distance ASC
@@ -439,7 +456,7 @@ export async function searchClaims(
             sql = `
                 SELECT kc.id, kc.claim_text, kc.topic_id, kc.doc_id, t.name as topic_name,
                        (1 - v.distance) as score
-                FROM vector_full_scan('knowledge_claims', 'embedding', vector_as_f32(?), ?) v
+                FROM vector_full_scan('knowledge_claims', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
                 JOIN knowledge_claims kc ON kc.id = v.rowid
                 JOIN topics t ON kc.topic_id = t.id
                 WHERE kc.embedding IS NOT NULL
@@ -452,7 +469,7 @@ export async function searchClaims(
             sql = `
                 SELECT kc.id, kc.claim_text, kc.topic_id, kc.doc_id, t.name as topic_name,
                        (1 - v.distance) as score
-                FROM vector_full_scan('knowledge_claims', 'embedding', vector_as_f32(?), ?) v
+                FROM vector_full_scan('knowledge_claims', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
                 JOIN knowledge_claims kc ON kc.id = v.rowid
                 JOIN topics t ON kc.topic_id = t.id
                 WHERE kc.embedding IS NOT NULL
@@ -499,7 +516,7 @@ export function getRelatedTopics(topicId: number, maxDepth = 2): { id: number; n
                 END as rel_type
             FROM topic_relationships
             WHERE source_topic_id = ? OR target_topic_id = ?
-        `).all(topicId, topicId, topicId, topicId) as { related_id: number; rel_type: string }[];
+        `).all(current.id, current.id, current.id, current.id) as { related_id: number; rel_type: string }[];
 
         for (const rel of relationships) {
             if (visited.has(rel.related_id)) continue;
@@ -553,7 +570,26 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
     const relevantTopics = await searchTopics(query, maxTopics);
 
     if (relevantTopics.length === 0) {
-        return 'No relevant knowledge found for this query.';
+        // Keyword-based fallback: works even when no topic embeddings exist yet
+        const words = query.replace(/[^\w\s]/g, ' ').trim().split(/\s+/).filter(w => w.length > 3);
+        if (words.length > 0) {
+            try {
+                const likeConditions = words.map(() => "(LOWER(name) LIKE ? OR LOWER(COALESCE(description, '')) LIKE ?)").join(' OR ');
+                const likeParams = words.flatMap(w => [`%${w.toLowerCase()}%`, `%${w.toLowerCase()}%`]);
+                const fallbackTopics = db.prepare(
+                    `SELECT id, name, description, category FROM topics WHERE ${likeConditions} LIMIT ?`
+                ).all(...likeParams, maxTopics) as { id: number; name: string; description: string | null; category: string | null }[];
+                for (const t of fallbackTopics) {
+                    relevantTopics.push({ ...t, score: 0.4 });
+                }
+            } catch (e) {
+                console.warn('[KnowledgeContext] Keyword fallback failed:', (e as Error).message);
+            }
+        }
+        if (relevantTopics.length === 0) {
+            console.log(`[KnowledgeContext] No topics found for: "${query.slice(0, 80)}"`);
+            return 'No relevant knowledge found for this query.';
+        }
     }
 
     // Step 2: Expand to related topics (depth 1 only to avoid explosion)
@@ -596,6 +632,8 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
         }
     }
 
+    console.log(`[KnowledgeContext] query="${query.slice(0, 60)}" topics=${relevantTopics.length} claims=${claimMap.size}`);
+
     // Step 6: Build structured context
     const lines: string[] = ['KNOWLEDGE CONTEXT:', ''];
 
@@ -614,8 +652,15 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
 
     for (const [topicId, topic] of sortedTopics) {
         const claims = claimsByTopic.get(topicId);
-        if (!claims || claims.length === 0) continue;
-
+        if (!claims || claims.length === 0) {
+            // Still surface the topic with its description if no claims exist yet
+            if (topic.description) {
+                lines.push(`### ${topic.name}${topic.category ? ` (${topic.category})` : ''}`);
+                lines.push(`*${topic.description}*`);
+                lines.push('');
+            }
+            continue;
+        }
         lines.push(`### ${topic.name}${topic.category ? ` (${topic.category})` : ''}`);
         if (topic.description) {
             lines.push(`*${topic.description}*`);

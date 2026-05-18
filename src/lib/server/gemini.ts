@@ -25,6 +25,146 @@ export async function listModels() {
     return await res.json();
 }
 
+/**
+ * Cleans and restructures a document using LLM.
+ * Removes noise, improves formatting, creates logical structure.
+ * For large documents, splits into chunks and processes each.
+ * Always uses LLM — no regex fallback.
+ */
+export async function cleanDocument(text: string): Promise<string> {
+    // Very short documents don't need cleaning
+    if (text.length < 200) return text;
+
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+
+    const buildPrompt = (chunk: string, isPartial: boolean) => `
+        You are an expert document editor and preprocessor. Transform the following ${isPartial ? 'section of a ' : ''}document into a clean, well-structured, professional version:
+
+        1. **Remove noise**: Strip boilerplate headers/footers, navigation elements, page numbers, repetitive disclaimers, auto-generated metadata, table of contents entries, and formatting artifacts.
+        2. **Remove valueless content**: Remove empty sections, placeholder text, "TODO" markers, template instructions, and content that carries no informational value.
+        3. **Restructure for clarity**: Organize content into logical sections with clear markdown headers (##, ###). Group related information together. Ensure a coherent logical flow from general concepts to specific details.
+        4. **Improve formatting**: Use proper markdown throughout — headers for sections, bullet lists for enumerations, numbered lists for sequential steps/procedures, tables for structured data, bold for key terms and definitions. Fix broken line breaks, garbled unicode, and normalize whitespace.
+        5. **Enhance readability**: Write clear topic sentences for sections. Ensure paragraphs flow logically. Break up walls of text into digestible chunks.
+        6. **Preserve ALL substantive content**: Every meaningful fact, procedure, policy, requirement, technical detail, and piece of knowledge must be preserved. Do NOT omit, summarize, or condense any information.
+        7. **Standardize to English**: If the document is in any language other than English, translate all content to English while preserving the original meaning, terminology, and technical accuracy. If the document is already in English, keep it as-is.
+
+        The output must be a polished, well-organized markdown document written entirely in English with the same informational content but significantly improved structure and readability.
+        ${isPartial ? '\nNote: This is a section of a larger document. Maintain coherent structure within this section and do not add an overall title.' : ''}
+
+        Document${isPartial ? ' section' : ''}:
+        ${chunk}
+    `;
+
+    const CHUNK_SIZE = 80000; // ~80K chars per chunk, well within 1M token context
+
+    if (text.length <= CHUNK_SIZE) {
+        // Single pass for normal-sized documents
+        try {
+            const result = await withRetry(() => model.generateContent(buildPrompt(text, false)));
+            const cleaned = result.response.text().trim();
+            // Safety: if cleaning removed more than 90% of content, something went wrong
+            if (cleaned.length < text.length * 0.1) {
+                console.warn(`[CleanDocument] Cleaning removed ${Math.round((1 - cleaned.length / text.length) * 100)}% of content — using original`);
+                return text;
+            }
+            return cleaned;
+        } catch (e) {
+            console.error('Document cleaning failed:', e);
+            return text;
+        }
+    }
+
+    // For large documents: split by section headers, clean each chunk, reassemble
+    const sections = text.split(/(?=\n#{1,3} )/);
+    const chunks: string[] = [];
+    let currentChunk = '';
+
+    for (const section of sections) {
+        if ((currentChunk.length + section.length) > CHUNK_SIZE && currentChunk.length > 0) {
+            chunks.push(currentChunk);
+            currentChunk = section;
+        } else {
+            currentChunk += section;
+        }
+    }
+    if (currentChunk) chunks.push(currentChunk);
+
+    // If section-based splitting didn't work (no headers), split by paragraphs
+    if (chunks.length === 1 && chunks[0].length > CHUNK_SIZE) {
+        chunks.length = 0;
+        currentChunk = '';
+        const paragraphs = text.split(/\n\n+/);
+        for (const para of paragraphs) {
+            if ((currentChunk.length + para.length) > CHUNK_SIZE && currentChunk.length > 0) {
+                chunks.push(currentChunk);
+                currentChunk = para;
+            } else {
+                currentChunk += (currentChunk ? '\n\n' : '') + para;
+            }
+        }
+        if (currentChunk) chunks.push(currentChunk);
+    }
+
+    console.log(`[CleanDocument] Large document (${text.length} chars), split into ${chunks.length} chunks for cleaning`);
+
+    const cleanedChunks: string[] = [];
+    for (const chunk of chunks) {
+        try {
+            const result = await withRetry(() => model.generateContent(buildPrompt(chunk, chunks.length > 1)));
+            const cleaned = result.response.text().trim();
+            cleanedChunks.push(cleaned || chunk);
+        } catch (e) {
+            console.error(`[CleanDocument] Chunk cleaning failed, using original chunk:`, e);
+            cleanedChunks.push(chunk);
+        }
+    }
+
+    return cleanedChunks.join('\n\n');
+}
+
+/**
+ * Generates a comprehensive summary of a document that captures its overall meaning.
+ * The summary is stored as metadata and used for better knowledge extraction and search.
+ */
+export async function summarizeDocument(text: string, filename: string): Promise<string> {
+    if (text.length < 100) return text; // Too short to summarize
+
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+    // For very large documents, truncate to fit model context
+    const truncatedText = text.length > 80000
+        ? text.substring(0, 80000) + '\n\n[Document truncated for summarization]'
+        : text;
+
+    const prompt = `
+        You are an expert document analyst. Create a comprehensive summary of the following document that captures its complete meaning and purpose.
+
+        The summary must:
+        1. **State the document's purpose and scope** in the opening sentence
+        2. **Identify all major themes and topics** covered
+        3. **Capture key facts, decisions, requirements, and policies** — anything someone might search for
+        4. **Note important entities** — people, teams, systems, tools, processes mentioned
+        5. **Describe relationships** between concepts discussed
+        6. **Preserve important specifics** — dates, thresholds, version numbers, concrete requirements
+        7. **Be search-friendly** — use the same terminology as the document so keyword searches will match
+
+        The summary should be 200-500 words depending on document complexity.
+        Write it as direct factual statements about the subject matter. Do NOT use phrases like "this document describes" or "the document mentions".
+
+        Filename: ${filename}
+
+        Document:
+        ${truncatedText}
+    `;
+
+    try {
+        const result = await withRetry(() => model.generateContent(prompt));
+        return result.response.text().trim();
+    } catch (e) {
+        console.error('Document summarization failed:', e);
+        return '';
+    }
+}
+
 export async function getEmbedding(text: string, taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_DOCUMENT", title?: string) {
     // Use v1beta for embedding
     const model = genAI.getGenerativeModel({ model: EMBEDDING_MODEL });
@@ -172,25 +312,44 @@ export async function chatStream(prompt: string, context: string, history: { rol
            - Don't make up information not in the knowledge graph
            - Offer to help search differently or explore related topics
 
-        6. **Format for Clarity**:
-           ${isKnowledgeContext
-            ? '- Organize by topics when helpful\n           - Use markdown headers (###), bullets, and bold text\n           - Show relationships visually (e.g., "Topic A → depends_on → Topic B")\n           - Keep explanations concise (2-3 sentences per claim)'
-            : '- Use Markdown headers (###), bold, bullets, and code blocks\n           - Structure responses with clear sections\n           - Keep paragraphs concise (2-3 sentences max)'}
+        6. **RESPONSE STRUCTURE RULES (MANDATORY — IGNORE AT YOUR OWN RISK)**:
 
-        **Example Response Structure** (when working with knowledge graph):
+           Every response you generate MUST follow ALL of these formatting rules:
 
-        ### [Topic Name]
-        - Claim 1
-        - Claim 2
+           a) Use ### headers to label each major topic discussed
+           b) Separate every paragraph, header, list, and code block with a blank line
+           c) Use --- horizontal rules between unrelated sections
+           d) Use - bullets for enumerating items, claims, steps -- do NOT string items together with commas
+           e) Use **bold** on every key term or concept the first time it appears
+           f) Use numbered lists (1, 2, 3) for sequential instructions
+           g) Use block quotes with > for warnings, notes, or callouts
+           h) Place tables between paragraphs when comparing data side-by-side
+           i) Never use $ signs or LaTeX notation -- use the unicode arrow character (right-arrow) instead
 
-        **Related Topics:**
-        - Topic A (depends_on) - relevant claims here
-        - Topic B (governs) - relevant claims here
+           EXAMPLE you must match exactly:
 
+           ### IT-PEP Methodology
+
+           The IT-PEP methodology governs IT project execution.
+
+           - **Scope:** All production systems
+           - **Owner:** Enterprise Architecture
+           - **Governs:** Release Management, Change Management
+
+           **Related Topics:**
+
+           - IT-PGP depends_on IT-PEP
+           - Release Management is_part_of IT-PEP
+
+           > Note: IT-PEP updated in Q1 2025.
+
+           ---
+
+           YOUR OUTPUT MUST FOLLOW THIS STRUCTURE EXACTLY. DO NOT GENERATE PLAIN TEXT PARAGRAPHS WITHOUT HEADERS. DO NOT SKIP BLANK LINES.
         **Remember**: You're working with structured knowledge, not searching documents. Treat topics as entities and claims as facts. Your goal is to synthesize information from the knowledge graph into clear, helpful answers.
     `;
 
-    const model = genAI.getGenerativeModel({ 
+    const model = genAI.getGenerativeModel({
         model: TEXT_MODEL,
         systemInstruction: systemPrompt
     });
@@ -252,21 +411,40 @@ export async function chat(prompt: string, context: string, history: { role: str
            - Don't make up information not in the knowledge graph
            - Offer to help search differently or explore related topics
 
-        6. **Format for Clarity**:
+        6. **Format with Rich Markdown -- THIS IS MANDATORY**:
+           You MUST format every response with structural markdown. NEVER output a single block of plain text. Every response must contain multiple formatting elements.
+
+           **Mandatory formatting rules:**
+           - Every response MUST have blank lines between paragraphs, sections, and list items
+           - Use ### or #### headers to organize topics into sections
+           - Use **bold** for key terms, concepts, and important values
+           - Use bullet lists (dash followed by space) for enumerations, claims, and feature lists
+           - Use numbered lists (number followed by period) for sequential steps or procedures
+           - Use code blocks (triple backticks with language name) for commands, code, configurations
+           - Use inline code (single backticks) for technical terms, filenames, function names
+           - Use tables for structured comparisons or parameter lists
+           - Use blockquotes (greater-than sign) for important warnings or highlights
+           - Use horizontal rules (three dashes) to visually separate distinct sections
            ${isKnowledgeContext
-            ? '- Organize by topics when helpful\n           - Use markdown headers (###), bullets, and bold text\n           - Show relationships visually (e.g., "Topic A → depends_on → Topic B")\n           - Keep explanations concise (2-3 sentences per claim)'
-            : '- Use Markdown headers (###), bold, bullets, and code blocks\n           - Structure responses with clear sections\n           - Keep paragraphs concise (2-3 sentences max)'}
+            ? '\n           - Use relationship arrows (arrow character) to show connections between topics'
+            : ''}
 
-        **Example Response Structure** (when working with knowledge graph):
+           **Example of properly formatted response:**
 
-        ### [Topic Name]
-        - Claim 1
-        - Claim 2
+           ### IT-PEP Methodology
+           The IT-PEP methodology governs how projects are structured and executed.
 
-        **Related Topics:**
-        - Topic A (depends_on) - relevant claims here
-        - Topic B (governs) - relevant claims here
+           - **Scope:** All production systems must follow IT-PEP
+           - **Owner:** Enterprise Architecture team
+           - **Governs:** Release Management, Change Management
 
+           **Related Topics:**
+           - IT-PGP depends_on IT-PEP
+           - Release Management is_part_of IT-PEP
+
+           Note: IT-PEP was updated in Q1 2025 with new compliance requirements.
+
+           Your responses must follow this structure. Section headers, blank lines, bold terms, bullet lists, and clear visual separation are NOT optional.
         **Remember**: You're working with structured knowledge, not searching documents. Treat topics as entities and claims as facts. Your goal is to synthesize information from the knowledge graph into clear, helpful answers.
     `;
 
@@ -363,6 +541,61 @@ export async function assessRelevance(query: string, documents: { content: strin
     }
 }
 
+/**
+ * Evaluates whether the gathered context is sufficient to answer a user's query.
+ * If insufficient, suggests refined queries for a second search pass.
+ * Used in the multi-pass RAG pipeline to improve answer quality.
+ */
+export async function evaluateContext(
+    query: string,
+    context: string,
+): Promise<{ sufficient: boolean; missingAspects: string[]; refinedQueries: string[] }> {
+    if (!context || context.includes('No relevant knowledge found')) {
+        return {
+            sufficient: false,
+            missingAspects: ['No relevant information found in the knowledge base'],
+            refinedQueries: [query]
+        };
+    }
+
+    const model = genAI.getGenerativeModel({ model: RERANK_MODEL });
+    const prompt = `
+        You are evaluating whether retrieved context is sufficient to answer a user's question.
+
+        User Query: "${query}"
+
+        Retrieved Context (truncated):
+        ${context.substring(0, 8000)}
+
+        Evaluate:
+        1. Does the context contain information directly relevant to answering the query?
+        2. Are there important aspects of the query that are NOT covered by the context?
+        3. If coverage is insufficient, suggest 1-2 alternative search queries that might find the missing information using different terminology or angles.
+
+        Return ONLY a JSON object:
+        {
+            "sufficient": true/false,
+            "missingAspects": ["aspect 1", "aspect 2"] or [],
+            "refinedQueries": ["alternative query 1", "alternative query 2"] or []
+        }
+
+        Rules:
+        - Set sufficient=true if the context covers the main intent of the query, even if not perfectly
+        - Set sufficient=false only if the context is clearly off-topic or missing critical information the user asked about
+        - refinedQueries should use DIFFERENT terminology or angles than the original query to find complementary information
+        - Keep refinedQueries concise and search-friendly
+    `;
+
+    try {
+        const result = await withRetry(() => model.generateContent(prompt));
+        const text = result.response.text();
+        return parseJSON(text, { sufficient: true, missingAspects: [], refinedQueries: [] });
+    } catch (e) {
+        console.error('Context evaluation failed:', e);
+        return { sufficient: true, missingAspects: [], refinedQueries: [] };
+    }
+}
+
 export async function rerank(query: string, documents: { content: string }[]): Promise<number[]> {
     if (documents.length === 0) return [];
 
@@ -426,25 +659,48 @@ const ALLOWED_CATEGORIES = [
     'Process', 'Role', 'Tool', 'Compliance'
 ];
 
-export async function extractKnowledge(text: string, existingTopicNames: string[] = []): Promise<ExtractedKnowledge> {
+export async function extractKnowledge(text: string, existingTopicNames: string[] = [], documentSummary?: string): Promise<ExtractedKnowledge> {
     const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
 
     const vocabularyHint = existingTopicNames.length > 0
         ? `
-        EXISTING CANONICAL TOPICS (reuse these names verbatim whenever the same concept appears in the document; only invent a new topic if the concept is genuinely not in this list):
+        EXISTING CANONICAL TOPICS (reuse these names verbatim whenever the same concept appears; only create a new topic if genuinely absent from this list):
         ${existingTopicNames.map((n) => `- ${n}`).join('\n        ')}
         `
         : '';
 
+    const summaryContext = documentSummary
+        ? `
+        DOCUMENT CONTEXT (summary of the full document this chunk comes from — use this to understand the broader meaning and correctly scope topics and claims):
+        ${documentSummary}
+        `
+        : '';
+
     const prompt = `
-        You are an expert knowledge engineer. Your task is to extract ALL relevant structured information from the following IT-related document snippet.
-
-        1. **Topics**: Identify every topic discussed. For each topic, provide a name, a brief description, and a category. Category MUST be one of: ${ALLOWED_CATEGORIES.join(', ')}.
-        2. **Knowledge Claims**: Extract EVERY atomic, verifiable fact, rule, responsibility, deadline, threshold, tool reference, role assignment, allowed/forbidden action, document reference, retention period, or numeric requirement. Be exhaustive — aim for 5-15 claims per substantive paragraph. Each claim must reference one of the topics you identified.
-        3. **Relationships**: Identify how the topics relate. The "type" MUST be one of: ${RELATIONSHIP_VOCABULARY.join(', ')}. Do not invent other relationship types.
+        You are an expert knowledge engineer. Extract structured knowledge from the following document chunk.
+        ${summaryContext}
         ${vocabularyHint}
+        Extract the following:
 
-        Return ONLY a valid JSON object with the following structure:
+        1. **Topics**: Key concepts, systems, processes, or entities discussed. For each, provide:
+           - name: A clear, specific name (avoid overly generic names like "Security" — prefer "Application Security Policy" or "Network Access Control")
+           - description: A 1-2 sentence description capturing what this topic covers
+           - category: One of: ${ALLOWED_CATEGORIES.join(', ')}
+
+        2. **Knowledge Claims**: Extract meaningful, substantive facts that someone would actually search for. Each claim must:
+           - Be SELF-CONTAINED: understandable without the original document
+           - Convey ACTIONABLE or IMPORTANT information (not trivial observations)
+           - Include SPECIFIC DETAILS: numbers, names, dates, thresholds, tools, roles when present in the text
+           - Reference one of the topics you identified
+
+           GOOD claims: "Production deployments require approval from at least two senior engineers", "The data retention policy mandates 7-year retention for financial records", "PostgreSQL 15 is the approved database for all new microservices"
+           BAD claims (DO NOT generate): "Security is important", "The system has features", "There are multiple components", "The document describes a process"
+
+           Aim for 3-10 meaningful claims per substantive section. Prioritize QUALITY over QUANTITY — every claim should carry real information value.
+
+        3. **Relationships**: How topics connect. The "type" MUST be one of: ${RELATIONSHIP_VOCABULARY.join(', ')}. Do not invent other relationship types.
+
+        Return ONLY a valid JSON object:
         {
             "topics": [{"name": "...", "description": "...", "category": "..."}],
             "claims": [{"topic": "...", "claim": "..."}],
@@ -453,7 +709,7 @@ export async function extractKnowledge(text: string, existingTopicNames: string[
 
         Do not include any markdown formatting.
 
-        Document:
+        Document chunk:
         ${text}
     `;
 

@@ -253,6 +253,19 @@ try {
     db.exec('ALTER TABLE knowledge_claims ADD COLUMN embedding_updated_at DATETIME');
 } catch (e) {}
 
+// Migration: Add summary column for LLM-generated document summaries
+try {
+    db.exec('ALTER TABLE documents ADD COLUMN summary TEXT');
+} catch (e) {}
+
+// Migration: Add community_id for community detection
+try {
+    db.exec('ALTER TABLE topics ADD COLUMN community_id INTEGER');
+} catch (e) {}
+try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_topics_community_id ON topics(community_id)');
+} catch (e) {}
+
 
 export function getDocuments() {
     return db.prepare(`

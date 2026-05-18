@@ -1,5 +1,5 @@
 import { db } from './db';
-import { extractKnowledge, checkConsistency, deriveTaxonomyPlacements, deriveTaxonomyFull } from './gemini';
+import { extractKnowledge, checkConsistencyBatch, deriveTaxonomyPlacements, deriveTaxonomyFull } from './gemini';
 import { embedTopic, embedClaim } from './rag';
 import crypto from 'crypto';
 
@@ -246,7 +246,7 @@ export function getCanonicalTopicNames(limit = 80): string[] {
     return rows.map((r) => r.name);
 }
 
-export async function processDocumentKnowledge(docId: number, chunks: string[]) {
+export async function processDocumentKnowledge(docId: number, chunks: string[], documentSummary?: string) {
     console.log(`Processing knowledge for document ${docId} (${chunks.length} chunks)...`);
 
     // Guard: the document may have been deleted before this async processing completed
@@ -276,7 +276,7 @@ export async function processDocumentKnowledge(docId: number, chunks: string[]) 
         }
 
         const existingNames = getCanonicalTopicNames(80);
-        const knowledge = await extractKnowledge(chunk, existingNames);
+        const knowledge = await extractKnowledge(chunk, existingNames, documentSummary);
         if (!knowledge || !knowledge.topics) continue;
 
         // 1. Process Topics
@@ -365,7 +365,10 @@ export async function processDocumentKnowledge(docId: number, chunks: string[]) 
             }
         }
 
-        // 3. Process Claims with Consistency Check
+        // 3. Process Claims with Quality Filtering and Batch Consistency Check
+        // Group valid claims by topic for efficient batch processing
+        const claimsByTopicForBatch = new Map<number, { claim: string; topicName: string }[]>();
+
         for (const claim of knowledge.claims ?? []) {
             if (!claim?.topic || !claim?.claim) continue;
 
@@ -375,70 +378,71 @@ export async function processDocumentKnowledge(docId: number, chunks: string[]) 
             // Validate claim-topic alignment (heuristic check)
             if (!validateClaimTopicAlignment(claim.claim, claim.topic)) {
                 console.warn(`[Knowledge] Suspicious claim-topic alignment: topic="${claim.topic}", claim="${claim.claim.substring(0, 80)}..."`);
-                // Continue anyway - this is just a warning, not a blocker
             }
 
+            // Skip exact hash duplicates early
             const claimHash = crypto.createHash('sha256').update(claim.claim).digest('hex');
-
-            // Retrieve document content_hash for version attribution
-            const docRow = db.prepare('SELECT content_hash FROM documents WHERE id = ?').get(docId) as { content_hash: string | null } | undefined;
-            const docContentHash = docRow?.content_hash ?? null;
-
-            // Check for exact duplicate first
             const existingExact = db
                 .prepare('SELECT id FROM knowledge_claims WHERE claim_hash = ?')
                 .get(claimHash);
             if (existingExact) continue;
 
-            // Get existing claims for this topic to check consistency
+            if (!claimsByTopicForBatch.has(topicId)) {
+                claimsByTopicForBatch.set(topicId, []);
+            }
+            claimsByTopicForBatch.get(topicId)!.push({ claim: claim.claim, topicName: claim.topic });
+        }
+
+        // Retrieve document content_hash once per chunk
+        const docRow = db.prepare('SELECT content_hash FROM documents WHERE id = ?').get(docId) as { content_hash: string | null } | undefined;
+        const docContentHash = docRow?.content_hash ?? null;
+
+        // Batch consistency check per topic — much more efficient than per-claim
+        for (const [topicId, claims] of claimsByTopicForBatch) {
             const existingClaims = db
                 .prepare("SELECT claim_text FROM knowledge_claims WHERE topic_id = ? AND status = 'active'")
                 .all(topicId) as { claim_text: string }[];
 
-            const consistency = await checkConsistency(claim.claim, existingClaims.map((c) => c.claim_text));
+            const batchResults = await checkConsistencyBatch(
+                claims.map(c => c.claim),
+                existingClaims.map(c => c.claim_text)
+            );
 
-            if (consistency.status === 'duplicate') continue;
+            for (const result of batchResults) {
+                if (result.status === 'duplicate') continue;
 
-            try {
-                let claimId: number;
-                if (consistency.status === 'conflict') {
-                    const result = db.prepare(
-                        `
-                        INSERT INTO knowledge_claims (topic_id, doc_id, claim_text, claim_hash, status, doc_content_hash)
-                        VALUES (?, ?, ?, ?, 'conflicting', ?)
-                        RETURNING id
-                    `
-                    ).get(topicId, docId, claim.claim, claimHash, docContentHash) as { id: number } | undefined;
-                    if (!result) continue;
-                    claimId = result.id;
-                } else {
-                    const result = db.prepare(
-                        `
-                        INSERT INTO knowledge_claims (topic_id, doc_id, claim_text, claim_hash, status, doc_content_hash)
-                        VALUES (?, ?, ?, ?, 'active', ?)
-                        RETURNING id
-                    `
-                    ).get(topicId, docId, claim.claim, claimHash, docContentHash) as { id: number } | undefined;
-                    if (!result) continue;
-                    claimId = result.id;
-                }
-                claimCount++;
+                const claimData = claims[result.claimIndex];
+                if (!claimData) continue;
 
-                // Generate and store embedding for new claim
+                const claimHash = crypto.createHash('sha256').update(claimData.claim).digest('hex');
+                const status = result.status === 'conflict' ? 'conflicting' : 'active';
+
                 try {
-                    const topicRow = db.prepare('SELECT name FROM topics WHERE id = ?').get(topicId) as { name: string } | undefined;
-                    if (topicRow) {
-                        await embedClaim(claimId, claim.claim, topicRow.name);
+                    const insertResult = db.prepare(
+                        `INSERT INTO knowledge_claims (topic_id, doc_id, claim_text, claim_hash, status, doc_content_hash)
+                         VALUES (?, ?, ?, ?, ?, ?)
+                         RETURNING id`
+                    ).get(topicId, docId, claimData.claim, claimHash, status, docContentHash) as { id: number } | undefined;
+
+                    if (!insertResult) continue;
+                    claimCount++;
+
+                    // Generate and store embedding for new claim
+                    try {
+                        const topicRow = db.prepare('SELECT name FROM topics WHERE id = ?').get(topicId) as { name: string } | undefined;
+                        if (topicRow) {
+                            await embedClaim(insertResult.id, claimData.claim, topicRow.name);
+                        }
+                    } catch (err) {
+                        console.error(`Failed to embed claim ${insertResult.id}:`, err);
                     }
-                } catch (err) {
-                    console.error(`Failed to embed claim ${claimId}:`, err);
+                } catch (err: any) {
+                    if (err?.code === 'SQLITE_CONSTRAINT_FOREIGNKEY') {
+                        console.log(`Document ${docId} removed mid-chunk — aborting knowledge processing.`);
+                        return;
+                    }
+                    console.error('Failed to insert claim:', err);
                 }
-            } catch (err: any) {
-                if (err?.code === 'SQLITE_CONSTRAINT_FOREIGNKEY') {
-                    console.log(`Document ${docId} removed mid-chunk — aborting knowledge processing.`);
-                    return;
-                }
-                console.error('Failed to insert claim:', err);
             }
         }
     }

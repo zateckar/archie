@@ -1,14 +1,12 @@
 <script lang="ts">
     import { onMount, untrack } from 'svelte';
     import { 
-        FileText, Send, Trash2, Upload, Loader2, Bot, 
-        User as UserIcon, Settings, X, GitBranch, RefreshCw, 
-        Plus, Users, LayoutDashboard, LogOut, ChevronDown,
+        Send, Bot,
+        Plus, LayoutDashboard, LogOut, ChevronDown,
         MessageSquare, Trash, PanelLeftClose, PanelLeftOpen, Network, Info
     } from 'lucide-svelte';
-    import { marked } from 'marked';
-    import { fade, slide, fly } from 'svelte/transition';
-    import { sanitizeHtml } from '$lib/utils/sanitize';
+    import { fade, fly } from 'svelte/transition';
+    import MessageBubble from '$lib/components/MessageBubble.svelte';
 
     type Conversation = { id: string; title: string };
     type Message = { role: 'user' | 'assistant', content: string, sources?: any[] };
@@ -106,16 +104,26 @@
             const newConvId = res.headers.get('X-Conversation-Id');
             if (newConvId && !currentConversationId) {
                 currentConversationId = newConvId;
-                const convRes = await fetch('/api/conversations');
-                if (convRes.ok) {
-                    conversations = await convRes.json();
-                }
+                conversations = [{ id: newConvId, title: prompt.slice(0, 50) }, ...conversations];
             }
 
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
             let assistantMessage = { role: 'assistant' as const, content: '', sources: [] };
             messages = [...messages, assistantMessage];
+
+            // Batch stream updates to avoid excessive reactivity (max every 60ms)
+            let lastFlush = 0;
+            let pendingUpdate: (() => void) | null = null;
+            const FLUSH_INTERVAL = 60;
+
+            function flushUpdate() {
+                if (pendingUpdate) {
+                    pendingUpdate();
+                    pendingUpdate = null;
+                }
+                lastFlush = Date.now();
+            }
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -132,12 +140,21 @@
                         } else if (parsed.type === 'chunk') {
                             assistantMessage.content += parsed.data;
                         }
-                        messages[messages.length - 1] = { ...assistantMessage };
+                        // Schedule a batched update
+                        pendingUpdate = () => {
+                            messages[messages.length - 1] = { ...assistantMessage };
+                        };
+                        const now = Date.now();
+                        if (now - lastFlush >= FLUSH_INTERVAL) {
+                            flushUpdate();
+                        }
                     } catch (e) {
                         console.error('Failed to parse stream chunk:', line, e);
                     }
                 }
             }
+            // Flush any remaining batch
+            flushUpdate();
         } catch (err) {
             console.error(err);
             messages = [...messages, { role: 'assistant', content: 'Sorry, something went wrong.' }];
@@ -155,11 +172,9 @@
 
 <div class="flex h-screen bg-[#050505] text-slate-100 font-sans overflow-hidden">
     <!-- Sidebar -->
-    {#if isSidebarOpen}
-        <aside 
-            transition:slide={{ axis: 'x', duration: 300 }}
-            class="w-72 bg-[#0a0a0a] border-r border-slate-800/50 flex flex-col z-20"
-        >
+    <aside 
+        class="sidebar-panel w-72 bg-[#0a0a0a] border-r border-slate-800/50 flex flex-col z-20 {isSidebarOpen ? 'sidebar-visible' : 'sidebar-hidden'}"
+    >
             <div class="p-4 border-b border-slate-800/50 flex items-center justify-between">
                 <h1 class="text-xs font-black bg-gradient-to-r from-[#78FAAE] to-[#0E3A2F] bg-clip-text text-transparent uppercase tracking-[0.2em]">
                     ARCHIE
@@ -255,8 +270,7 @@
                     {/if}
                 </div>
             </div>
-        </aside>
-    {/if}
+    </aside>
 
     <!-- Main: Chat Interface -->
     <main class="flex-1 flex flex-col relative w-full bg-[#050505]">
@@ -312,41 +326,7 @@
             {/if}
 
             {#each messages as msg, i}
-                <div 
-                    class="flex {msg.role === 'user' ? 'justify-end' : 'justify-start'}"
-                    in:fly={{ y: 20, duration: 400, delay: 0 }}
-                >
-                    <div class="flex max-w-[85%] space-x-4 {msg.role === 'user' ? 'flex-row-reverse space-x-reverse' : 'flex-row'}">
-                        <div class="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-transform hover:scale-110
-                            {msg.role === 'user' ? 'bg-[#0E3A2F] shadow-lg shadow-[#0E3A2F]/30 text-[#78FAAE]' : 'bg-slate-900 border border-slate-800 shadow-xl shadow-black/40'}">
-                            {#if msg.role === 'user'}
-                                <UserIcon class="w-5 h-5" />
-                            {:else}
-                                <Bot class="w-5 h-5 text-[#78FAAE]" />
-                            {/if}
-                        </div>
-                        <div class="space-y-3">
-                            <div class="p-5 rounded-2xl text-sm leading-relaxed prose prose-invert prose-slate max-w-none shadow-2xl
-                                {msg.role === 'user' ? 'bg-[#0E3A2F] text-[#78FAAE] rounded-tr-none border border-[#78FAAE]/20' : 'bg-[#0f0f0f] border border-slate-800/50 text-slate-200 rounded-tl-none'}">
-                                {#if msg.role === 'assistant'}
-                                    {@html sanitizeHtml(marked.parse(msg.content) as string)}
-                                {:else}
-                                    {msg.content}
-                                {/if}
-                            </div>
-                            {#if msg.sources && msg.sources.length > 0}
-                                <div class="flex flex-wrap gap-2 pt-1 opacity-40 hover:opacity-100 transition-opacity duration-300">
-                                    <span class="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-black self-center">Sources</span>
-                                    {#each msg.sources as source}
-                                        <span class="text-[10px] px-2.5 py-1 bg-slate-900 border border-slate-800 rounded-lg text-slate-400 font-mono">
-                                            {source.path || source.filename}
-                                        </span>
-                                    {/each}
-                                </div>
-                            {/if}
-                        </div>
-                    </div>
-                </div>
+                <MessageBubble {msg} />
             {/each}
 
             {#if isChatting}
@@ -399,6 +379,22 @@
     :global(body) {
         margin: 0;
         background: #050505;
+    }
+
+    .sidebar-panel {
+        transition: transform 0.3s ease, opacity 0.3s ease;
+    }
+
+    .sidebar-visible {
+        transform: translateX(0);
+        opacity: 1;
+    }
+
+    .sidebar-hidden {
+        transform: translateX(-100%);
+        opacity: 0;
+        position: absolute;
+        height: 100%;
     }
 
     .custom-scrollbar::-webkit-scrollbar {

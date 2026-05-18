@@ -11,6 +11,6 @@ export async function POST({ request }) {
     if (!filename || !content) {
         return json({ error: 'Missing filename or content' }, { status: 400 });
     }
-    const id = await addDocument(filename, content);
-    return json({ id });
+    const { docId } = await addDocument(filename, content);
+    return json({ id: docId });
 }

@@ -33,6 +33,8 @@
     let resolving = $state<number | null>(null);
     let rebuildingTaxonomy = $state(false);
     let taxonomyResult = $state<{ total: number; updated: number } | null>(null);
+    let backfillingEmbeddings = $state(false);
+    let backfillResult = $state<{ topicsEmbedded: number; claimsEmbedded: number } | null>(null);
 
     // Topic hierarchy
     let hierarchyTree = $derived(buildHierarchy());
@@ -515,6 +517,22 @@
         }
     }
 
+    async function triggerBackfill() {
+        backfillingEmbeddings = true;
+        backfillResult = null;
+        try {
+            const res = await fetch('/api/knowledge/backfill', { method: 'POST' });
+            if (res.ok) {
+                backfillResult = await res.json();
+                await loadKnowledge();
+            }
+        } catch (err) {
+            console.error(err);
+        } finally {
+            backfillingEmbeddings = false;
+        }
+    }
+
     // ── Topic Hierarchy ──
     interface HierarchyNode {
         topic: any;
@@ -609,6 +627,18 @@
                     <Loader2 class="w-4 h-4 animate-spin" /> Rebuilding...
                 {:else}
                     <Wand2 class="w-4 h-4" /> Rebuild Taxonomy
+                {/if}
+            </button>
+            <button
+                onclick={triggerBackfill}
+                disabled={backfillingEmbeddings}
+                class="px-4 py-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 hover:text-cyan-300 transition-all text-sm font-medium disabled:opacity-50 flex items-center gap-2"
+                title="Generate embeddings for topics and claims that are missing them"
+            >
+                {#if backfillingEmbeddings}
+                    <Loader2 class="w-4 h-4 animate-spin" /> Backfilling...
+                {:else}
+                    <RefreshCw class="w-4 h-4" /> Backfill Embeddings
                 {/if}
             </button>
             <a

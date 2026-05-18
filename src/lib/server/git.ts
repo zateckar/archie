@@ -123,7 +123,7 @@ export async function syncGitRepo(repoId: number) {
     
     // Filter for supported files (e.g., .md, .txt)
     const supportedExtensions = process.env.SUPPORTED_EXTENSIONS ? process.env.SUPPORTED_EXTENSIONS.split(',') : ['.md', '.mdx'];
-    const docFiles = files.filter(f => supportedExtensions.includes(path.extname(f).toLowerCase()));
+    const docFiles = files.filter(f => supportedExtensions.includes(path.extname(f).toLowerCase()) && !f.startsWith('Clean/'));
 
     // Get existing documents for this repo
     const existingDocs = db.prepare('SELECT id, path, content_hash FROM documents WHERE repo_id = ?').all(repoId) as { id: number, path: string, content_hash: string }[];
@@ -148,14 +148,14 @@ export async function syncGitRepo(repoId: number) {
                 // addDocument now uses INSERT OR REPLACE, so it will handle the update and cleanup old chunks via CASCADE
 
                 // Add new one
-                await addDocumentFromGit(repoId, filePath, filename, content);
+                await addDocumentFromGit(repoId, filePath, filename, content, dir);
             } else {
                 console.log('Document unchanged:', filePath);
             }
             existingPaths.delete(filePath);
         } else {
             console.log('Adding new document:', filePath);
-            await addDocumentFromGit(repoId, filePath, filename, content);
+            await addDocumentFromGit(repoId, filePath, filename, content, dir);
         }
     }
 
@@ -163,6 +163,68 @@ export async function syncGitRepo(repoId: number) {
     for (const [filePath, docId] of existingPaths) {
         console.log('Deleting removed document:', filePath);
         db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
+    }
+
+    // Commit and push all cleaned documents in one batch
+    try {
+        // Get the current branch name to push to the correct remote ref
+        let currentBranch = 'main';
+        try {
+            currentBranch = await git.currentBranch({ fs, dir }) || 'main';
+        } catch (e) {
+            // Fallback to 'main' if branch detection fails
+        }
+
+        // Use statusMatrix to check for any staged or modified files including Clean/ directory
+        const statusMatrix = await git.statusMatrix({ fs, dir });
+        
+        // Check if Clean/ directory has any files that need committing
+        const cleanFilesStaged = statusMatrix.some(([filepath, , workdirStatus, stageStatus]) => {
+            // stageStatus === 2 means the file is staged (added by git.add)
+            // We specifically want to check the Clean/ directory files
+            return filepath.startsWith('Clean/') && (stageStatus === 2 || stageStatus === 3);
+        });
+
+        // Also check for any other staged changes
+        const anyStaged = statusMatrix.some(([, , workdirStatus, stageStatus]) => {
+            return stageStatus === 2 || stageStatus === 3;
+        });
+
+        if (cleanFilesStaged || anyStaged) {
+            console.log(`[SaveCleaned] Found ${statusMatrix.filter(([fp,,,st]) => st === 2 || st === 3).length} staged files. Committing...`);
+            
+            await git.commit({
+                fs,
+                dir,
+                message: `[Auto] Cleaned versions of synced documents`,
+                author: { name: 'Archie Bot', email: 'archie@local' }
+            });
+            
+            // Push explicitly with remote and ref for reliable behavior
+            const pushResult = await git.push({
+                fs,
+                http,
+                dir,
+                remote: 'origin',
+                ref: currentBranch,
+                onAuth: () => ({ username: 'token', password: pat }),
+                onProgress: (progress) => {
+                    if (progress.phase === 'receiving') {
+                        console.log(`[SaveCleaned] Push progress: ${progress.loaded}/${progress.total}`);
+                    }
+                }
+            });
+            
+            if (pushResult && pushResult.ok) {
+                console.log(`[SaveCleaned] Successfully pushed cleaned documents to repo ${repoId} on branch ${currentBranch}`);
+            } else {
+                console.warn(`[SaveCleaned] Push returned unexpected result:`, pushResult);
+            }
+        } else {
+            console.log('[SaveCleaned] No changes to commit — no new or updated cleaned documents found.');
+        }
+    } catch (err) {
+        console.error(`[SaveCleaned] Failed to commit/push cleaned documents:`, err);
     }
 
     // Update last commit and last sync time
@@ -177,11 +239,23 @@ export async function syncGitRepo(repoId: number) {
     }
 }
 
-async function addDocumentFromGit(repoId: number, filePath: string, filename: string, content: string) {
-    // We need a modified version of addDocument that takes repoId and path
-    // For now, let's just use a modified addDocument or a new one.
-    // I'll update rag.ts to support these extra fields.
-    await addDocument(filename, content, { repoId, path: filePath });
+async function addDocumentFromGit(repoId: number, filePath: string, filename: string, content: string, repoDir: string) {
+    const { cleanedContent } = await addDocument(filename, content, { repoId, path: filePath });
+
+    // Save the cleaned & restructured version to the Clean/ folder in the local repo clone
+    try {
+        const cleanRelPath = 'Clean/' + filePath;
+        const cleanFullPath = path.join(repoDir, cleanRelPath);
+        const cleanDir = path.dirname(cleanFullPath);
+        if (!fs.existsSync(cleanDir)) {
+            fs.mkdirSync(cleanDir, { recursive: true });
+        }
+        fs.writeFileSync(cleanFullPath, cleanedContent, 'utf8');
+        await git.add({ fs, dir: repoDir, filepath: cleanRelPath });
+        console.log(`[SaveCleaned] Staged cleaned version: ${cleanRelPath}`);
+    } catch (err) {
+        console.error(`[SaveCleaned] Failed to save cleaned document ${filePath}:`, err);
+    }
 }
 
 export async function registerRepo(url: string, pat: string, syncInterval: number = 3600000) {

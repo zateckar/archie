@@ -40,6 +40,7 @@
 	"dependencies": {
 		"@google/generative-ai": "^0.24.1",
 		"@sqliteai/sqlite-vector": "^0.9.95",
+		"@tailwindcss/typography": "^0.5.19",
 		"@types/marked": "^5.0.2",
 		"better-sqlite3": "^12.9.0",
 		"clsx": "^2.1.1",
