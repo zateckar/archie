@@ -3,7 +3,7 @@
     import { 
         Send, Bot,
         Plus, LayoutDashboard, LogOut, ChevronDown,
-        MessageSquare, Trash, PanelLeftClose, PanelLeftOpen, Network, Info
+        MessageSquare, Trash, PanelLeftClose, PanelLeftOpen, Network, Info, BookOpen
     } from 'lucide-svelte';
     import { fade, fly } from 'svelte/transition';
     import MessageBubble from '$lib/components/MessageBubble.svelte';
@@ -247,6 +247,10 @@
                             <a href="/knowledge" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-slate-800 hover:text-white transition-colors uppercase tracking-wider">
                                 <Network class="w-4 h-4 text-cyan-400" />
                                 Knowledge Graph
+                            </a>
+                            <a href="/wiki" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-slate-800 hover:text-white transition-colors uppercase tracking-wider">
+                                <BookOpen class="w-4 h-4 text-emerald-400" />
+                                Wiki
                             </a>
                             <a href="/about" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-slate-800 hover:text-white transition-colors uppercase tracking-wider">
                                 <Info class="w-4 h-4 text-purple-400" />

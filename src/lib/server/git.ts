@@ -54,6 +54,11 @@ export function initAutoSync() {
 
 
 export async function syncGitRepo(repoId: number) {
+    // Mark sync as started immediately so the auto-sync timer doesn't
+    // re-trigger this repo if the sync takes a long time or fails partway
+    // through (leaving last_sync_at NULL, which would cause immediate retry).
+    db.prepare('UPDATE git_repos SET last_sync_at = CURRENT_TIMESTAMP WHERE id = ?').run(repoId);
+
     const repo = db.prepare('SELECT * FROM git_repos WHERE id = ?').get(repoId) as { id: number; url: string; pat: string; local_path: string; last_commit: string | null };
     if (!repo) throw new Error('Repo not found');
 
@@ -69,8 +74,7 @@ export async function syncGitRepo(repoId: number) {
             dir,
             url,
             onAuth: () => ({ username: 'token', password: pat }),
-            singleBranch: true,
-            depth: 1
+            singleBranch: true
         });
     } else {
         try {
@@ -81,9 +85,29 @@ export async function syncGitRepo(repoId: number) {
             dir,
             url,
             onAuth: () => ({ username: 'token', password: pat }),
-            singleBranch: true,
             author: { name: 'Agent', email: 'agent@local' }
         });
+
+        // If the repo was previously cloned with depth: 1 (shallow clone),
+        // convert it to a full clone so that push can find merge bases.
+        // A shallow repo is detected by the presence of .git/shallow.
+        const gitDir = path.join(dir, '.git');
+        const shallowFile = path.join(gitDir, 'shallow');
+        if (fs.existsSync(shallowFile)) {
+            console.log(`Repo ${repoId} is shallow — fetching full history to enable push...`);
+            await git.fetch({
+                fs,
+                http,
+                dir,
+                url,
+                onAuth: () => ({ username: 'token', password: pat }),
+                singleBranch: true
+            });
+            // Remove the shallow marker so subsequent syncs skip this check.
+            fs.rmSync(shallowFile, { force: true });
+            console.log(`Repo ${repoId} converted to full clone.`);
+        }
+
         } catch (err) {
             console.warn(`Pull failed for repo ${repoId}, attempting to re-clone:`, err);
             fs.rmSync(dir, { recursive: true, force: true });
@@ -96,8 +120,7 @@ export async function syncGitRepo(repoId: number) {
                 dir,
                 url,
                 onAuth: () => ({ username: 'token', password: pat }),
-                singleBranch: true,
-                depth: 1
+                singleBranch: true
             });
             console.log(`Successfully re-cloned repo ${repoId}`);
 
@@ -112,57 +135,59 @@ export async function syncGitRepo(repoId: number) {
         return;
     }
     
-    if (head === repo.last_commit) {
-        console.log('No changes in repo', url);
-        db.prepare('UPDATE git_repos SET last_sync_at = CURRENT_TIMESTAMP WHERE id = ?').run(repoId);
-        return;
-    }
+    const hasNewRemoteChanges = head !== repo.last_commit;
 
-    // Get all files in the repo (recursive)
-    const files = await git.listFiles({ fs, dir });
-    
-    // Filter for supported files (e.g., .md, .txt)
-    const supportedExtensions = process.env.SUPPORTED_EXTENSIONS ? process.env.SUPPORTED_EXTENSIONS.split(',') : ['.md', '.mdx'];
-    const docFiles = files.filter(f => supportedExtensions.includes(path.extname(f).toLowerCase()) && !f.startsWith('Clean/'));
+    if (hasNewRemoteChanges) {
+        console.log('New commits found in repo', url, '- processing documents...');
 
-    // Get existing documents for this repo
-    const existingDocs = db.prepare('SELECT id, path, content_hash FROM documents WHERE repo_id = ?').all(repoId) as { id: number, path: string, content_hash: string }[];
-    const existingPaths = new Map(existingDocs.map(d => [d.path, d.id]));
+        // Get all files in the repo (recursive)
+        const files = await git.listFiles({ fs, dir });
+        
+        // Filter for supported files (e.g., .md, .txt)
+        const supportedExtensions = process.env.SUPPORTED_EXTENSIONS ? process.env.SUPPORTED_EXTENSIONS.split(',') : ['.md', '.mdx'];
+        const docFiles = files.filter(f => supportedExtensions.includes(path.extname(f).toLowerCase()) && !f.startsWith('Clean/'));
 
-    for (const filePath of docFiles) {
-        const fullPath = path.join(dir, filePath);
-        const content = fs.readFileSync(fullPath, 'utf8');
-        const filename = path.basename(filePath);
+        // Get existing documents for this repo
+        const existingDocs = db.prepare('SELECT id, path, content_hash FROM documents WHERE repo_id = ?').all(repoId) as { id: number, path: string, content_hash: string }[];
+        const existingPaths = new Map(existingDocs.map(d => [d.path, d.id]));
 
-        if (existingPaths.has(filePath)) {
-            // Update if changed (simple check: content hash or just always update for now)
-            // To be efficient, we could check if content changed, but addDocument currently doesn't handle updates well.
-            // Let's delete and re-add for simplicity, or modify addDocument.
-            const docId = existingPaths.get(filePath)!;
-            
-            // Check if content is different using hash
-            const contentHash = crypto.createHash('sha256').update(content).digest('hex');
-            const currentDoc = existingDocs.find(d => d.id === docId);
-            if (currentDoc?.content_hash !== contentHash) {
-                console.log('Updating document:', filePath);
-                // addDocument now uses INSERT OR REPLACE, so it will handle the update and cleanup old chunks via CASCADE
+        for (const filePath of docFiles) {
+            const fullPath = path.join(dir, filePath);
+            const content = fs.readFileSync(fullPath, 'utf8');
+            const filename = path.basename(filePath);
 
-                // Add new one
-                await addDocumentFromGit(repoId, filePath, filename, content, dir);
+            if (existingPaths.has(filePath)) {
+                // Update if changed (simple check: content hash or just always update for now)
+                // To be efficient, we could check if content changed, but addDocument currently doesn't handle updates well.
+                // Let's delete and re-add for simplicity, or modify addDocument.
+                const docId = existingPaths.get(filePath)!;
+                
+                // Check if content is different using hash
+                const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+                const currentDoc = existingDocs.find(d => d.id === docId);
+                if (currentDoc?.content_hash !== contentHash) {
+                    console.log('Updating document:', filePath);
+                    // addDocument now uses INSERT OR REPLACE, so it will handle the update and cleanup old chunks via CASCADE
+
+                    // Add new one
+                    await addDocumentFromGit(repoId, filePath, filename, content, dir);
+                } else {
+                    console.log('Document unchanged:', filePath);
+                }
+                existingPaths.delete(filePath);
             } else {
-                console.log('Document unchanged:', filePath);
+                console.log('Adding new document:', filePath);
+                await addDocumentFromGit(repoId, filePath, filename, content, dir);
             }
-            existingPaths.delete(filePath);
-        } else {
-            console.log('Adding new document:', filePath);
-            await addDocumentFromGit(repoId, filePath, filename, content, dir);
         }
-    }
 
-    // Delete documents that are no longer in the repo
-    for (const [filePath, docId] of existingPaths) {
-        console.log('Deleting removed document:', filePath);
-        db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
+        // Delete documents that are no longer in the repo
+        for (const [filePath, docId] of existingPaths) {
+            console.log('Deleting removed document:', filePath);
+            db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
+        }
+    } else {
+        console.log('No new remote changes in repo', url, '- checking for previously staged Clean/ files...');
     }
 
     // Commit and push all cleaned documents in one batch
@@ -200,12 +225,12 @@ export async function syncGitRepo(repoId: number) {
                 author: { name: 'Archie Bot', email: 'archie@local' }
             });
             
-            // Push explicitly with remote and ref for reliable behavior
+            // Push explicitly with url and ref for reliable behavior (avoids needing .git/config remote entry)
             const pushResult = await git.push({
                 fs,
                 http,
                 dir,
-                remote: 'origin',
+                url,
                 ref: currentBranch,
                 onAuth: () => ({ username: 'token', password: pat }),
                 onProgress: (progress) => {

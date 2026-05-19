@@ -64,6 +64,23 @@ export async function handle({ event, resolve }) {
         }
     }
 
+    // Protect wiki routes (any authenticated user)
+    if (event.url.pathname.startsWith('/api/wiki')) {
+        if (!event.locals.user) {
+            return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+        }
+    }
+
+    // Protect wiki pages (any authenticated user)
+    if (event.url.pathname.startsWith('/wiki')) {
+        if (!event.locals.user) {
+            return new Response(null, {
+                status: 302,
+                headers: { Location: '/login' }
+            });
+        }
+    }
+
     const response = await resolve(event);
     response.headers.set('X-Content-Type-Options', 'nosniff');
     response.headers.set('X-Frame-Options', 'DENY');

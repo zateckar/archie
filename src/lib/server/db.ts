@@ -258,6 +258,24 @@ try {
     db.exec('ALTER TABLE documents ADD COLUMN summary TEXT');
 } catch (e) {}
 
+// Migration: Add wiki_documents table
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS wiki_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_id INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            content TEXT,
+            content_hash TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(repo_id, path),
+            FOREIGN KEY(repo_id) REFERENCES git_repos(id) ON DELETE CASCADE
+        );
+    `);
+} catch (e) {}
+
 // Migration: Add community_id for community detection
 try {
     db.exec('ALTER TABLE topics ADD COLUMN community_id INTEGER');

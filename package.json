@@ -30,6 +30,7 @@
 		"@tailwindcss/vite": "^4.2.2",
 		"@types/better-sqlite3": "^7.6.13",
 		"@types/node": "^25.6.0",
+		"@types/turndown": "^5.0.6",
 		"svelte": "^5.55.2",
 		"svelte-check": "^4.4.6",
 		"tailwindcss": "^4.2.2",
@@ -41,14 +42,22 @@
 		"@google/generative-ai": "^0.24.1",
 		"@sqliteai/sqlite-vector": "^0.9.95",
 		"@tailwindcss/typography": "^0.5.19",
+		"@tiptap/core": "^3.23.5",
+		"@tiptap/extension-bubble-menu": "^3.23.5",
+		"@tiptap/extension-link": "^3.23.5",
+		"@tiptap/extension-placeholder": "^3.23.5",
+		"@tiptap/pm": "^3.23.5",
+		"@tiptap/starter-kit": "^3.23.5",
 		"@types/marked": "^5.0.2",
 		"better-sqlite3": "^12.9.0",
 		"clsx": "^2.1.1",
+		"diff": "^9.0.0",
 		"dotenv": "^17.4.2",
 		"isomorphic-git": "^1.37.6",
 		"lucide-svelte": "^1.0.1",
 		"marked": "^18.0.2",
 		"pdf-parse": "^2.4.5",
-		"tailwind-merge": "^3.5.0"
+		"tailwind-merge": "^3.5.0",
+		"turndown": "^7.2.4"
 	}
 }
