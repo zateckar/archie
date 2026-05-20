@@ -85,8 +85,15 @@
         }
     }
 
-    async function toggleAdmin(user: any) {
-        const newRole = user.role === 'admin' ? 'user' : 'admin';
+    async function cycleRole(user: any) {
+        let newRole = 'user';
+        if (user.role === 'user') {
+            newRole = 'contributor';
+        } else if (user.role === 'contributor') {
+            newRole = 'admin';
+        } else if (user.role === 'admin') {
+            newRole = 'user';
+        }
         try {
             const res = await fetch(`/api/users/${user.id}`, {
                 method: 'PATCH',
@@ -141,6 +148,7 @@
                     <label for="new-role" class="block text-sm font-medium text-slate-400 mb-2">Role</label>
                     <select id="new-role" bind:value={newUser.role} class="w-full bg-slate-950 border border-slate-800 rounded-2xl p-4 text-sm focus:outline-none focus:border-[#78FAAE]/50 transition-all">
                         <option value="user">User</option>
+                        <option value="contributor">Contributor</option>
                         <option value="admin">Admin</option>
                     </select>
                 </div>
@@ -200,9 +208,12 @@
                                 </td>
                                 <td class="p-6">
                                     <button 
-                                        onclick={() => toggleAdmin(user)}
-                                        class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all
-                                        {user.role === 'admin' ? 'bg-[#0E3A2F]/30 text-[#78FAAE] border border-[#0E3A2F]/50' : 'bg-slate-800 text-slate-500 border border-slate-700'}"
+                                        onclick={() => cycleRole(user)}
+                                        title="Click to cycle role (user -> contributor -> admin)"
+                                        class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all hover:scale-105 active:scale-95 cursor-pointer
+                                        {user.role === 'admin' ? 'bg-[#0E3A2F]/30 text-[#78FAAE] border border-[#0E3A2F]/50 hover:border-[#78FAAE]/80' : 
+                                         user.role === 'contributor' ? 'bg-blue-950/40 text-blue-400 border border-blue-900/40 hover:border-blue-400/80' : 
+                                         'bg-slate-800 text-slate-400 hover:text-white border border-slate-700 hover:border-slate-500'}"
                                     >
                                         <Shield class="w-3.5 h-3.5" />
                                         {user.role}

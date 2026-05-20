@@ -43,3 +43,4 @@ logs/
 extensions/
 docs/*
 e2e/*
+test-results/*

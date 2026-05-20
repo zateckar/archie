@@ -13,7 +13,13 @@
     let activeTab = $state<'graph' | 'conflicts' | 'hierarchy'>('graph');
     let searchQuery = $state('');
 
-    // Graph state
+    // Graph state and filters
+    let selectedCategory = $state('All');
+    let minClaims = $state(0);
+    let maxNodesLimit = $state(100);
+    let focusedNodeId = $state<number | null>(null);
+    let categories = $derived(['All', ...new Set(data.topics.map(t => t.category).filter(Boolean))]);
+
     let canvas = $state<HTMLCanvasElement | undefined>(undefined);
     let graphNodes = $state<GraphNode[]>([]);
     let graphEdges = $state<GraphEdge[]>([]);
@@ -81,7 +87,7 @@
             if (res.ok) {
                 data = await res.json();
                 await tick();
-                if (activeTab === 'graph') initGraph();
+                if (activeTab === 'graph') initGraph(true);
             }
         } catch (err) {
             console.error(err);
@@ -90,8 +96,8 @@
         }
     }
 
-    // ── Graph Visualization (Force-Directed) ──
-    function initGraph() {
+    // ── Graph Visualization (Force-Directed with Filtering and Neighborhood Focus) ──
+    function initGraph(resetCamera = false) {
         if (!canvas || data.topics.length === 0) return;
 
         // Stop any existing animation
@@ -100,13 +106,97 @@
         const w = canvas.width = canvas.parentElement!.clientWidth;
         const h = canvas.height = canvas.parentElement!.clientHeight || 500;
 
+        // Calculate claims count and relation count for ALL topics first, to help with filtering/sorting
+        const allClaimCounts = new Map<number, number>();
+        const allRelCounts = new Map<number, number>();
+        for (const t of data.topics) {
+            allClaimCounts.set(t.id, 0);
+            allRelCounts.set(t.id, 0);
+        }
+        for (const c of data.claims) {
+            allClaimCounts.set(c.topic_id, (allClaimCounts.get(c.topic_id) || 0) + 1);
+        }
+        for (const r of data.relationships) {
+            allRelCounts.set(r.source_topic_id, (allRelCounts.get(r.source_topic_id) || 0) + 1);
+            allRelCounts.set(r.target_topic_id, (allRelCounts.get(r.target_topic_id) || 0) + 1);
+        }
+
+        let visibleTopics = [...data.topics];
+
+        // Apply filters
+        if (focusedNodeId !== null) {
+            const neighbors = new Set<number>();
+            neighbors.add(focusedNodeId);
+            for (const r of data.relationships) {
+                if (r.source_topic_id === focusedNodeId) {
+                    neighbors.add(r.target_topic_id);
+                }
+                if (r.target_topic_id === focusedNodeId) {
+                    neighbors.add(r.source_topic_id);
+                }
+            }
+            visibleTopics = visibleTopics.filter(t => neighbors.has(t.id));
+        } else {
+            // Filter by search query
+            if (searchQuery.trim()) {
+                const query = searchQuery.toLowerCase().trim();
+                const matchedTopicIds = new Set<number>();
+                for (const t of visibleTopics) {
+                    if (
+                        t.name.toLowerCase().includes(query) ||
+                        (t.description && t.description.toLowerCase().includes(query)) ||
+                        (t.category && t.category.toLowerCase().includes(query))
+                    ) {
+                        matchedTopicIds.add(t.id);
+                    }
+                }
+
+                // If number of matched topics is small, also show their 1-hop neighbors for context
+                if (matchedTopicIds.size > 0 && matchedTopicIds.size < 25) {
+                    const expandedSet = new Set<number>(matchedTopicIds);
+                    for (const r of data.relationships) {
+                        if (matchedTopicIds.has(r.source_topic_id)) {
+                            expandedSet.add(r.target_topic_id);
+                        }
+                        if (matchedTopicIds.has(r.target_topic_id)) {
+                            expandedSet.add(r.source_topic_id);
+                        }
+                    }
+                    visibleTopics = visibleTopics.filter(t => expandedSet.has(t.id));
+                } else {
+                    visibleTopics = visibleTopics.filter(t => matchedTopicIds.has(t.id));
+                }
+            }
+
+            // Filter by category
+            if (selectedCategory !== 'All') {
+                visibleTopics = visibleTopics.filter(t => t.category === selectedCategory);
+            }
+
+            // Filter by min claims
+            if (minClaims > 0) {
+                visibleTopics = visibleTopics.filter(t => (allClaimCounts.get(t.id) || 0) >= minClaims);
+            }
+
+            // Sort by importance: total relationships + claims count descending, and apply max limit
+            visibleTopics.sort((a, b) => {
+                const scoreA = (allRelCounts.get(a.id) || 0) * 2 + (allClaimCounts.get(a.id) || 0);
+                const scoreB = (allRelCounts.get(b.id) || 0) * 2 + (allClaimCounts.get(b.id) || 0);
+                return scoreB - scoreA;
+            });
+
+            if (visibleTopics.length > maxNodesLimit) {
+                visibleTopics = visibleTopics.slice(0, maxNodesLimit);
+            }
+        }
+
         // Create nodes
         const nodeMap = new Map<number, GraphNode>();
-        graphNodes = data.topics.map((t, i) => {
-            const angle = (2 * Math.PI * i) / data.topics.length;
-            const r = Math.min(w, h) * 0.3;
-            const claimCount = data.claims.filter(c => c.topic_id === t.id).length;
-            const relCount = data.relationships.filter(rel => rel.source_topic_id === t.id || rel.target_topic_id === t.id).length;
+        graphNodes = visibleTopics.map((t, i) => {
+            const angle = (2 * Math.PI * i) / visibleTopics.length;
+            const r = Math.min(w, h) * 0.35;
+            const claimCount = allClaimCounts.get(t.id) || 0;
+            const relCount = allRelCounts.get(t.id) || 0;
             const node: GraphNode = {
                 id: t.id,
                 name: t.name,
@@ -123,7 +213,7 @@
             return node;
         });
 
-        // Create edges
+        // Create edges (only keep relationships between visible nodes)
         graphEdges = data.relationships
             .filter(r => nodeMap.has(r.source_topic_id) && nodeMap.has(r.target_topic_id))
             .map(r => ({
@@ -132,9 +222,16 @@
                 type: r.relationship_type
             }));
 
-        // Reset pan/zoom
-        panOffset = { x: 0, y: 0 };
-        zoom = 1;
+        // Reset pan/zoom if requested
+        if (resetCamera) {
+            panOffset = { x: 0, y: 0 };
+            zoom = 1;
+        }
+
+        // If previously selected node is no longer visible, deselect it
+        if (selectedNode && !nodeMap.has(selectedNode.id)) {
+            selectedNode = null;
+        }
 
         // Start simulation
         runSimulation();
@@ -152,13 +249,17 @@
             // Force simulation
             const alpha = Math.max(0.001, 1 - iteration / maxIterations);
 
-            // Repulsion (nodes push each other apart)
+            // Repulsion with distance threshold (nodes push each other apart)
+            const maxRepulsionDistance = 350;
             for (let i = 0; i < graphNodes.length; i++) {
                 for (let j = i + 1; j < graphNodes.length; j++) {
                     const a = graphNodes[i], b = graphNodes[j];
                     let dx = b.x - a.x, dy = b.y - a.y;
-                    let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-                    const force = (200 * alpha) / dist;
+                    let distSq = dx * dx + dy * dy;
+                    if (distSq > maxRepulsionDistance * maxRepulsionDistance) continue; // Skip far-away nodes
+                    
+                    let dist = Math.sqrt(distSq) || 1;
+                    const force = (180 * alpha) / dist;
                     const fx = (dx / dist) * force;
                     const fy = (dy / dist) * force;
                     if (!a.pinned) { a.vx -= fx; a.vy -= fy; }
@@ -285,12 +386,15 @@
             ctx.fill();
             ctx.stroke();
 
-            // Node label
+            // Node label (optimized for density and zoom)
             if (!dimmed || isConnected) {
-                ctx.font = `${isSelected ? 'bold ' : ''}${Math.max(9, 11 - graphNodes.length * 0.05)}px Inter, system-ui, sans-serif`;
-                ctx.fillStyle = dimmed ? 'rgba(148, 163, 184, 0.4)' : 'rgba(226, 232, 240, 0.9)';
-                ctx.textAlign = 'center';
-                ctx.fillText(truncate(node.name, 18), node.x, node.y + node.radius + 14);
+                const shouldDrawLabel = graphNodes.length <= 150 || isSelected || isHovered || isConnected || zoom > 0.8 || node.claimCount > 3;
+                if (shouldDrawLabel) {
+                    ctx.font = `${isSelected ? 'bold ' : ''}${Math.max(9, 11 - graphNodes.length * 0.05)}px Inter, system-ui, sans-serif`;
+                    ctx.fillStyle = dimmed ? 'rgba(148, 163, 184, 0.4)' : 'rgba(226, 232, 240, 0.9)';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(truncate(node.name, 18), node.x, node.y + node.radius + 14);
+                }
             }
         }
 
@@ -705,63 +809,166 @@
     {:else}
         <!-- ═══ GRAPH TAB ═══ -->
         {#if activeTab === 'graph'}
-            <div class="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden relative" in:fade>
-                <!-- Legend -->
-                <div class="absolute top-4 left-4 z-10 bg-black/80 backdrop-blur-sm border border-slate-800 rounded-xl p-3 flex flex-wrap gap-3 text-[10px] font-mono uppercase tracking-wider">
-                    {#each [
-                        { label: 'Technical', color: 'bg-cyan-400' },
-                        { label: 'Architecture', color: 'bg-purple-400' },
-                        { label: 'Best Practice', color: 'bg-emerald-400' },
-                        { label: 'Org Norm', color: 'bg-amber-400' }
-                    ] as item}
-                        <span class="flex items-center gap-1.5 text-slate-400">
-                            <span class="w-2.5 h-2.5 rounded-full {item.color}"></span>
-                            {item.label}
-                        </span>
-                    {/each}
-                </div>
+            <div class="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden relative flex flex-col" in:fade>
+                <!-- Controls/Filters Bar -->
+                <div class="border-b border-slate-800/80 bg-slate-950/60 p-4 flex flex-wrap items-center justify-between gap-4 z-10 relative">
+                    <div class="flex flex-wrap items-center gap-4">
+                        <!-- Search Input -->
+                        <div class="relative min-w-[220px]">
+                            <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                            <input
+                                type="text"
+                                bind:value={searchQuery}
+                                oninput={() => initGraph()}
+                                placeholder="Search topic name/desc..."
+                                class="w-full pl-9 pr-8 py-1.5 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 transition-all"
+                            />
+                            {#if searchQuery}
+                                <button onclick={() => { searchQuery = ''; initGraph(); }} class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white text-sm font-bold">×</button>
+                            {/if}
+                        </div>
 
-                <!-- Zoom controls -->
-                <div class="absolute top-4 right-4 z-10 flex flex-col gap-1">
-                    <button onclick={() => { zoom = Math.min(3, zoom * 1.2); drawGraph(); }}
-                        class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-slate-400 hover:text-white flex items-center justify-center text-lg font-bold">+</button>
-                    <button onclick={() => { zoom = Math.max(0.2, zoom * 0.8); drawGraph(); }}
-                        class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-slate-400 hover:text-white flex items-center justify-center text-lg font-bold">−</button>
-                    <button onclick={initGraph}
-                        class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-slate-400 hover:text-white flex items-center justify-center text-xs" title="Reset">⟲</button>
-                </div>
+                        <!-- Category Filter -->
+                        <div class="flex items-center gap-1.5">
+                            <span class="text-[10px] font-mono uppercase text-slate-500">Category:</span>
+                            <select
+                                bind:value={selectedCategory}
+                                onchange={() => initGraph()}
+                                class="bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500/50"
+                            >
+                                <option value="All">All Categories</option>
+                                {#each categories.filter(c => c !== 'All') as cat}
+                                    <option value={cat}>{cat}</option>
+                                {/each}
+                            </select>
+                        </div>
 
-                <!-- Selected node details -->
-                {#if selectedNode}
-                    <div class="absolute bottom-4 right-4 z-10 w-72 bg-black/90 backdrop-blur-sm border border-cyan-500/30 rounded-2xl p-4" transition:slide>
-                        <h4 class="text-white font-bold text-sm mb-2">{selectedNode.name}</h4>
-                        <span class="font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border {getCategoryCss(selectedNode.category)}">
-                            {selectedNode.category}
-                        </span>
-                        <div class="mt-3 space-y-1 text-xs text-slate-400">
-                            <p>{selectedNode.claimCount} claims · {selectedNode.relCount} relationships</p>
-                            {#each graphEdges.filter(e => e.source.id === selectedNode?.id || e.target.id === selectedNode?.id) as edge}
-                                <p class="text-slate-500">
-                                    {edge.source.id === selectedNode?.id ? '→' : '←'}
-                                    <span class="text-cyan-400/70">{edge.type.replace(/_/g, ' ')}</span>
-                                    {edge.source.id === selectedNode?.id ? edge.target.name : edge.source.name}
-                                </p>
-                            {/each}
+                        <!-- Min Claims Slider -->
+                        <div class="flex items-center gap-2">
+                            <span class="text-[10px] font-mono uppercase text-slate-500 min-w-[90px]">Min Claims: {minClaims}</span>
+                            <input
+                                type="range"
+                                min="0"
+                                max="10"
+                                bind:value={minClaims}
+                                oninput={() => initGraph()}
+                                class="w-20 accent-cyan-500 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer"
+                            />
+                        </div>
+
+                        <!-- Max Nodes Dropdown -->
+                        <div class="flex items-center gap-1.5">
+                            <span class="text-[10px] font-mono uppercase text-slate-500">Max Nodes:</span>
+                            <select
+                                bind:value={maxNodesLimit}
+                                onchange={() => initGraph()}
+                                class="bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500/50"
+                            >
+                                <option value={50}>50</option>
+                                <option value={100}>100 (Default)</option>
+                                <option value={200}>200</option>
+                                <option value={500}>500</option>
+                                <option value={10000}>All ({data.topics.length})</option>
+                            </select>
                         </div>
                     </div>
-                {/if}
 
-                <div class="w-full" style="height: 520px;">
-                    <canvas
-                        bind:this={canvas}
-                        onmousedown={handleMouseDown}
-                        onmousemove={handleMouseMove}
-                        onmouseup={handleMouseUp}
-                        onmouseleave={handleMouseUp}
-                        onwheel={handleWheel}
-                        class="w-full h-full cursor-grab"
-                        style="background: radial-gradient(circle at 50% 50%, rgba(15,23,42,1) 0%, rgba(5,5,5,1) 100%);"
-                    ></canvas>
+                    <div class="flex items-center gap-3">
+                        {#if focusedNodeId !== null}
+                            <button
+                                onclick={() => { focusedNodeId = null; initGraph(); }}
+                                class="px-2.5 py-1 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl text-xs font-semibold transition-all"
+                            >
+                                Clear Focus
+                            </button>
+                        {/if}
+                        <span class="text-xs font-mono text-slate-400">
+                            Showing <strong class="text-cyan-400">{graphNodes.length}</strong> / {data.topics.length} nodes
+                        </span>
+                    </div>
+                </div>
+
+                <div class="relative flex-1 w-full overflow-hidden">
+                    <!-- Legend -->
+                    <div class="absolute top-4 left-4 z-10 bg-black/80 backdrop-blur-sm border border-slate-800 rounded-xl p-3 flex flex-wrap gap-3 text-[10px] font-mono uppercase tracking-wider">
+                        {#each [
+                            { label: 'Technical', color: 'bg-cyan-400' },
+                            { label: 'Architecture', color: 'bg-purple-400' },
+                            { label: 'Best Practice', color: 'bg-emerald-400' },
+                            { label: 'Org Norm', color: 'bg-amber-400' }
+                        ] as item}
+                            <span class="flex items-center gap-1.5 text-slate-400">
+                                <span class="w-2.5 h-2.5 rounded-full {item.color}"></span>
+                                {item.label}
+                            </span>
+                        {/each}
+                    </div>
+
+                    <!-- Zoom controls -->
+                    <div class="absolute top-4 right-4 z-10 flex flex-col gap-1">
+                        <button onclick={() => { zoom = Math.min(3, zoom * 1.2); drawGraph(); }}
+                            class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-slate-400 hover:text-white flex items-center justify-center text-lg font-bold">+</button>
+                        <button onclick={() => { zoom = Math.max(0.2, zoom * 0.8); drawGraph(); }}
+                            class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-slate-400 hover:text-white flex items-center justify-center text-lg font-bold">−</button>
+                        <button onclick={() => initGraph(true)}
+                            class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-slate-400 hover:text-white flex items-center justify-center text-xs" title="Reset Camera">⟲</button>
+                    </div>
+
+                    <!-- Selected node details -->
+                    {#if selectedNode}
+                        <div class="absolute bottom-4 right-4 z-10 w-72 bg-black/90 backdrop-blur-sm border border-cyan-500/30 rounded-2xl p-4 flex flex-col gap-3" transition:slide>
+                            <div>
+                                <h4 class="text-white font-bold text-sm mb-1.5">{selectedNode.name}</h4>
+                                <span class="font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border {getCategoryCss(selectedNode.category)}">
+                                    {selectedNode.category}
+                                </span>
+                            </div>
+                            
+                            <div class="space-y-1 text-xs text-slate-400">
+                                <p class="font-semibold text-slate-300">{selectedNode.claimCount} claims · {selectedNode.relCount} relationships</p>
+                                <div class="max-h-36 overflow-y-auto pr-1 space-y-1">
+                                    {#each graphEdges.filter(e => e.source.id === selectedNode?.id || e.target.id === selectedNode?.id) as edge}
+                                        <p class="text-[11px] text-slate-500 leading-tight">
+                                            {edge.source.id === selectedNode?.id ? '→' : '←'}
+                                            <span class="text-cyan-400/70">{edge.type.replace(/_/g, ' ')}</span>
+                                            {edge.source.id === selectedNode?.id ? edge.target.name : edge.source.name}
+                                        </p>
+                                    {/each}
+                                </div>
+                            </div>
+
+                            <div class="pt-2 border-t border-slate-800 flex gap-2">
+                                {#if focusedNodeId === selectedNode.id}
+                                    <button
+                                        onclick={() => { focusedNodeId = null; initGraph(); }}
+                                        class="flex-1 py-1.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold transition-all"
+                                    >
+                                        Unfocus Node
+                                    </button>
+                                {:else}
+                                    <button
+                                        onclick={() => { focusedNodeId = selectedNode!.id; initGraph(); }}
+                                        class="flex-1 py-1.5 px-3 bg-cyan-500 hover:bg-cyan-400 text-black rounded-xl text-xs font-semibold transition-all"
+                                    >
+                                        Focus Neighborhood
+                                    </button>
+                                {/if}
+                            </div>
+                        </div>
+                    {/if}
+
+                    <div class="w-full" style="height: 520px;">
+                        <canvas
+                            bind:this={canvas}
+                            onmousedown={handleMouseDown}
+                            onmousemove={handleMouseMove}
+                            onmouseup={handleMouseUp}
+                            onmouseleave={handleMouseUp}
+                            onwheel={handleWheel}
+                            class="w-full h-full cursor-grab"
+                            style="background: radial-gradient(circle at 50% 50%, rgba(15,23,42,1) 0%, rgba(5,5,5,1) 100%);"
+                        ></canvas>
+                    </div>
                 </div>
 
                 {#if data.topics.length === 0}

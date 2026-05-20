@@ -29,7 +29,20 @@ export function getRepo(repoId: number) {
     return db.prepare('SELECT * FROM git_repos WHERE id = ?').get(repoId) as { id: number; url: string; pat: string; local_path: string; last_commit: string | null } | undefined;
 }
 
+const treeCache = new Map<any[], any[]>();
+
+export function clearWikiTreeCache(repoId?: number) {
+    if (repoId !== undefined) {
+        treeCache.delete(repoId as any);
+    } else {
+        treeCache.clear();
+    }
+}
+
 export function getFileTree(repoId: number): FileTreeItem[] {
+    if (treeCache.has(repoId as any)) {
+        return treeCache.get(repoId as any) as FileTreeItem[];
+    }
     const repo = getRepo(repoId);
     if (!repo) return [];
 
@@ -71,6 +84,7 @@ export function getFileTree(repoId: number): FileTreeItem[] {
         return a.name.localeCompare(b.name);
     });
 
+    treeCache.set(repoId as any, items as any);
     return items;
 }
 
@@ -427,6 +441,9 @@ export async function saveWikiFile(repoId: number, filePath: string, content: st
             content_hash = excluded.content_hash,
             updated_at = CURRENT_TIMESTAMP
     `).run(repoId, filePath, path.basename(filePath), content, contentHash);
+
+    // Invalidate memory tree cache
+    clearWikiTreeCache(repoId);
 }
 
 export async function createWikiFile(repoId: number, filePath: string, content: string): Promise<void> {
@@ -505,6 +522,26 @@ export async function revertToCommit(repoId: number, filePath: string, oid: stri
     } catch (err) {
         console.warn('[Wiki] Revert push failed:', err);
     }
+
+    // Update last commit reference in DB
+    try {
+        const head = await git.resolveRef({ fs, dir: repo.local_path, ref: 'HEAD' });
+        db.prepare('UPDATE git_repos SET last_commit = ? WHERE id = ?').run(head, repoId);
+    } catch (_) {}
+
+    const contentHash = crypto.createHash('sha256').update(oldContent).digest('hex');
+    // Upsert into wiki_documents table
+    db.prepare(`
+        INSERT INTO wiki_documents (repo_id, path, filename, content, content_hash, updated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(repo_id, path) DO UPDATE SET
+            content = excluded.content,
+            content_hash = excluded.content_hash,
+            updated_at = CURRENT_TIMESTAMP
+    `).run(repoId, filePath, path.basename(filePath), oldContent, contentHash);
+
+    // Invalidate memory tree cache
+    clearWikiTreeCache(repoId);
 }
 
 export function getDiff(oldContent: string, newContent: string): string {

@@ -1,10 +1,12 @@
 <script lang="ts">
     import { setContext } from 'svelte';
     import { page } from '$app/state';
-    import { ChevronLeft, BookOpen, Plus } from 'lucide-svelte';
+    import { MessageSquare, BookOpen, Plus } from 'lucide-svelte';
     import WikiTreeItem from '$lib/components/WikiTreeItem.svelte';
 
-    let { children } = $props();
+    let { children, data } = $props();
+    let user = $derived(data?.user);
+    let canEdit = $derived(user?.role === 'admin' || user?.role === 'contributor');
 
     interface FileTreeItem {
         name: string;
@@ -19,10 +21,10 @@
     let showNewPageForm = $state(false);
     let newPagePath = $state('');
     let newItemType = $state<'file' | 'folder'>('file');
-    let expandedDirs = $state<Set<string>>(new Set());
+    let expandedDirs = $state<Record<string, boolean>>({});
     let repos: any[] = $state([]);
     let dirsInitialized = $state(false);
-    let lastTreePathname = $state('');
+    let lastRepoId = $state<number | null>(null);
     let lastFilePath = $state('');
 
     // ── Provide reactive context for all WikiTreeItem descendants ──────────────
@@ -35,21 +37,21 @@
         isActiveFile,
     });
 
-    // ── Reload tree whenever URL pathname changes within /wiki/{repoId}/* ──────
+    // ── Reload tree whenever repository changes ──────────────────────────────
     $effect(() => {
         const pathname = page.url.pathname;
         const match = pathname.match(/^\/wiki\/(\d+)/);
         if (match) {
             const id = parseInt(match[1]);
             selectedRepoId = id;
-            if (pathname !== lastTreePathname) {
-                lastTreePathname = pathname;
+            if (id !== lastRepoId) {
+                lastRepoId = id;
                 loadFileTree(id);
             }
         } else {
             selectedRepoId = null;
+            lastRepoId = null;
             fileTree = [];
-            lastTreePathname = '';
         }
     });
 
@@ -94,13 +96,7 @@
     }
 
     function toggleDir(path: string) {
-        const next = new Set(expandedDirs);
-        if (next.has(path)) {
-            next.delete(path);
-        } else {
-            next.add(path);
-        }
-        expandedDirs = next;
+        expandedDirs[path] = !expandedDirs[path];
     }
 
     function getFileUrl(filePath: string): string {
@@ -149,15 +145,13 @@
                 await loadFileTree(selectedRepoId);
                 // Auto-expand the new folder in the tree
                 if (folderPath) {
-                    const next = new Set(expandedDirs);
                     // Expand every ancestor segment of the new folder
                     const parts = folderPath.split('/');
                     let current = '';
                     for (const part of parts) {
                         current = current ? `${current}/${part}` : part;
-                        next.add(current);
+                        expandedDirs[current] = true;
                     }
-                    expandedDirs = next;
                 }
                 window.location.href = getFileUrl(filePath);
             }
@@ -178,14 +172,12 @@
             }
             if (!dirsInitialized) {
                 const parts = filePath.split('/');
-                const next = new Set(expandedDirs);
                 let current = '';
                 for (let i = 0; i < parts.length - 1; i++) {
                     if (current) current += '/';
                     current += parts[i];
-                    next.add(current);
+                    expandedDirs[current] = true;
                 }
-                expandedDirs = next;
                 dirsInitialized = true;
             }
         }
@@ -201,8 +193,9 @@
                 <BookOpen class="w-5 h-5 text-[#78FAAE]" />
                 <h1 class="font-bold text-white text-sm uppercase tracking-widest">Wiki</h1>
             </div>
-            <a href="/" class="p-1.5 hover:bg-slate-800 rounded-lg text-slate-500 hover:text-white transition-all" title="Back to Chat">
-                <ChevronLeft class="w-4 h-4" />
+            <a href="/" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-[#78FAAE]/50 transition-all group" title="Back to Chat">
+                <MessageSquare class="w-4 h-4 text-[#78FAAE] group-hover:scale-110 transition-transform" />
+                <span class="text-[10px] font-bold text-slate-400 group-hover:text-white uppercase tracking-widest">Chat</span>
             </a>
         </div>
 
@@ -235,16 +228,18 @@
             <div class="flex-1 overflow-y-auto p-3">
                 <div class="flex items-center justify-between mb-3 px-2">
                     <p class="text-xs text-slate-500 uppercase tracking-wider font-bold">Documents</p>
-                    <button 
-                        onclick={() => showNewPageForm = !showNewPageForm}
-                        class="p-1 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-[#78FAAE] transition-all"
-                        title="New Page"
-                    >
-                        <Plus class="w-4 h-4" />
-                    </button>
+                    {#if canEdit}
+                        <button 
+                            onclick={() => showNewPageForm = !showNewPageForm}
+                            class="p-1 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-[#78FAAE] transition-all"
+                            title="New Page"
+                        >
+                            <Plus class="w-4 h-4" />
+                        </button>
+                    {/if}
                 </div>
 
-                {#if showNewPageForm}
+                {#if canEdit && showNewPageForm}
                     <div class="mb-3 px-2">
                         <form onsubmit={(e) => { e.preventDefault(); handleCreateNewPage(); }} class="flex flex-col gap-2">
                             <!-- File / Folder toggle -->

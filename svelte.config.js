@@ -19,7 +19,7 @@ const config = {
 				'style-src': ['self', 'unsafe-inline'],
 				'img-src': ['self', 'data:', 'blob:'],
 				'font-src': ['self'],
-				'connect-src': ['self', 'https://generativelanguage.googleapis.com'],
+				'connect-src': ['self', 'ws:', 'wss:', 'https://generativelanguage.googleapis.com'],
 				'frame-ancestors': ['none'],
 				'base-uri': ['self']
 			}

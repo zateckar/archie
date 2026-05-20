@@ -7,6 +7,7 @@ import { db } from './db';
 import { addDocument } from './rag';
 import { rebuildTaxonomy } from './knowledge';
 import { encrypt, decrypt } from './crypto-utils';
+import { clearWikiTreeCache } from './wiki';
 
 const REPOS_DIR = path.join(process.cwd(), 'data', 'repos');
 
@@ -262,6 +263,11 @@ export async function syncGitRepo(repoId: number) {
     } catch (err) {
         console.error('[Git Sync] Taxonomy rebuild failed:', err);
     }
+
+    // Invalidate the wiki tree cache after sync
+    try {
+        clearWikiTreeCache(repoId);
+    } catch (_) {}
 }
 
 async function addDocumentFromGit(repoId: number, filePath: string, filename: string, content: string, repoDir: string) {

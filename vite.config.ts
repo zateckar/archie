@@ -6,8 +6,5 @@ export default defineConfig({
 	plugins: [tailwindcss(), sveltekit()],
 	ssr: {
 		external: ['better-sqlite3']
-	},
-	optimizeDeps: {
-		exclude: ['lucide-svelte']
 	}
 });

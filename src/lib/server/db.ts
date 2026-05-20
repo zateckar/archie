@@ -43,6 +43,9 @@ export const db = new Database(dbPath);
 // Enable foreign keys
 db.pragma('foreign_keys = ON');
 
+// Enable WAL (Write-Ahead Logging) for better concurrency performance
+db.pragma('journal_mode = WAL');
+
 // Load extensions
 // Load vector extension
 if (VECTOR_EXTENSION_PATH && fs.existsSync(VECTOR_EXTENSION_PATH)) {

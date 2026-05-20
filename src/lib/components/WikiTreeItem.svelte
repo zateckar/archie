@@ -11,7 +11,7 @@
     }
 
     interface WikiTreeContext {
-        readonly expandedDirs: Set<string>;
+        readonly expandedDirs: Record<string, boolean>;
         toggleDir: (path: string) => void;
         getFileUrl: (path: string) => string;
         isActiveFile: (path: string) => boolean;
@@ -25,7 +25,7 @@
     // through the getter and re-evaluates whenever the layout's expandedDirs changes.
     const ctx = getContext<WikiTreeContext>('wikiTree');
 
-    let isExpanded = $derived(ctx.expandedDirs.has(item.path));
+    let isExpanded = $derived(!!ctx.expandedDirs[item.path]);
     let isActive   = $derived(item.type === 'file' && ctx.isActiveFile(item.path));
 </script>
 

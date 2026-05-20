@@ -4,10 +4,12 @@ import { rebuildTaxonomy } from '$lib/server/knowledge';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async ({ url }) => {
-    const topics = db.prepare('SELECT * FROM topics').all();
+    const topics = db.prepare('SELECT id, name, description, category, parent_topic_id, community_id FROM topics').all();
     const relationships = db.prepare(`
         SELECT 
-            tr.*, 
+            tr.source_topic_id,
+            tr.target_topic_id,
+            tr.relationship_type,
             s.name as source_name, 
             t.name as target_name 
         FROM topic_relationships tr
@@ -17,7 +19,14 @@ export const GET: RequestHandler = async ({ url }) => {
     
     const claims = db.prepare(`
         SELECT 
-            kc.*, 
+            kc.id,
+            kc.topic_id,
+            kc.doc_id,
+            kc.claim_text,
+            kc.claim_hash,
+            kc.status,
+            kc.created_at,
+            kc.doc_content_hash,
             t.name as topic_name,
             d.filename as doc_name,
             d.content_hash as current_doc_hash

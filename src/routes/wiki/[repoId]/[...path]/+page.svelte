@@ -16,12 +16,15 @@
     } from 'lucide-svelte';
 
     // ─── Props ───
-    let { params }: {
+    let { params, data }: {
         params: { repoId: string; path: string };
+        data: { user: any };
     } = $props();
 
     let repoId = $derived(parseInt(params.repoId));
     let currentPath = $derived(params.path || '');
+    let user = $derived(data?.user);
+    let canEdit = $derived(user?.role === 'admin' || user?.role === 'contributor');
 
     // ─── State ───
     let content = $state('');
@@ -271,10 +274,12 @@
 
         <div class="flex items-center gap-2">
             {#if !isEditing}
-                <button onclick={startEditing} class="flex items-center gap-1.5 px-4 py-2 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 rounded-xl text-xs font-bold transition-all">
-                    <Edit3 class="w-3.5 h-3.5" />
-                    Edit
-                </button>
+                {#if canEdit}
+                    <button onclick={startEditing} class="flex items-center gap-1.5 px-4 py-2 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 rounded-xl text-xs font-bold transition-all">
+                        <Edit3 class="w-3.5 h-3.5" />
+                        Edit
+                    </button>
+                {/if}
                 <button onclick={loadHistory} class="flex items-center gap-1.5 px-3 py-2 hover:bg-slate-800 rounded-xl text-xs font-bold transition-all text-slate-400" class:bg-slate-800={showHistory}>
                     <Clock class="w-3.5 h-3.5" />
                     History
@@ -405,13 +410,15 @@
                                             {entry.author} · {new Date(entry.date).toLocaleDateString()}
                                         </p>
                                     </div>
-                                    <button 
-                                        onclick={(e) => { e.stopPropagation(); handleRevert(entry.oid); }}
-                                        class="p-1 hover:bg-slate-800 rounded-lg text-slate-500 hover:text-[#78FAAE] transition-all flex-shrink-0"
-                                        title="Revert to this version"
-                                    >
-                                        <RotateCcw class="w-3.5 h-3.5" />
-                                    </button>
+                                    {#if canEdit}
+                                        <button 
+                                            onclick={(e) => { e.stopPropagation(); handleRevert(entry.oid); }}
+                                            class="p-1 hover:bg-slate-800 rounded-lg text-slate-500 hover:text-[#78FAAE] transition-all flex-shrink-0"
+                                            title="Revert to this version"
+                                        >
+                                            <RotateCcw class="w-3.5 h-3.5" />
+                                        </button>
+                                    {/if}
                                 </div>
 
                                 {#if selectedHistoryItem?.oid === entry.oid && diffContent !== null}

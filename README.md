@@ -266,12 +266,16 @@ The chat interface provides a natural way to interact with the knowledge base.
 ## ⚙️ Setup
 
 ### Prerequisites
-- Node.js 20+
-- npm
+- Bun (v1.0+, Recommended) or Node.js 20+
 
 ### Installation
 
 1.  **Install dependencies:**
+    Using Bun (Recommended):
+    ```bash
+    bun install
+    ```
+    Or using npm:
     ```bash
     npm install
     ```
@@ -303,6 +307,11 @@ The chat interface provides a natural way to interact with the knowledge base.
     ```
 
 3.  **Run the app:**
+    Using Bun (Recommended):
+    ```bash
+    bun run bun:dev
+    ```
+    Or using npm:
     ```bash
     npm run dev
     ```

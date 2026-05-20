@@ -280,9 +280,9 @@
     <main class="flex-1 flex flex-col relative w-full bg-[#050505]">
         <header class="h-14 px-4 border-b border-slate-800/50 flex items-center justify-between bg-[#050505]/80 backdrop-blur-xl sticky top-0 z-10">
             <div class="flex items-center gap-4">
-                <a href="/knowledge" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-cyan-500/50 transition-all group">
-                    <Network class="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform" />
-                    <span class="text-[10px] font-bold text-slate-400 group-hover:text-white uppercase tracking-widest">Knowledge Graph</span>
+                <a href="/wiki" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-[#78FAAE]/50 transition-all group">
+                    <BookOpen class="w-4 h-4 text-[#78FAAE] group-hover:scale-110 transition-transform" />
+                    <span class="text-[10px] font-bold text-slate-400 group-hover:text-white uppercase tracking-widest">Wiki</span>
                 </a>
                 {#if !isSidebarOpen}
                     <button 
@@ -292,10 +292,6 @@
                         <PanelLeftOpen class="w-4 h-4" />
                     </button>
                 {/if}
-                <div class="flex items-center gap-2">
-                    <div class="w-2 h-2 rounded-full bg-[#78FAAE] animate-pulse shadow-[0_0_8px_rgba(120,250,174,0.5)]"></div>
-                    <span class="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em]">System Active</span>
-                </div>
             </div>
 
             <div class="flex items-center gap-3">

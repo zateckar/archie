@@ -646,7 +646,7 @@
                 <div class="p-6 rounded-3xl bg-gradient-to-br from-[#0E3A2F]/20 to-transparent border border-[#78FAAE]/10">
                     <h3 class="text-sm font-black uppercase tracking-wider text-[#78FAAE] mb-3">🔒 Multi-User Auth</h3>
                     <p class="text-xs text-slate-500 leading-relaxed">
-                        Role-based access control with admin and user roles. Session-based authentication with Argon2 password hashing. Admins manage users, documents, and the knowledge base.
+                        Role-based access control with Admin, Contributor, and User roles. Admins manage everything, Contributors can edit and create Wiki pages, and Users can read pages and chat.
                     </p>
                 </div>
                 <div class="p-6 rounded-3xl bg-gradient-to-br from-cyan-950/20 to-transparent border border-cyan-500/10">
