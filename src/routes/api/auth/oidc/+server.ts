@@ -1,7 +1,7 @@
 import { redirect } from '@sveltejs/kit';
 import crypto from 'crypto';
 
-export async function GET({ cookies }) {
+export async function GET({ cookies, url }) {
     const issuer = process.env.OIDC_ISSUER;
     const clientId = process.env.OIDC_CLIENT_ID;
     
@@ -10,12 +10,14 @@ export async function GET({ cookies }) {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    cookies.set('oidc_state', state, { path: '/', httpOnly: true, maxAge: 60 * 10 });
+    cookies.set('oidc_state', state, { path: '/', httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 60 * 10 });
+
+    const redirectUri = `${url.origin}/api/auth/callback`;
 
     const authUrl = new URL(`${issuer}/protocol/openid-connect/auth`);
     authUrl.searchParams.set('client_id', clientId);
     authUrl.searchParams.set('response_type', 'code');
-    authUrl.searchParams.set('redirect_uri', `${process.env.PUBLIC_URL || 'http://localhost:5173'}/api/auth/callback`);
+    authUrl.searchParams.set('redirect_uri', redirectUri);
     authUrl.searchParams.set('scope', 'openid profile email');
     authUrl.searchParams.set('state', state);
 

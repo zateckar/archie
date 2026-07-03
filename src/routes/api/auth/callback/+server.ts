@@ -15,7 +15,7 @@ export async function GET({ request, cookies }) {
     const issuer = process.env.OIDC_ISSUER;
     const clientId = process.env.OIDC_CLIENT_ID;
     const clientSecret = process.env.OIDC_CLIENT_SECRET;
-    const redirectUri = `${process.env.PUBLIC_URL || 'http://localhost:5173'}/api/auth/callback`;
+    const redirectUri = `${url.origin}/api/auth/callback`;
 
     if (!issuer || !clientId || !clientSecret) {
         return new Response('OIDC not configured', { status: 500 });
@@ -65,10 +65,10 @@ export async function GET({ request, cookies }) {
             expires: session.expiresAt,
             secure: process.env.NODE_ENV === 'production'
         });
-
-        throw redirect(302, '/');
     } catch (err) {
         console.error('OIDC Error:', err);
         return new Response('Authentication failed', { status: 500 });
     }
+
+    throw redirect(302, '/');
 }
