@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { searchChunks, buildKnowledgeContext } from '$lib/server/rag';
-import { chatStream, condenseQuery, analyzeQuery, evaluateContext } from '$lib/server/gemini';
+import { chatStream, condenseQuery, analyzeQuery, evaluateContext, synthesizeContext, buildConversationBriefing } from '$lib/server/gemini';
 import { db } from '$lib/server/db';
 
 export async function POST({ request, locals }) {
@@ -74,6 +74,22 @@ export async function POST({ request, locals }) {
         }
     }
 
+    // Build conversation briefing for multi-turn coherence
+    const conversationBriefing = history.length >= 2
+        ? await buildConversationBriefing(history)
+        : '';
+
+    // Synthesize context into a coherent briefing
+    let synthesizedContext: string;
+    if (context && !context.includes('No relevant knowledge found')) {
+        const verbatimSection = relevantChunks.length > 0
+            ? relevantChunks.map((c: any) => `[${c.path || c.filename}]\n${c.content}`).join('\n\n')
+            : '';
+        synthesizedContext = await synthesizeContext(searchPrompt, context, verbatimSection, conversationBriefing || undefined);
+    } else {
+        synthesizedContext = context;
+    }
+
     // Save user prompt to history
     let currentConversationId = conversationId;
     if (!currentConversationId) {
@@ -86,7 +102,7 @@ export async function POST({ request, locals }) {
 
     // Save user prompt to history
     db.prepare('INSERT INTO chat_history (user_id, role, content, conversation_id) VALUES (?, ?, ?, ?)').run(user.id, 'user', prompt, currentConversationId);
-    const stream = await chatStream(prompt, context, history);
+    const stream = await chatStream(prompt, synthesizedContext, history);
     
     const readable = new ReadableStream({
         async start(controller) {

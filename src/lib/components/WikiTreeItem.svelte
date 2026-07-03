@@ -1,6 +1,10 @@
 <script lang="ts">
     import { getContext } from 'svelte';
-    import { FileText, Folder, FolderOpen, ChevronDown, ChevronRight } from 'lucide-svelte';
+    import FileText from 'lucide-svelte/icons/file-text';
+import Folder from 'lucide-svelte/icons/folder';
+import FolderOpen from 'lucide-svelte/icons/folder-open';
+import ChevronDown from 'lucide-svelte/icons/chevron-down';
+import ChevronRight from 'lucide-svelte/icons/chevron-right';
     import TreeItem from './WikiTreeItem.svelte';
 
     interface FileTreeItem {
@@ -33,24 +37,24 @@
     <div>
         <button
             onclick={() => ctx.toggleDir(item.path)}
-            class="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-800/40 transition-all text-sm group"
+            class="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-[var(--hover-surface)] transition-all text-sm group"
             style="padding-left: {12 + level * 16}px"
         >
             <span class="w-4 flex-shrink-0">
                 {#if isExpanded}
-                    <ChevronDown class="w-3.5 h-3.5 text-slate-500" />
+                    <ChevronDown class="w-3.5 h-3.5 text-[var(--text-faint)]" />
                 {:else}
-                    <ChevronRight class="w-3.5 h-3.5 text-slate-500" />
+                    <ChevronRight class="w-3.5 h-3.5 text-[var(--text-faint)]" />
                 {/if}
             </span>
             <span class="w-4 flex-shrink-0">
                 {#if isExpanded}
                     <FolderOpen class="w-4 h-4 text-[#78FAAE]" />
                 {:else}
-                    <Folder class="w-4 h-4 text-slate-500" />
+                    <Folder class="w-4 h-4 text-[var(--text-faint)]" />
                 {/if}
             </span>
-            <span class="text-slate-400 truncate">{item.name}</span>
+            <span class="text-[var(--text-muted)] truncate">{item.name}</span>
         </button>
 
         {#if isExpanded && item.children && item.children.length > 0}
@@ -66,10 +70,10 @@
         href={ctx.getFileUrl(item.path)}
         style="padding-left: {28 + level * 16}px"
         class="flex items-center gap-2 px-2 py-1.5 rounded-lg transition-all text-sm group {isActive
-            ? 'bg-[#0E3A2F]/30 text-[#78FAAE]'
-            : 'text-slate-400 hover:bg-slate-800/40'}"
+            ? 'bg-[#0E3A2F] text-[#78FAAE]'
+            : 'text-[var(--text-muted)] hover:bg-[var(--hover-surface)]'}"
     >
-        <FileText class="w-4 h-4 flex-shrink-0 {isActive ? 'text-[#78FAAE]' : 'text-slate-600'}" />
+        <FileText class="w-4 h-4 flex-shrink-0 {isActive ? 'text-[#78FAAE]' : 'text-[var(--text-faintest)]'}" />
         <span class="truncate">{item.name}</span>
     </a>
 {/if}

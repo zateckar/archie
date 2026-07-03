@@ -7,13 +7,34 @@
     import { Link } from '@tiptap/extension-link';
     import TurndownService from 'turndown';
     import { marked } from 'marked';
-    import { 
-        Edit3, Eye, Save, Clock, ArrowLeft, 
-        Bold, Italic, Heading1, Heading2, Heading3,
-        List, ListOrdered, Code, Quote, Link as LinkIcon,
-        X, RotateCcw, FileText, History, Diff, ChevronDown, ChevronUp, 
-        AlertTriangle, CheckCircle, GitBranch
-    } from 'lucide-svelte';
+    import { renderMermaidBlocksIn } from '$lib/utils/mermaidRender';
+    import MermaidEditorModal from '$lib/components/MermaidEditorModal.svelte';
+    import Edit3 from 'lucide-svelte/icons/edit-3';
+import Eye from 'lucide-svelte/icons/eye';
+import Save from 'lucide-svelte/icons/save';
+import Clock from 'lucide-svelte/icons/clock';
+import ArrowLeft from 'lucide-svelte/icons/arrow-left';
+import Bold from 'lucide-svelte/icons/bold';
+import Italic from 'lucide-svelte/icons/italic';
+import Heading1 from 'lucide-svelte/icons/heading-1';
+import Heading2 from 'lucide-svelte/icons/heading-2';
+import Heading3 from 'lucide-svelte/icons/heading-3';
+import List from 'lucide-svelte/icons/list';
+import ListOrdered from 'lucide-svelte/icons/list-ordered';
+import Code from 'lucide-svelte/icons/code';
+import Quote from 'lucide-svelte/icons/quote';
+import LinkIcon from 'lucide-svelte/icons/link';
+import X from 'lucide-svelte/icons/x';
+import RotateCcw from 'lucide-svelte/icons/rotate-ccw';
+import FileText from 'lucide-svelte/icons/file-text';
+import History from 'lucide-svelte/icons/history';
+import Diff from 'lucide-svelte/icons/diff';
+import ChevronDown from 'lucide-svelte/icons/chevron-down';
+import ChevronUp from 'lucide-svelte/icons/chevron-up';
+import AlertTriangle from 'lucide-svelte/icons/alert-triangle';
+import CheckCircle from 'lucide-svelte/icons/check-circle';
+import GitBranch from 'lucide-svelte/icons/git-branch';
+import Workflow from 'lucide-svelte/icons/workflow';
 
     // ─── Props ───
     let { params, data }: {
@@ -43,11 +64,31 @@
 
     let editorEl = $state<HTMLDivElement>();
     let editorState = $state<{ editor: Editor | null }>({ editor: null });
+    let viewContainerEl = $state<HTMLDivElement>();
+    let mermaidModalOpen = $state(false);
 
     const turndownService = new TurndownService({ 
         headingStyle: 'atx',
         codeBlockStyle: 'fenced',
         bulletListMarker: '-'
+    });
+
+    // Preserve language tags on fenced code blocks (e.g. ```mermaid).
+    // The default Turndown rule strips the `language-*` class.
+    turndownService.addRule('fencedCodeWithLang', {
+        filter: (node: any) =>
+            node.nodeName === 'PRE' &&
+            node.firstChild &&
+            node.firstChild.nodeName === 'CODE',
+        replacement: (_content: string, node: any) => {
+            const code = node.firstChild as HTMLElement;
+            const className = code.getAttribute('class') || '';
+            const langMatch = className.match(/language-(\S+)/);
+            const lang = langMatch ? langMatch[1] : '';
+            const text = code.textContent || '';
+            const fence = '```';
+            return '\n\n' + fence + lang + '\n' + text.replace(/\n$/, '') + '\n' + fence + '\n\n';
+        }
     });
 
     // ─── Load file content ───
@@ -92,6 +133,7 @@
                 extensions: [
                     StarterKit.configure({
                         heading: { levels: [1, 2, 3] },
+                        link: false,
                     }),
                     Placeholder.configure({
                         placeholder: 'Start writing...',
@@ -254,18 +296,56 @@
     });
 
     let filename = $derived(currentPath.split('/').pop() || 'document');
+
+    // ─── Mermaid post-render ───
+    // After the view-mode markdown is injected via {@html}, replace fenced
+    // mermaid code blocks with rendered SVGs.
+    $effect(() => {
+        // Re-run whenever rendered content or editing state changes.
+        const _content = renderedContent;
+        const _editing = isEditing;
+        if (_editing) return;
+        if (!viewContainerEl) return;
+        if (!_content) return;
+        // Defer one microtask so the {@html} has actually painted.
+        queueMicrotask(() => {
+            if (viewContainerEl && !isEditing) {
+                renderMermaidBlocksIn(viewContainerEl);
+            }
+        });
+    });
+
+    // ─── Mermaid editor modal ───
+    function openMermaidModal() {
+        mermaidModalOpen = true;
+    }
+
+    function insertMermaidDiagram(code: string) {
+        if (!editorState.editor) return;
+        // Insert a fenced code block with language=mermaid.
+        editorState.editor
+            .chain()
+            .focus()
+            .insertContent({
+                type: 'codeBlock',
+                attrs: { language: 'mermaid' },
+                content: [{ type: 'text', text: code }]
+            })
+            .run();
+        mermaidModalOpen = false;
+    }
 </script>
 
 <div class="h-full flex flex-col">
     <!-- Toolbar -->
-    <header class="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/50 backdrop-blur-sm">
+    <header class="p-4 border-b border-[var(--border-primary)] flex items-center justify-between bg-[var(--bg-slate-950)]/50 backdrop-blur-sm">
         <div class="flex items-center gap-3 min-w-0">
-            <a href={`/wiki/${repoId}`} class="p-1.5 hover:bg-slate-800 rounded-lg text-slate-500 hover:text-white transition-all flex-shrink-0" title="Back to repo root">
+            <a href={`/wiki/${repoId}`} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg text-[var(--text-faint)] hover:text-[var(--text-primary)] transition-all flex-shrink-0" title="Back to repo root">
                 <ArrowLeft class="w-4 h-4" />
             </a>
             <div class="flex items-center gap-2 min-w-0">
-                <FileText class="w-4 h-4 text-slate-500 flex-shrink-0" />
-                <h2 class="font-bold text-white text-sm truncate">{filename}</h2>
+                <FileText class="w-4 h-4 text-[var(--text-faint)] flex-shrink-0" />
+                <h2 class="font-bold text-[var(--text-primary)] text-sm truncate">{filename}</h2>
             </div>
             {#if saveMessage}
                 <span class="text-xs text-[#78FAAE] animate-in fade-in">{saveMessage}</span>
@@ -275,20 +355,20 @@
         <div class="flex items-center gap-2">
             {#if !isEditing}
                 {#if canEdit}
-                    <button onclick={startEditing} class="flex items-center gap-1.5 px-4 py-2 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 rounded-xl text-xs font-bold transition-all">
+                    <button onclick={startEditing} class="flex items-center gap-1.5 px-4 py-2 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] rounded-xl text-xs font-bold transition-all">
                         <Edit3 class="w-3.5 h-3.5" />
                         Edit
                     </button>
                 {/if}
-                <button onclick={loadHistory} class="flex items-center gap-1.5 px-3 py-2 hover:bg-slate-800 rounded-xl text-xs font-bold transition-all text-slate-400" class:bg-slate-800={showHistory}>
+                <button onclick={loadHistory} class="flex items-center gap-1.5 px-3 py-2 hover:bg-[var(--hover-surface)] rounded-xl text-xs font-bold transition-all text-[var(--text-muted)]" class:bg-[var(--hover-surface)]={showHistory}>
                     <Clock class="w-3.5 h-3.5" />
                     History
                 </button>
             {:else}
-                <button onclick={() => showSource = !showSource} class="px-3 py-2 hover:bg-slate-800 rounded-xl text-xs font-bold transition-all text-slate-400" class:bg-slate-800={showSource}>
+                <button onclick={() => showSource = !showSource} class="px-3 py-2 hover:bg-[var(--hover-surface)] rounded-xl text-xs font-bold transition-all text-[var(--text-muted)]" class:bg-[var(--hover-surface)]={showSource}>
                     {showSource ? 'WYSIWYG' : 'Source'}
                 </button>
-                <button onclick={cancelEditing} class="px-3 py-2 hover:bg-slate-800 rounded-xl text-xs font-bold transition-all text-slate-400">
+                <button onclick={cancelEditing} class="px-3 py-2 hover:bg-[var(--hover-surface)] rounded-xl text-xs font-bold transition-all text-[var(--text-muted)]">
                     Cancel
                 </button>
                 <button onclick={handleSave} disabled={isSaving} class="flex items-center gap-1.5 px-4 py-2 bg-[#78FAAE] hover:bg-[#78FAAE]/80 text-black rounded-xl text-xs font-bold transition-all disabled:opacity-50">
@@ -306,20 +386,22 @@
 
     <!-- Editor toolbar (when editing) -->
     {#if isEditing && !showSource}
-        <div class="flex items-center gap-1 px-4 py-2 border-b border-slate-800 bg-slate-900/30 overflow-x-auto">
-            <button onclick={() => execCmd('bold')} class="p-1.5 hover:bg-slate-800 rounded-lg transition-all" class:bg-slate-800={editorState.editor?.isActive('bold')} title="Bold"><Bold class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('italic')} class="p-1.5 hover:bg-slate-800 rounded-lg transition-all" class:bg-slate-800={editorState.editor?.isActive('italic')} title="Italic"><Italic class="w-4 h-4" /></button>
-            <span class="w-px h-5 bg-slate-700 mx-1"></span>
-            <button onclick={() => execCmd('h1')} class="p-1.5 hover:bg-slate-800 rounded-lg transition-all text-xs font-bold" class:bg-slate-800={editorState.editor?.isActive('heading', { level: 1 })} title="Heading 1"><Heading1 class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('h2')} class="p-1.5 hover:bg-slate-800 rounded-lg transition-all text-xs font-bold" class:bg-slate-800={editorState.editor?.isActive('heading', { level: 2 })} title="Heading 2"><Heading2 class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('h3')} class="p-1.5 hover:bg-slate-800 rounded-lg transition-all text-xs font-bold" class:bg-slate-800={editorState.editor?.isActive('heading', { level: 3 })} title="Heading 3"><Heading3 class="w-4 h-4" /></button>
-            <span class="w-px h-5 bg-slate-700 mx-1"></span>
-            <button onclick={() => execCmd('bulletList')} class="p-1.5 hover:bg-slate-800 rounded-lg transition-all" class:bg-slate-800={editorState.editor?.isActive('bulletList')} title="Bullet List"><List class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('orderedList')} class="p-1.5 hover:bg-slate-800 rounded-lg transition-all" class:bg-slate-800={editorState.editor?.isActive('orderedList')} title="Numbered List"><ListOrdered class="w-4 h-4" /></button>
-            <span class="w-px h-5 bg-slate-700 mx-1"></span>
-            <button onclick={() => execCmd('codeBlock')} class="p-1.5 hover:bg-slate-800 rounded-lg transition-all" class:bg-slate-800={editorState.editor?.isActive('codeBlock')} title="Code Block"><Code class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('blockquote')} class="p-1.5 hover:bg-slate-800 rounded-lg transition-all" class:bg-slate-800={editorState.editor?.isActive('blockquote')} title="Blockquote"><Quote class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('link')} class="p-1.5 hover:bg-slate-800 rounded-lg transition-all" class:bg-slate-800={editorState.editor?.isActive('link')} title="Link"><LinkIcon class="w-4 h-4" /></button>
+        <div class="flex items-center gap-1 px-4 py-2 border-b border-[var(--border-primary)] bg-[var(--bg-slate-900)]/30 overflow-x-auto">
+            <button onclick={() => execCmd('bold')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('bold')} title="Bold"><Bold class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('italic')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('italic')} title="Italic"><Italic class="w-4 h-4" /></button>
+            <span class="w-px h-5 bg-[var(--border-hover)] mx-1"></span>
+            <button onclick={() => execCmd('h1')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-xs font-bold" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('heading', { level: 1 })} title="Heading 1"><Heading1 class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('h2')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-xs font-bold" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('heading', { level: 2 })} title="Heading 2"><Heading2 class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('h3')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-xs font-bold" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('heading', { level: 3 })} title="Heading 3"><Heading3 class="w-4 h-4" /></button>
+            <span class="w-px h-5 bg-[var(--border-hover)] mx-1"></span>
+            <button onclick={() => execCmd('bulletList')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('bulletList')} title="Bullet List"><List class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('orderedList')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('orderedList')} title="Numbered List"><ListOrdered class="w-4 h-4" /></button>
+            <span class="w-px h-5 bg-[var(--border-hover)] mx-1"></span>
+            <button onclick={() => execCmd('codeBlock')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('codeBlock')} title="Code Block"><Code class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('blockquote')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('blockquote')} title="Blockquote"><Quote class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('link')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('link')} title="Link"><LinkIcon class="w-4 h-4" /></button>
+            <span class="w-px h-5 bg-[var(--border-hover)] mx-1"></span>
+            <button onclick={openMermaidModal} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-[#78FAAE]" title="Insert Mermaid diagram"><Workflow class="w-4 h-4" /></button>
         </div>
     {/if}
 
@@ -332,15 +414,15 @@
                     <div class="w-8 h-8 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
                 </div>
             {:else if fileNotFound}
-                <div class="flex flex-col items-center justify-center h-full gap-4 text-slate-500">
+                <div class="flex flex-col items-center justify-center h-full gap-4 text-[var(--text-faint)]">
                     <FileText class="w-16 h-16 text-slate-700" />
                     <p class="text-lg">File not found</p>
-                    <p class="text-sm text-slate-600">The requested document doesn't exist in this repository.</p>
+                    <p class="text-sm text-[var(--text-faintest)]">The requested document doesn't exist in this repository.</p>
                 </div>
             {:else if !isEditing}
                 <!-- View mode -->
                 <div class="h-full p-8">
-                    <div class="prose prose-invert prose-headings:text-white prose-a:text-[#78FAAE] prose-strong:text-white prose-code:text-[#78FAAE] prose-pre:bg-slate-900 prose-pre:border prose-pre:border-slate-800 prose-blockquote:border-[#78FAAE] prose-blockquote:text-slate-400 max-w-none">
+                    <div bind:this={viewContainerEl} class="prose prose-invert prose-headings:text-[var(--text-primary)] prose-a:text-[var(--code-text)] prose-strong:text-[var(--text-primary)] prose-code:text-[var(--code-text)] prose-pre:bg-[var(--bg-slate-900)] prose-pre:border prose-pre:border-[var(--border-primary)] prose-blockquote:border-[var(--code-text)] prose-blockquote:text-[var(--text-muted)] max-w-none">
                         {@html renderedContent}
                     </div>
                 </div>
@@ -348,7 +430,7 @@
                 <!-- Raw markdown editing -->
                 <div class="h-full p-8">
                     <textarea 
-                        class="w-full h-full bg-transparent border-none outline-none text-sm font-mono text-slate-300 resize-none"
+                        class="w-full h-full bg-transparent border-none outline-none text-sm font-mono text-[var(--text-secondary)] resize-none"
                         value={(() => {
                             if (editorState.editor) {
                                 return turndownService.turndown(editorState.editor.getHTML());
@@ -367,20 +449,20 @@
             {:else}
                 <!-- WYSIWYG editor -->
                 <div class="h-full p-8">
-                    <div bind:this={editorEl} class="prose prose-invert prose-headings:text-white prose-a:text-[#78FAAE] prose-strong:text-white prose-code:text-[#78FAAE] prose-pre:bg-slate-900 prose-pre:border prose-pre:border-slate-800 prose-blockquote:border-[#78FAAE] prose-blockquote:text-slate-400 max-w-none h-full outline-none"></div>
+                    <div bind:this={editorEl} class="prose prose-invert prose-headings:text-[var(--text-primary)] prose-a:text-[var(--code-text)] prose-strong:text-[var(--text-primary)] prose-code:text-[var(--code-text)] prose-pre:bg-[var(--bg-slate-900)] prose-pre:border prose-pre:border-[var(--border-primary)] prose-blockquote:border-[var(--code-text)] prose-blockquote:text-[var(--text-muted)] max-w-none h-full outline-none"></div>
                 </div>
             {/if}
         </div>
 
         <!-- History sidebar -->
         {#if showHistory}
-            <aside class="w-80 border-l border-slate-800 bg-slate-950/50 overflow-y-auto flex-shrink-0">
-                <div class="p-4 border-b border-slate-800 flex items-center justify-between">
-                    <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+            <aside class="w-80 border-l border-[var(--border-primary)] bg-[var(--bg-slate-950)]/50 overflow-y-auto flex-shrink-0">
+                <div class="p-4 border-b border-[var(--border-primary)] flex items-center justify-between">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-2">
                         <Clock class="w-3.5 h-3.5" />
                         History
                     </h3>
-                    <button onclick={() => { showHistory = false; selectedHistoryItem = null; diffContent = null; }} class="p-1 hover:bg-slate-800 rounded-lg text-slate-500 hover:text-white transition-all">
+                    <button onclick={() => { showHistory = false; selectedHistoryItem = null; diffContent = null; }} class="p-1 hover:bg-[var(--hover-surface)] rounded-lg text-[var(--text-faint)] hover:text-[var(--text-primary)] transition-all">
                         <X class="w-4 h-4" />
                     </button>
                 </div>
@@ -390,7 +472,7 @@
                         <div class="w-5 h-5 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
                     </div>
                 {:else if historyEntries.length === 0}
-                    <p class="text-sm text-slate-600 italic p-4">No history available.</p>
+                    <p class="text-sm text-[var(--text-faintest)] italic p-4">No history available.</p>
                 {:else}
                     <div class="p-3 space-y-2">
                         {#each historyEntries as entry}
@@ -399,21 +481,21 @@
                                 role="button"
                                 tabindex="0"
                                 onkeydown={(e) => e.key === 'Enter' && viewDiff(entry)}
-                                class={"w-full p-3 rounded-xl transition-all cursor-pointer border " + (selectedHistoryItem?.oid === entry.oid ? 'border-[#78FAAE]/40' : 'border-slate-800 hover:border-slate-700')}
+                                class={"w-full p-3 rounded-xl transition-all cursor-pointer border " + (selectedHistoryItem?.oid === entry.oid ? 'border-[#78FAAE]/40' : 'border-[var(--border-primary)] hover:border-[var(--border-hover)]')}
                                 onclick={() => viewDiff(entry)}
                             >
                                 <div class="flex items-start justify-between gap-2">
                                     <div class="min-w-0">
-                                        <p class="text-xs font-mono text-slate-500 mb-1">{entry.oid.slice(0, 7)}</p>
-                                        <p class="text-sm text-slate-200 truncate">{entry.message}</p>
-                                        <p class="text-[10px] text-slate-600 mt-1">
+                                        <p class="text-xs font-mono text-[var(--text-faint)] mb-1">{entry.oid.slice(0, 7)}</p>
+                                        <p class="text-sm text-[var(--text-secondary)] truncate">{entry.message}</p>
+                                        <p class="text-[10px] text-[var(--text-faintest)] mt-1">
                                             {entry.author} · {new Date(entry.date).toLocaleDateString()}
                                         </p>
                                     </div>
                                     {#if canEdit}
                                         <button 
                                             onclick={(e) => { e.stopPropagation(); handleRevert(entry.oid); }}
-                                            class="p-1 hover:bg-slate-800 rounded-lg text-slate-500 hover:text-[#78FAAE] transition-all flex-shrink-0"
+                                            class="p-1 hover:bg-[var(--hover-surface)] rounded-lg text-[var(--text-faint)] hover:text-[#78FAAE] transition-all flex-shrink-0"
                                             title="Revert to this version"
                                         >
                                             <RotateCcw class="w-3.5 h-3.5" />
@@ -422,15 +504,15 @@
                                 </div>
 
                                 {#if selectedHistoryItem?.oid === entry.oid && diffContent !== null}
-                                    <div class="mt-3 pt-3 border-t border-slate-800">
+                                    <div class="mt-3 pt-3 border-t border-[var(--border-primary)]">
                                         {#if loadingDiff}
                                             <div class="flex items-center justify-center py-4">
                                                 <div class="w-4 h-4 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
                                             </div>
                                         {:else if diffContent === '(Initial commit)'}
-                                            <p class="text-xs text-slate-500 italic">Initial version</p>
+                                            <p class="text-xs text-[var(--text-faint)] italic">Initial version</p>
                                         {:else}
-                                            <pre class="text-[11px] font-mono text-slate-400 leading-relaxed max-h-48 overflow-y-auto whitespace-pre-wrap">{diffContent}</pre>
+                                            <pre class="text-[11px] font-mono text-[var(--text-muted)] leading-relaxed max-h-48 overflow-y-auto whitespace-pre-wrap">{diffContent}</pre>
                                         {/if}
                                     </div>
                                 {/if}
@@ -443,10 +525,16 @@
     </div>
 </div>
 
+<MermaidEditorModal
+    open={mermaidModalOpen}
+    onInsert={insertMermaidDiagram}
+    onClose={() => mermaidModalOpen = false}
+/>
+
 <!-- Tippy styling for placeholder -->
 <style>
     :global(.tiptap p.is-editor-empty:first-child::before) {
-        color: #475569;
+        color: var(--text-faintest);
         content: attr(data-placeholder);
         float: left;
         height: 0;
@@ -462,8 +550,8 @@
     :global(.tiptap p) { margin-bottom: 0.5rem; }
     :global(.tiptap ul), :global(.tiptap ol) { padding-left: 1.5rem; margin-bottom: 0.5rem; }
     :global(.tiptap li) { margin-bottom: 0.25rem; }
-    :global(.tiptap pre) { background: #0f172a; padding: 0.75rem; border-radius: 0.75rem; border: 1px solid #1e293b; margin-bottom: 0.5rem; }
+    :global(.tiptap pre) { background: var(--bg-slate-950); padding: 0.75rem; border-radius: 0.75rem; border: 1px solid var(--border-primary); margin-bottom: 0.5rem; }
     :global(.tiptap code) { font-size: 0.875rem; }
-    :global(.tiptap blockquote) { border-left: 3px solid #78FAAE; padding-left: 1rem; color: #94a3b8; margin-bottom: 0.5rem; }
+    :global(.tiptap blockquote) { border-left: 3px solid #78FAAE; padding-left: 1rem; color: var(--text-muted); margin-bottom: 0.5rem; }
     :global(.tiptap a) { color: #78FAAE; text-decoration: underline; }
 </style>

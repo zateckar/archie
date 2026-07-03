@@ -1,6 +1,12 @@
 <script lang="ts">
     import { page } from '$app/state';
-    import { FileText, GitBranch, Users, LayoutDashboard, ChevronLeft, LogOut, Network } from 'lucide-svelte';
+    import FileText from 'lucide-svelte/icons/file-text';
+import GitBranch from 'lucide-svelte/icons/git-branch';
+import Users from 'lucide-svelte/icons/users';
+import LayoutDashboard from 'lucide-svelte/icons/layout-dashboard';
+import ChevronLeft from 'lucide-svelte/icons/chevron-left';
+import LogOut from 'lucide-svelte/icons/log-out';
+import Network from 'lucide-svelte/icons/network';
 
     let { children } = $props();
 
@@ -13,10 +19,10 @@
     ];
 </script>
 
-<div class="flex h-screen bg-slate-950 text-slate-100 font-sans overflow-hidden">
+<div class="flex h-screen bg-[var(--bg-page)] text-slate-100 font-sans overflow-hidden">
     <!-- Admin Sidebar -->
-    <aside class="w-64 bg-slate-900 border-r border-slate-800 flex flex-col shadow-xl">
-        <div class="p-6 border-b border-slate-800 flex items-center justify-between">
+    <aside class="w-64 bg-[var(--bg-slate-900)] border-r border-[var(--border-primary)] flex flex-col shadow-xl">
+        <div class="p-6 border-b border-[var(--border-primary)] flex items-center justify-between">
             <h1 class="text-xl font-bold bg-gradient-to-r from-[#78FAAE] to-[#0E3A2F] bg-clip-text text-transparent uppercase tracking-widest">
                 ARCHIE ADMIN
             </h1>
@@ -27,24 +33,24 @@
                 <a 
                     href={item.href} 
                     class="flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group
-                    {page.url.pathname === item.href ? 'bg-[#0E3A2F] text-white shadow-lg shadow-[#0E3A2F]/20' : 'hover:bg-slate-800 text-slate-400 hover:text-white'}"
+                    {page.url.pathname === item.href ? 'bg-[#0E3A2F] text-[#78FAAE] shadow-lg shadow-[#0E3A2F]/20' : 'hover:bg-[var(--hover-surface)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'}"
                 >
-                    <item.icon class="w-5 h-5 {page.url.pathname === item.href ? 'text-white' : 'text-slate-500 group-hover:text-[#78FAAE]'}" />
+                    <item.icon class="w-5 h-5 {page.url.pathname === item.href ? 'text-[#78FAAE]' : 'text-[var(--text-faint)] group-hover:text-[#78FAAE]'}" />
                     <span class="font-medium">{item.name}</span>
                 </a>
             {/each}
         </nav>
 
-        <div class="p-4 border-t border-slate-800">
-            <a href="/" class="flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white transition-all group">
-                <ChevronLeft class="w-5 h-5 text-slate-500 group-hover:text-[#78FAAE]" />
+        <div class="p-4 border-t border-[var(--border-primary)]">
+            <a href="/" class="flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-[var(--hover-surface)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all group">
+                <ChevronLeft class="w-5 h-5 text-[var(--text-faint)] group-hover:text-[#78FAAE]" />
                 <span class="font-medium">Back to Chat</span>
             </a>
         </div>
     </aside>
 
     <!-- Main Content -->
-    <main class="flex-1 overflow-y-auto bg-slate-950 relative">
+    <main class="flex-1 overflow-y-auto bg-[var(--bg-page)] relative">
         {@render children()}
     </main>
 </div>

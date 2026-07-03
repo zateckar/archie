@@ -64,7 +64,7 @@ export async function addDocument(filename: string, content: string, metadata: {
     }
 
     // ── Phase 2: fast synchronous DB writes (transaction is brief) ────────────
-    const docId = db.transaction(() => {
+    const { docId, chunkRecords } = db.transaction(() => {
         // Explicitly delete to avoid unique constraint issues with partial indexes
         if (metadata.repoId && metadata.path) {
             db.prepare('DELETE FROM documents WHERE repo_id = ? AND path = ?').run(metadata.repoId, metadata.path);
@@ -81,16 +81,18 @@ export async function addDocument(filename: string, content: string, metadata: {
         );
         const newDocId = result.lastInsertRowid;
 
+        const chunkRecords: { id: number; content: string }[] = [];
         for (let i = 0; i < chunks.length; i++) {
-            db.prepare('INSERT INTO chunks (doc_id, content, embedding) VALUES (?, ?, vector_as_f32(?))')
-                .run(newDocId, chunks[i], JSON.stringify(embeddings[i]));
+            const chunkResult = db.prepare('INSERT INTO chunks (doc_id, content, embedding) VALUES (?, ?, vector_as_f32(?)) RETURNING id')
+                .get(newDocId, chunks[i], JSON.stringify(embeddings[i])) as { id: number };
+            chunkRecords.push({ id: chunkResult.id, content: chunks[i] });
         }
 
-        return newDocId;
+        return { docId: newDocId, chunkRecords };
     })();
 
     // ── Phase 3: async knowledge processing (outside any transaction) ─────────
-    await processDocumentKnowledge(Number(docId), chunks, summary);
+    await processDocumentKnowledge(Number(docId), chunkRecords, summary);
 
     // ── Phase 4: Community detection (outside any transaction) ─────────────────
     // Recompute communities after knowledge extraction. Full recompute is fast
@@ -289,14 +291,14 @@ export async function reprocessKnowledge(
 
     let processed = 0;
     for (const doc of docs) {
-        let chunkRows: { content: string }[];
+        let chunkRows: { id: number; content: string }[];
         if (options.rechunk) {
             db.prepare('DELETE FROM chunks WHERE doc_id = ?').run(doc.id);
             // Re-embed via the regular pipeline
             await embedAndStoreChunks(doc.id, doc.filename, doc.content, undefined);
-            chunkRows = db.prepare('SELECT content FROM chunks WHERE doc_id = ?').all(doc.id) as { content: string }[];
+            chunkRows = db.prepare('SELECT id, content FROM chunks WHERE doc_id = ?').all(doc.id) as { id: number; content: string }[];
         } else {
-            chunkRows = db.prepare('SELECT content FROM chunks WHERE doc_id = ?').all(doc.id) as { content: string }[];
+            chunkRows = db.prepare('SELECT id, content FROM chunks WHERE doc_id = ?').all(doc.id) as { id: number; content: string }[];
         }
 
         if (chunkRows.length === 0) {
@@ -304,7 +306,7 @@ export async function reprocessKnowledge(
             continue;
         }
 
-        await processDocumentKnowledge(doc.id, chunkRows.map((c) => c.content), doc.summary ?? undefined);
+        await processDocumentKnowledge(doc.id, chunkRows, doc.summary ?? undefined);
         processed++;
     }
 
@@ -438,7 +440,7 @@ export async function searchClaims(
     query: string,
     topicIds: number[] | null = null,
     limit = 20
-): Promise<{ id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number }[]> {
+): Promise<{ id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number; claim_type: string; filename: string; path: string | null }[]> {
     const queryEmbedding = await getEmbedding(query, "RETRIEVAL_QUERY");
 
     try {
@@ -455,10 +457,13 @@ export async function searchClaims(
             const placeholders = topicIds.map(() => '?').join(',');
             sql = `
                 SELECT kc.id, kc.claim_text, kc.topic_id, kc.doc_id, t.name as topic_name,
+                       COALESCE(kc.claim_type, 'assertion') as claim_type,
+                       COALESCE(d.filename, '') as filename, d.path,
                        (1 - v.distance) as score
                 FROM vector_full_scan('knowledge_claims', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
                 JOIN knowledge_claims kc ON kc.id = v.rowid
                 JOIN topics t ON kc.topic_id = t.id
+                LEFT JOIN documents d ON kc.doc_id = d.id
                 WHERE kc.embedding IS NOT NULL
                   AND kc.status = 'active'
                   AND kc.topic_id IN (${placeholders})
@@ -468,10 +473,13 @@ export async function searchClaims(
         } else {
             sql = `
                 SELECT kc.id, kc.claim_text, kc.topic_id, kc.doc_id, t.name as topic_name,
+                       COALESCE(kc.claim_type, 'assertion') as claim_type,
+                       COALESCE(d.filename, '') as filename, d.path,
                        (1 - v.distance) as score
                 FROM vector_full_scan('knowledge_claims', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
                 JOIN knowledge_claims kc ON kc.id = v.rowid
                 JOIN topics t ON kc.topic_id = t.id
+                LEFT JOIN documents d ON kc.doc_id = d.id
                 WHERE kc.embedding IS NOT NULL
                   AND kc.status = 'active'
                 ORDER BY v.distance ASC
@@ -479,7 +487,7 @@ export async function searchClaims(
             params = [JSON.stringify(queryEmbedding), limit];
         }
 
-        const results = db.prepare(sql).all(...params) as { id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number }[];
+        const results = db.prepare(sql).all(...params) as { id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number; claim_type: string; filename: string; path: string | null }[];
         return results.slice(0, limit);
     } catch (e) {
         console.warn('searchClaims failed (no embeddings or vector extension unavailable):', (e as Error).message);
@@ -545,20 +553,23 @@ export function getRelatedTopics(topicId: number, maxDepth = 2): { id: number; n
 /**
  * Get all active claims for a set of topics.
  */
-export function getTopicClaims(topicIds: number[], status = 'active'): { id: number; claim_text: string; topic_name: string; topic_id: number }[] {
+export function getTopicClaims(topicIds: number[], status = 'active'): { id: number; claim_text: string; topic_name: string; topic_id: number; claim_type: string; filename: string; path: string | null }[] {
     if (topicIds.length === 0) return [];
 
     const placeholders = topicIds.map(() => '?').join(',');
     const sql = `
-        SELECT kc.id, kc.claim_text, kc.topic_id, t.name as topic_name
+        SELECT kc.id, kc.claim_text, kc.topic_id, t.name as topic_name,
+               COALESCE(kc.claim_type, 'assertion') as claim_type,
+               COALESCE(d.filename, '') as filename, d.path
         FROM knowledge_claims kc
         JOIN topics t ON kc.topic_id = t.id
+        LEFT JOIN documents d ON kc.doc_id = d.id
         WHERE kc.topic_id IN (${placeholders})
           AND kc.status = ?
         ORDER BY kc.topic_id, kc.created_at
     `;
 
-    return db.prepare(sql).all(...topicIds, status) as { id: number; claim_text: string; topic_name: string; topic_id: number }[];
+    return db.prepare(sql).all(...topicIds, status) as { id: number; claim_text: string; topic_name: string; topic_id: number; claim_type: string; filename: string; path: string | null }[];
 }
 
 /**
@@ -620,15 +631,24 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
     const semanticClaims = await searchClaims(query, null, maxClaims);
 
     // Step 5: Merge and deduplicate claims, prioritizing semantic search results
-    const claimMap = new Map<number, { claim_text: string; topic_name: string; topic_id: number; score: number }>();
+    const claimMap = new Map<number, { claim_text: string; topic_name: string; topic_id: number; score: number; claim_type: string; filename?: string; path?: string | null }>();
 
     for (const claim of semanticClaims) {
-        claimMap.set(claim.id, { ...claim, score: claim.score });
+        claimMap.set(claim.id, { ...claim, score: claim.score, claim_type: claim.claim_type || 'assertion' });
     }
 
     for (const claim of topicClaims) {
         if (!claimMap.has(claim.id) && claimMap.size < maxClaims) {
-            claimMap.set(claim.id, { ...claim, score: 0.3 }); // Lower score for topic-based retrieval
+            claimMap.set(claim.id, { ...claim, score: 0.3, claim_type: claim.claim_type || 'assertion' });
+        }
+    }
+
+    // Boost constraint claims for question queries
+    if (/\b(does|can|is|should|will|could|would|may|might)\b/i.test(query)) {
+        for (const [id, claim] of claimMap) {
+            if (['negation', 'condition', 'boundary'].includes(claim.claim_type)) {
+                claim.score *= 1.5;
+            }
         }
     }
 
@@ -638,12 +658,17 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
     const lines: string[] = ['KNOWLEDGE CONTEXT:', ''];
 
     // Group claims by topic
-    const claimsByTopic = new Map<number, { claim_text: string; score: number }[]>();
+    const claimsByTopic = new Map<number, { claim_text: string; score: number; claim_type: string; source?: string }[]>();
     for (const claim of claimMap.values()) {
         if (!claimsByTopic.has(claim.topic_id)) {
             claimsByTopic.set(claim.topic_id, []);
         }
-        claimsByTopic.get(claim.topic_id)!.push({ claim_text: claim.claim_text, score: claim.score });
+        claimsByTopic.get(claim.topic_id)!.push({
+            claim_text: claim.claim_text,
+            score: claim.score,
+            claim_type: claim.claim_type || 'assertion',
+            source: claim.path || claim.filename
+        });
     }
 
     // Output primary topics first, then related
@@ -666,12 +691,29 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
             lines.push(`*${topic.description}*`);
         }
         lines.push('');
-        lines.push('**Claims:**');
-
         // Sort claims by score within topic
         claims.sort((a, b) => b.score - a.score);
-        for (const claim of claims) {
-            lines.push(`- ${claim.claim_text}`);
+
+        const assertions = claims.filter(c => c.claim_type === 'assertion' || !c.claim_type);
+        const constraints = claims.filter(c => ['negation', 'condition', 'boundary', 'comparison'].includes(c.claim_type));
+
+        if (assertions.length > 0) {
+            lines.push('**Facts:**');
+            for (const c of assertions) {
+                lines.push(`- ${c.claim_text}${c.source ? ` [${c.source}]` : ''}`);
+            }
+        }
+        if (constraints.length > 0) {
+            lines.push('**Constraints & Exceptions:**');
+            for (const c of constraints) {
+                lines.push(`- ${c.claim_text}${c.source ? ` [${c.source}]` : ''}`);
+            }
+        }
+        if (assertions.length === 0 && constraints.length === 0) {
+            lines.push('**Claims:**');
+            for (const c of claims) {
+                lines.push(`- ${c.claim_text}${c.source ? ` [${c.source}]` : ''}`);
+            }
         }
 
         // Show related topics

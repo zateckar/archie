@@ -1,7 +1,9 @@
 <script lang="ts">
     import { setContext } from 'svelte';
     import { page } from '$app/state';
-    import { MessageSquare, BookOpen, Plus } from 'lucide-svelte';
+    import MessageSquare from 'lucide-svelte/icons/message-square';
+import BookOpen from 'lucide-svelte/icons/book-open';
+import Plus from 'lucide-svelte/icons/plus';
     import WikiTreeItem from '$lib/components/WikiTreeItem.svelte';
 
     let { children, data } = $props();
@@ -75,8 +77,8 @@
         try {
             const res = await fetch('/api/wiki');
             if (res.ok) repos = await res.json();
-        } catch (err) {
-            console.error(err);
+        } catch {
+            // Ignore — may be aborted during navigation
         }
     }
 
@@ -88,8 +90,8 @@
             if (res.ok) {
                 fileTree = await res.json();
             }
-        } catch (err) {
-            console.error(err);
+        } catch {
+            // Ignore — may be aborted during navigation
         } finally {
             treeLoading = false;
         }
@@ -184,42 +186,42 @@
     });
 </script>
 
-<div class="flex h-screen bg-[#050505] text-slate-100 font-sans overflow-hidden">
+<div class="flex h-screen bg-[var(--bg-page)] text-slate-100 font-sans overflow-hidden">
     <!-- Sidebar — w-80 gives a bit more breathing room than w-72 -->
-    <aside class="w-80 bg-slate-950/80 border-r border-slate-800 flex flex-col flex-shrink-0">
+    <aside class="w-80 bg-[var(--bg-slate-950)]/80 border-r border-[var(--border-primary)] flex flex-col flex-shrink-0">
         <!-- Header -->
-        <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+        <div class="p-4 border-b border-[var(--border-primary)] flex items-center justify-between">
             <div class="flex items-center gap-2">
                 <BookOpen class="w-5 h-5 text-[#78FAAE]" />
-                <h1 class="font-bold text-white text-sm uppercase tracking-widest">Wiki</h1>
+                <h1 class="font-bold text-[var(--text-primary)] text-sm uppercase tracking-widest">Wiki</h1>
             </div>
-            <a href="/" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-[#78FAAE]/50 transition-all group" title="Back to Chat">
+            <a href="/" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[var(--bg-slate-900)] border border-[var(--border-primary)] hover:border-[#78FAAE]/50 transition-all group" title="Back to Chat">
                 <MessageSquare class="w-4 h-4 text-[#78FAAE] group-hover:scale-110 transition-transform" />
-                <span class="text-[10px] font-bold text-slate-400 group-hover:text-white uppercase tracking-widest">Chat</span>
+                <span class="text-[10px] font-bold text-[var(--text-muted)] group-hover:text-[var(--text-primary)] uppercase tracking-widest">Chat</span>
             </a>
         </div>
 
         <!-- Repo selector (when no repo is selected) -->
         {#if !selectedRepoId}
             <div class="flex-1 overflow-y-auto p-3">
-                <p class="text-xs text-slate-500 uppercase tracking-wider font-bold px-2 mb-3">Repositories</p>
+                <p class="text-xs text-[var(--text-faint)] uppercase tracking-wider font-bold px-2 mb-3">Repositories</p>
                 <div class="space-y-1">
                     {#each repos as repo}
                         <a 
                             href={`/wiki/${repo.id}`}
-                            class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-800/50 transition-all text-sm group"
+                            class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-[var(--hover-surface)] transition-all text-sm group"
                         >
                             <div class="w-8 h-8 rounded-lg bg-[#0E3A2F]/30 flex items-center justify-center text-[#78FAAE] flex-shrink-0">
                                 <BookOpen class="w-4 h-4" />
                             </div>
                             <div class="overflow-hidden">
-                                <p class="font-medium text-slate-200 truncate">{getRepoName(repo)}</p>
-                                <p class="text-[10px] text-slate-500 truncate font-mono">{repo.url}</p>
+                                <p class="font-medium text-[var(--text-secondary)] truncate">{getRepoName(repo)}</p>
+                                <p class="text-[10px] text-[var(--text-faint)] truncate font-mono">{repo.url}</p>
                             </div>
                         </a>
                     {/each}
                     {#if repos.length === 0}
-                        <p class="text-slate-600 text-sm italic px-3 py-4">No connected repos yet. Add one in the admin panel.</p>
+                        <p class="text-[var(--text-faintest)] text-sm italic px-3 py-4">No connected repos yet. Add one in the admin panel.</p>
                     {/if}
                 </div>
             </div>
@@ -227,11 +229,11 @@
             <!-- Tree sidebar -->
             <div class="flex-1 overflow-y-auto p-3">
                 <div class="flex items-center justify-between mb-3 px-2">
-                    <p class="text-xs text-slate-500 uppercase tracking-wider font-bold">Documents</p>
+                    <p class="text-xs text-[var(--text-faint)] uppercase tracking-wider font-bold">Documents</p>
                     {#if canEdit}
                         <button 
                             onclick={() => showNewPageForm = !showNewPageForm}
-                            class="p-1 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-[#78FAAE] transition-all"
+                            class="p-1 hover:bg-[var(--hover-surface)] rounded-lg text-[var(--text-muted)] hover:text-[#78FAAE] transition-all"
                             title="New Page"
                         >
                             <Plus class="w-4 h-4" />
@@ -243,13 +245,13 @@
                     <div class="mb-3 px-2">
                         <form onsubmit={(e) => { e.preventDefault(); handleCreateNewPage(); }} class="flex flex-col gap-2">
                             <!-- File / Folder toggle -->
-                            <div class="flex rounded-lg overflow-hidden border border-slate-700 text-xs">
+                            <div class="flex rounded-lg overflow-hidden border border-[var(--border-hover)] text-xs">
                                 <button
                                     type="button"
                                     onclick={() => { newItemType = 'file'; newPagePath = ''; }}
                                     class="flex-1 py-1.5 font-semibold transition-all {newItemType === 'file'
                                         ? 'bg-[#0E3A2F] text-[#78FAAE]'
-                                        : 'bg-slate-900 text-slate-400 hover:text-slate-200'}"
+                                        : 'bg-[var(--bg-slate-900)] text-[var(--text-muted)] hover:text-[var(--text-secondary)]'}"
                                 >
                                     File
                                 </button>
@@ -258,7 +260,7 @@
                                     onclick={() => { newItemType = 'folder'; newPagePath = ''; }}
                                     class="flex-1 py-1.5 font-semibold transition-all {newItemType === 'folder'
                                         ? 'bg-[#0E3A2F] text-[#78FAAE]'
-                                        : 'bg-slate-900 text-slate-400 hover:text-slate-200'}"
+                                        : 'bg-[var(--bg-slate-900)] text-[var(--text-muted)] hover:text-[var(--text-secondary)]'}"
                                 >
                                     Folder
                                 </button>
@@ -268,18 +270,18 @@
                                 type="text"
                                 bind:value={newPagePath}
                                 placeholder={newItemType === 'folder' ? 'folder-name or path/to/folder' : 'page.md or path/to/page.md'}
-                                class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-[#78FAAE]/50"
+                                class="w-full bg-[var(--bg-slate-900)] border border-[var(--border-hover)] rounded-xl px-3 py-2 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-faintest)] focus:outline-none focus:border-[#78FAAE]/50"
                             />
 
                             {#if newItemType === 'folder'}
-                                <p class="text-[10px] text-slate-500 px-1">A <span class="text-slate-400 font-mono">README.md</span> will be created inside automatically.</p>
+                                <p class="text-[10px] text-[var(--text-faint)] px-1">A <span class="text-[var(--text-muted)] font-mono">README.md</span> will be created inside automatically.</p>
                             {/if}
 
                             <div class="flex gap-2">
-                                <button type="submit" class="px-3 py-1.5 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 rounded-lg text-xs font-bold transition-all">
+                                <button type="submit" class="px-3 py-1.5 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] rounded-lg text-xs font-bold transition-all">
                                     Create {newItemType === 'folder' ? 'Folder' : 'File'}
                                 </button>
-                                <button type="button" onclick={() => { showNewPageForm = false; newPagePath = ''; newItemType = 'file'; }} class="px-3 py-1.5 hover:bg-slate-800 rounded-lg text-xs transition-all">Cancel</button>
+                                <button type="button" onclick={() => { showNewPageForm = false; newPagePath = ''; newItemType = 'file'; }} class="px-3 py-1.5 hover:bg-[var(--hover-surface)] rounded-lg text-xs transition-all">Cancel</button>
                             </div>
                         </form>
                     </div>
@@ -290,7 +292,7 @@
                         <div class="w-5 h-5 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
                     </div>
                 {:else if fileTree.length === 0}
-                    <p class="text-slate-600 text-xs italic px-3 py-4">No markdown files found in this repo.</p>
+                    <p class="text-[var(--text-faintest)] text-xs italic px-3 py-4">No markdown files found in this repo.</p>
                 {:else}
                     <div class="space-y-0.5">
                         {#each fileTree as item (item.path)}
@@ -303,7 +305,7 @@
     </aside>
 
     <!-- Main content -->
-    <main class="flex-1 overflow-y-auto bg-[#050505]">
+    <main class="flex-1 overflow-y-auto bg-[var(--bg-page)]">
         {@render children()}
     </main>
 </div>

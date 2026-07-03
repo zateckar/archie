@@ -7,7 +7,7 @@ Archie is a sophisticated Retrieval-Augmented Generation (RAG) chatbot built wit
 - **Document Management:** Sync documents from Git repositories or upload them manually.
 - **Advanced RAG Pipeline:** Uses hybrid search (Vector + Keyword) with LLM-based reranking.
 - **Document Preprocessing:** LLM-powered cleaning removes boilerplate, fixes formatting, and restructures content before ingestion.
-- **Semantic Knowledge Layer:** Automatically extracts a knowledge graph (topics, relationships, claims) from documents.
+- **Semantic Knowledge Layer:** Automatically extracts a knowledge graph (topics, relationships, claims) from documents with cross-chunk context awareness.
 - **LLM-Driven Topic Taxonomy:** Hybrid taxonomy system — incremental placement after each import + full LLM-powered hierarchy rebuild on demand or after git sync.
 - **Community Detection:** Unsupervised graph clustering (Louvain) groups related topics into functional domains for exploration and visualization.
 - **Consistency Checking:** Detects conflicts and updates in factual claims across your knowledge base.
@@ -16,10 +16,14 @@ Archie is a sophisticated Retrieval-Augmented Generation (RAG) chatbot built wit
 - **Claim Attribution:** Tracks which document version (content hash) produced each claim, with staleness detection when source documents change.
 - **Relationship Validation Logging:** Out-of-vocabulary relationship types are tracked and summarized, helping expand the synonym dictionary over time.
 - **Semantic Chunking:** Uses LLM to split documents into meaningful sections rather than arbitrary fixed sizes.
+- **Context Synthesis:** An intermediate LLM pass transforms raw retrieved data into coherent, query-focused briefings before response generation — mimicking fine-tuned model recall.
+- **Multi-Turn Conversation Memory:** Conversation briefings maintain topical coherence across turns, so follow-up questions build on established context rather than restarting from scratch.
+- **Expanded Claim Types:** Extracts five claim types — assertions, negations, conditions, comparisons, and boundaries — for nuanced answers that acknowledge limitations and exceptions.
+- **Source Grounding:** End-to-end lineage from document → chunk → claim, with inline `[source]` citations in knowledge context and responses.
+- **User Feedback Loop:** Thumbs up/down on every assistant response, stored with full context snapshots for quality analysis.
 - **Real-time Chat:** Conversational interface with streaming responses and source citations.
 - **Rich Markdown Responses:** Chat responses are automatically formatted with headers, tables, code blocks, lists, and relationship arrows for maximum readability.
 - **Sleek UI:** Modern dark theme with a terminal-inspired aesthetic.
-- **Admin Dashboard:** Manage users, repositories, documents, and the knowledge graph through a protected administrative interface.
   - **Knowledge Graph Visualization:** Interactive force-directed canvas graph with category-colored nodes, directed edges, zoom/pan, and node detail panels.
   - **Conflict Resolution:** Side-by-side comparison of active vs. conflicting claims with accept/dismiss/reject actions and document version tracking.
   - **Taxonomy Management:** View topic hierarchy by category and parent-child tree, trigger LLM-powered taxonomy rebuilds.
@@ -77,6 +81,10 @@ Raw Document
 │  Phase 3: Knowledge Extraction  (async, no transaction)          │
 │  ─────────────────────────────────────────────────────────────── │
 │  • LLM extracts topics, relationships & claims per chunk         │
+│  • Sliding window context: each chunk sees adjacent chunks       │
+│    (truncated to 800 chars) for pronoun resolution & coherence   │
+│  • Expanded claim types: assertion, negation, condition,         │
+│    comparison, boundary — with chunk_id lineage tracking         │
 │  • Topic name normalization & deduplication                      │
 │  • Relationship validation against canonical vocabulary          │
 │  • Batch consistency checking for claims                         │
@@ -136,7 +144,7 @@ Archie doesn't just store chunks; it understands the content.
 *   **Knowledge Extraction:** After ingestion, an asynchronous process uses Gemini to extract:
     *   **Topics:** Key concepts, their descriptions, and categories (e.g., Technical, Architecture).
     *   **Relationships:** How topics connect (e.g., "SvelteKit" *depends_on* "Vite"). A closed vocabulary of 15 canonical relationship types with ~70+ synonym mappings ensures consistency.
-    *   **Claims:** Atomic factual statements or rules found in the text, attributed to specific document versions via content hashes.
+    *   **Claims:** Atomic factual statements typed as assertion, negation, condition, comparison, or boundary — attributed to specific document versions and source chunks.
 *   **Relationship Validation:** Out-of-vocabulary relationship types invented by the LLM are tracked and logged as a summary, providing visibility into vocabulary gaps.
 *   **Consistency Management:** When a new claim is extracted, Archie compares it against existing claims for that topic:
     *   **Duplicates:** Semantic duplicates are identified and skipped.
@@ -243,14 +251,18 @@ Communities are used exclusively for **exploration and visualization**:
 
 ### 5. Chatbot & RAG Pipeline
 
-The chat interface provides a natural way to interact with the knowledge base.
+The chat interface provides a natural way to interact with the knowledge base, with a multi-stage pipeline designed to produce fine-tuned-model-caliber responses.
 
 *   **Query Condensation:** Rephrases follow-up questions into standalone search queries.
+*   **Conversation Memory:** For multi-turn conversations, a conversation briefing summarizes established facts, topics, and user intent from recent exchanges.
 *   **Hybrid Search:** Vector + FTS5 keyword search, combined via Reciprocal Rank Fusion (RRF).
-*   **LLM Reranking:** Top candidates are reranked for maximum relevance.
-*   **Contextual Generation:** Responses cite sources using `[Source Name]` format.
+*   **Multi-Pass Context Gathering:** If initial retrieval is insufficient, the pipeline refines queries and searches again for missing aspects.
+*   **Context Synthesis:** An intermediate LLM call transforms raw retrieved data (knowledge graph claims + verbatim excerpts) into a coherent, query-focused briefing document. This replaces the "retrieval dump" pattern with expert-style prose that the chat model can reason over naturally.
+*   **Lean System Prompt:** A ~600-token prompt focused on reasoning quality (vs. the previous ~2000-token adversarial formatting prompt), letting the model spend its attention on content rather than compliance.
+*   **Source-Grounded Responses:** Claims carry inline source attribution through the entire pipeline, so the chat model's citations match actual source documents.
+*   **Claim Type Awareness:** Question queries automatically boost constraint-type claims (negations, conditions, boundaries) to surface nuanced answers.
+*   **User Feedback:** Thumbs up/down on each response, stored with the full context snapshot for pipeline tuning.
 
----
 
 ## 💻 Tech Stack
 

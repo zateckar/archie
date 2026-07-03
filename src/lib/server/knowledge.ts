@@ -246,7 +246,7 @@ export function getCanonicalTopicNames(limit = 80): string[] {
     return rows.map((r) => r.name);
 }
 
-export async function processDocumentKnowledge(docId: number, chunks: string[], documentSummary?: string) {
+export async function processDocumentKnowledge(docId: number, chunks: { id: number; content: string }[], documentSummary?: string) {
     console.log(`Processing knowledge for document ${docId} (${chunks.length} chunks)...`);
 
     // Guard: the document may have been deleted before this async processing completed
@@ -265,7 +265,8 @@ export async function processDocumentKnowledge(docId: number, chunks: string[], 
     let relCount = 0;
     const droppedRelTypes = new Map<string, number>();
 
-    for (const chunk of chunks) {
+    for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
         // Re-check on every iteration: processDocumentKnowledge runs outside any
         // transaction (Phase 3 of addDocument), so an await gap between chunks lets
         // a concurrent sync or an admin deletion remove the document. Without this
@@ -276,7 +277,17 @@ export async function processDocumentKnowledge(docId: number, chunks: string[], 
         }
 
         const existingNames = getCanonicalTopicNames(80);
-        const knowledge = await extractKnowledge(chunk, existingNames, documentSummary);
+
+        // Build sliding window context for cross-chunk coherence
+        const prevContext = i > 0
+            ? `[PRECEDING SECTION]\n${chunks[i - 1].content.substring(0, 800)}\n[/PRECEDING SECTION]\n\n`
+            : '';
+        const nextContext = i < chunks.length - 1
+            ? `\n\n[FOLLOWING SECTION]\n${chunks[i + 1].content.substring(0, 800)}\n[/FOLLOWING SECTION]`
+            : '';
+        const contextualizedChunk = `${prevContext}[CURRENT SECTION — extract knowledge from THIS section only]\n${chunk.content}\n[/CURRENT SECTION]${nextContext}`;
+
+        const knowledge = await extractKnowledge(contextualizedChunk, existingNames, documentSummary);
         if (!knowledge || !knowledge.topics) continue;
 
         // 1. Process Topics
@@ -367,7 +378,7 @@ export async function processDocumentKnowledge(docId: number, chunks: string[], 
 
         // 3. Process Claims with Quality Filtering and Batch Consistency Check
         // Group valid claims by topic for efficient batch processing
-        const claimsByTopicForBatch = new Map<number, { claim: string; topicName: string }[]>();
+        const claimsByTopicForBatch = new Map<number, { claim: string; topicName: string; type?: string }[]>();
 
         for (const claim of knowledge.claims ?? []) {
             if (!claim?.topic || !claim?.claim) continue;
@@ -390,7 +401,7 @@ export async function processDocumentKnowledge(docId: number, chunks: string[], 
             if (!claimsByTopicForBatch.has(topicId)) {
                 claimsByTopicForBatch.set(topicId, []);
             }
-            claimsByTopicForBatch.get(topicId)!.push({ claim: claim.claim, topicName: claim.topic });
+            claimsByTopicForBatch.get(topicId)!.push({ claim: claim.claim, topicName: claim.topic, type: claim.type });
         }
 
         // Retrieve document content_hash once per chunk
@@ -419,10 +430,10 @@ export async function processDocumentKnowledge(docId: number, chunks: string[], 
 
                 try {
                     const insertResult = db.prepare(
-                        `INSERT INTO knowledge_claims (topic_id, doc_id, claim_text, claim_hash, status, doc_content_hash)
-                         VALUES (?, ?, ?, ?, ?, ?)
+                        `INSERT INTO knowledge_claims (topic_id, doc_id, chunk_id, claim_text, claim_hash, status, doc_content_hash, claim_type)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                          RETURNING id`
-                    ).get(topicId, docId, claimData.claim, claimHash, status, docContentHash) as { id: number } | undefined;
+                    ).get(topicId, docId, chunk.id, claimData.claim, claimHash, status, docContentHash, claimData.type || 'assertion') as { id: number } | undefined;
 
                     if (!insertResult) continue;
                     claimCount++;

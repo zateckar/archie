@@ -266,191 +266,143 @@ export async function condenseQuery(history: { role: string, content: string }[]
     }
 }
 
-export async function chatStream(prompt: string, context: string, history: { role: string, content: string }[] = []) {
+function buildSystemPrompt(context: string): string {
     const hasContext = context && context.trim().length > 0;
-    const isKnowledgeContext = hasContext && context.includes('KNOWLEDGE CONTEXT:');
+    const hasKnowledge = hasContext && !context.includes('No relevant knowledge found');
 
-    const systemPrompt = `
-        You are Archie, an intelligent knowledge assistant with access to a structured knowledge graph extracted from documents.
+    return `You are Archie, a domain expert knowledge assistant.
 
-        ${hasContext ? `**KNOWLEDGE CONTEXT PROVIDED:**
-        ${isKnowledgeContext
-            ? `The context below comes from a knowledge graph - structured topics, factual claims, and their relationships - NOT raw documents.
+${hasKnowledge
+    ? `KNOWLEDGE BRIEFING:
+The following briefing was prepared from a structured knowledge base. Treat every fact in it as verified. Ground your answer in this briefing.
 
-        - **Topics** represent key concepts in the knowledge base
-        - **Claims** are atomic factual statements verified from source documents
-        - **Relationships** show how topics connect (governs, depends_on, is_part_of, etc.)
+${context}`
+    : hasContext
+    ? `CONTEXT:\n${context}`
+    : 'No relevant knowledge was found for this query. Say so clearly and suggest how the user might rephrase.'}
 
-        ${context}`
-            : `${context}`}`
-        : '**NOTE:** No relevant knowledge was found for this query. This could mean the information hasn\'t been indexed yet, or the query needs refinement.'}
+RESPONSE GUIDELINES:
+- Answer the question directly and completely using the briefing above
+- Synthesize information across topics; do not just enumerate facts
+- State specific details: numbers, dates, thresholds, names — never be vague when the briefing is specific
+- If the briefing partially answers the question, deliver what you have and note what's missing
+- If the briefing contains contradictions, present both sides with their sources
+- Never fabricate information not present in the briefing
+- Use markdown: headers for sections, **bold** for key terms, bullet lists for enumerations, tables for comparisons
+- Be direct and confident — you are the expert on this topic
 
-        **YOUR APPROACH:**
+DIAGRAMS (Mermaid):
+- For processes, architectures, data flows, sequences, state machines, relationships, or hierarchies, include a Mermaid diagram in a fenced code block tagged \`mermaid\`. Example:
 
-        1. **Reason with Structure**:
-           ${isKnowledgeContext
-            ? '- Use topic relationships to understand broader context\n           - Connect multiple topics when the answer requires it\n           - Navigate the graph to find related information'
-            : '- Analyze the provided context carefully\n           - Look for connections between different pieces of information'}
+\`\`\`mermaid
+flowchart TD
+    A[Start] --> B{Decision}
+    B -->|Yes| C[Do thing]
+    B -->|No| D[Skip]
+\`\`\`
 
-        2. **Cite Claims, Not Documents**:
-           ${isKnowledgeContext
-            ? '- Reference specific claims as evidence (e.g., "According to the claims under Topic X...")\n           - Each claim is a verified fact - treat it as authoritative\n           - When multiple claims exist, synthesize them coherently'
-            : '- Always cite sources using [Source Name] format when using information from context'}
+- Supported diagram types: flowchart, sequenceDiagram, classDiagram, stateDiagram-v2, erDiagram, gantt, mindmap.
+- Prefer \`flowchart\` over the legacy \`graph\` syntax. Keep diagrams focused (5–15 nodes). Avoid double-quotes inside node labels — escape with single quotes or omit them. Do not use reserved words (end, default) as node IDs.
+- Diagrams enhance text explanations; do not replace prose with diagrams alone.`;
+}
 
-        3. **Answer from Context First**:
-           - Always answer using the provided knowledge context when relevant topics or claims are present — do not ask for clarification if the knowledge graph returned information
-           - Deliver the information you have clearly and completely; only acknowledge gaps when the context is genuinely empty or entirely off-topic
-           - Be conversational in tone but prioritise giving answers over requesting more input
+export async function synthesizeContext(
+    query: string,
+    knowledgeContext: string,
+    verbatimExcerpts: string,
+    conversationSummary?: string
+): Promise<string> {
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
 
-        4. **Navigate the Graph**:
-           ${isKnowledgeContext
-            ? '- If answer requires connecting multiple topics, explain the relationship path\n           - Point out related topics that might be useful to explore\n           - Show how topics govern, depend on, or are part of each other'
-            : '- Make connections between different pieces of information\n           - Suggest related areas to explore'}
+    const prompt = `You are preparing a knowledge briefing for an AI assistant who will answer a user's question. Your job is to transform raw retrieved data into a clear, organized briefing.
 
-        5. **Acknowledge Gaps**:
-           - If relevant topics exist but claims are missing, say so explicitly
-           - Don't make up information not in the knowledge graph
-           - Offer to help search differently or explore related topics
+USER QUESTION: "${query}"
+${conversationSummary ? `\nCONVERSATION CONTEXT: ${conversationSummary}\n` : ''}
 
-        6. **RESPONSE STRUCTURE RULES (MANDATORY — IGNORE AT YOUR OWN RISK)**:
+RAW RETRIEVED DATA:
+${knowledgeContext}
 
-           Every response you generate MUST follow ALL of these formatting rules:
+${verbatimExcerpts ? `SOURCE EXCERPTS:\n${verbatimExcerpts}` : ''}
 
-           a) Use ### headers to label each major topic discussed
-           b) Separate every paragraph, header, list, and code block with a blank line
-           c) Use --- horizontal rules between unrelated sections
-           d) Use - bullets for enumerating items, claims, steps -- do NOT string items together with commas
-           e) Use **bold** on every key term or concept the first time it appears
-           f) Use numbered lists (1, 2, 3) for sequential instructions
-           g) Use block quotes with > for warnings, notes, or callouts
-           h) Place tables between paragraphs when comparing data side-by-side
-           i) Never use $ signs or LaTeX notation -- use the unicode arrow character (right-arrow) instead
+INSTRUCTIONS:
+1. Write a concise briefing (300-800 words) that directly addresses the user's question
+2. Organize information into coherent paragraphs grouped by sub-topic — do NOT use bullet lists of claims
+3. Make cross-topic connections explicit (e.g., "X governs Y, which in turn depends on Z")
+4. Drop retrieved facts that are irrelevant to the question
+5. Preserve exact figures, dates, names, thresholds, and version numbers verbatim
+6. When claims from different topics relate to each other, weave them together narratively
+7. Note contradictions or gaps: if the data is incomplete, say what's missing
+8. Cite source documents inline: [filename.md] — but only where you use specific facts from excerpts
+9. Write in direct factual prose. Never say "the retrieved data shows" or "according to the claims"
+10. If the retrieved data does not contain information relevant to the question, say so in one sentence
 
-           EXAMPLE you must match exactly:
+OUTPUT FORMAT:
+Write the briefing as a knowledge document. Use ## headers for major sub-topics only if the briefing covers multiple distinct areas. Otherwise, write flowing prose paragraphs.`;
 
-           ### IT-PEP Methodology
+    try {
+        const result = await withRetry(() => model.generateContent(prompt));
+        const synthesized = result.response.text().trim();
+        // Safety: if synthesis is suspiciously short vs. input, fall back
+        if (synthesized.length < 50 && knowledgeContext.length > 500) {
+            console.warn('[Synthesis] Output too short, falling back to raw context');
+            return knowledgeContext;
+        }
+        return synthesized;
+    } catch (e) {
+        console.error('[Synthesis] Failed, falling back to raw context:', e);
+        return knowledgeContext; // Graceful degradation
+    }
+}
 
-           The IT-PEP methodology governs IT project execution.
+export async function buildConversationBriefing(
+    history: { role: string; content: string }[]
+): Promise<string> {
+    if (history.length < 2) return ''; // No prior context to summarize
 
-           - **Scope:** All production systems
-           - **Owner:** Enterprise Architecture
-           - **Governs:** Release Management, Change Management
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+    const recentHistory = history.slice(-8); // Last 4 exchanges
 
-           **Related Topics:**
+    const prompt = `Summarize the key facts, topics, and conclusions established in this conversation so far. Focus on:
+1. What specific topics/systems/processes were discussed
+2. What facts were established (with specific details)
+3. What the user's overall intent or line of inquiry is
+4. Any unresolved questions
 
-           - IT-PGP depends_on IT-PEP
-           - Release Management is_part_of IT-PEP
+Conversation:
+${recentHistory.map(m => `${m.role}: ${m.content}`).join('\n\n')}
 
-           > Note: IT-PEP updated in Q1 2025.
+Write a concise summary (100-200 words) in factual prose. Do not include pleasantries or meta-commentary.`;
 
-           ---
+    try {
+        const result = await withRetry(() => model.generateContent(prompt));
+        return result.response.text().trim();
+    } catch (e) {
+        console.error('[ConversationBriefing] Failed:', e);
+        return '';
+    }
+}
 
-           YOUR OUTPUT MUST FOLLOW THIS STRUCTURE EXACTLY. DO NOT GENERATE PLAIN TEXT PARAGRAPHS WITHOUT HEADERS. DO NOT SKIP BLANK LINES.
-        **Remember**: You're working with structured knowledge, not searching documents. Treat topics as entities and claims as facts. Your goal is to synthesize information from the knowledge graph into clear, helpful answers.
-    `;
-
+export async function chatStream(prompt: string, context: string, history: { role: string, content: string }[] = []) {
     const model = genAI.getGenerativeModel({
         model: TEXT_MODEL,
-        systemInstruction: systemPrompt
+        systemInstruction: buildSystemPrompt(context)
     });
-    
+
     const chatSession = model.startChat({
         history: history.map(msg => ({
             role: msg.role === 'user' ? 'user' : 'model',
             parts: [{ text: msg.content }]
         }))
     });
-    
+
     const result = await withRetry(() => chatSession.sendMessageStream(prompt));
     return result.stream;
 }
 
 export async function chat(prompt: string, context: string, history: { role: string, content: string }[] = []) {
-    const hasContext = context && context.trim().length > 0;
-    const isKnowledgeContext = hasContext && context.includes('KNOWLEDGE CONTEXT:');
-
-    const systemPrompt = `
-        You are Archie, an intelligent knowledge assistant with access to a structured knowledge graph extracted from documents.
-
-        ${hasContext ? `**KNOWLEDGE CONTEXT PROVIDED:**
-        ${isKnowledgeContext
-            ? `The context below comes from a knowledge graph - structured topics, factual claims, and their relationships - NOT raw documents.
-
-        - **Topics** represent key concepts in the knowledge base
-        - **Claims** are atomic factual statements verified from source documents
-        - **Relationships** show how topics connect (governs, depends_on, is_part_of, etc.)
-
-        ${context}`
-            : `${context}`}`
-        : '**NOTE:** No relevant knowledge was found for this query. This could mean the information hasn\'t been indexed yet, or the query needs refinement.'}
-
-        **YOUR APPROACH:**
-
-        1. **Reason with Structure**:
-           ${isKnowledgeContext
-            ? '- Use topic relationships to understand broader context\n           - Connect multiple topics when the answer requires it\n           - Navigate the graph to find related information'
-            : '- Analyze the provided context carefully\n           - Look for connections between different pieces of information'}
-
-        2. **Cite Claims, Not Documents**:
-           ${isKnowledgeContext
-            ? '- Reference specific claims as evidence (e.g., "According to the claims under Topic X...")\n           - Each claim is a verified fact - treat it as authoritative\n           - When multiple claims exist, synthesize them coherently'
-            : '- Always cite sources using [Source Name] format when using information from context'}
-
-        3. **Be Conversational & Interactive**:
-           - Engage in dialog, don't just dump information
-           - Ask clarifying questions when the query is broad or ambiguous
-           - If context doesn't fully answer the question, acknowledge it and ask what specific aspect they need
-
-        4. **Navigate the Graph**:
-           ${isKnowledgeContext
-            ? '- If answer requires connecting multiple topics, explain the relationship path\n           - Point out related topics that might be useful to explore\n           - Show how topics govern, depend on, or are part of each other'
-            : '- Make connections between different pieces of information\n           - Suggest related areas to explore'}
-
-        5. **Acknowledge Gaps**:
-           - If relevant topics exist but claims are missing, say so explicitly
-           - Don't make up information not in the knowledge graph
-           - Offer to help search differently or explore related topics
-
-        6. **Format with Rich Markdown -- THIS IS MANDATORY**:
-           You MUST format every response with structural markdown. NEVER output a single block of plain text. Every response must contain multiple formatting elements.
-
-           **Mandatory formatting rules:**
-           - Every response MUST have blank lines between paragraphs, sections, and list items
-           - Use ### or #### headers to organize topics into sections
-           - Use **bold** for key terms, concepts, and important values
-           - Use bullet lists (dash followed by space) for enumerations, claims, and feature lists
-           - Use numbered lists (number followed by period) for sequential steps or procedures
-           - Use code blocks (triple backticks with language name) for commands, code, configurations
-           - Use inline code (single backticks) for technical terms, filenames, function names
-           - Use tables for structured comparisons or parameter lists
-           - Use blockquotes (greater-than sign) for important warnings or highlights
-           - Use horizontal rules (three dashes) to visually separate distinct sections
-           ${isKnowledgeContext
-            ? '\n           - Use relationship arrows (arrow character) to show connections between topics'
-            : ''}
-
-           **Example of properly formatted response:**
-
-           ### IT-PEP Methodology
-           The IT-PEP methodology governs how projects are structured and executed.
-
-           - **Scope:** All production systems must follow IT-PEP
-           - **Owner:** Enterprise Architecture team
-           - **Governs:** Release Management, Change Management
-
-           **Related Topics:**
-           - IT-PGP depends_on IT-PEP
-           - Release Management is_part_of IT-PEP
-
-           Note: IT-PEP was updated in Q1 2025 with new compliance requirements.
-
-           Your responses must follow this structure. Section headers, blank lines, bold terms, bullet lists, and clear visual separation are NOT optional.
-        **Remember**: You're working with structured knowledge, not searching documents. Treat topics as entities and claims as facts. Your goal is to synthesize information from the knowledge graph into clear, helpful answers.
-    `;
-
     const model = genAI.getGenerativeModel({
         model: TEXT_MODEL,
-        systemInstruction: systemPrompt
+        systemInstruction: buildSystemPrompt(context)
     });
 
     const chatSession = model.startChat({
@@ -635,6 +587,7 @@ export interface ExtractedKnowledge {
     claims: {
         topic: string;
         claim: string;
+        type?: string;
     }[];
     relationships: {
         source: string;
@@ -680,6 +633,14 @@ export async function extractKnowledge(text: string, existingTopicNames: string[
         You are an expert knowledge engineer. Extract structured knowledge from the following document chunk.
         ${summaryContext}
         ${vocabularyHint}
+
+        The text may include [PRECEDING SECTION] and [FOLLOWING SECTION] markers showing adjacent content for context.
+        Extract knowledge ONLY from the [CURRENT SECTION]. Use the adjacent sections solely to:
+        - Resolve pronouns and references ("it", "this", "the above")
+        - Understand the broader context of claims
+        - Avoid creating topics that duplicate what the adjacent sections cover
+        - Ensure claim completeness (include qualifiers from nearby text)
+
         Extract the following:
 
         1. **Topics**: Key concepts, systems, processes, or entities discussed. For each, provide:
@@ -687,7 +648,15 @@ export async function extractKnowledge(text: string, existingTopicNames: string[
            - description: A 1-2 sentence description capturing what this topic covers
            - category: One of: ${ALLOWED_CATEGORIES.join(', ')}
 
-        2. **Knowledge Claims**: Extract meaningful, substantive facts that someone would actually search for. Each claim must:
+        2. **Knowledge Claims**: Extract ALL types of factual statements:
+
+           ASSERTION: Positive facts ("X requires Y", "X supports Z")
+           NEGATION: Explicit exclusions ("X does NOT support Z", "X is not applicable to Y")
+           CONDITION: Facts with qualifiers ("X requires Y ONLY WHEN Z", "X applies IF Y")
+           COMPARISON: Relative statements ("X is preferred over Y", "X replaces Y as of date")
+           BOUNDARY: Scope limitations ("X applies only to production", "X excludes external users")
+
+           Each claim must:
            - Be SELF-CONTAINED: understandable without the original document
            - Convey ACTIONABLE or IMPORTANT information (not trivial observations)
            - Include SPECIFIC DETAILS: numbers, names, dates, thresholds, tools, roles when present in the text
@@ -696,6 +665,8 @@ export async function extractKnowledge(text: string, existingTopicNames: string[
            GOOD claims: "Production deployments require approval from at least two senior engineers", "The data retention policy mandates 7-year retention for financial records", "PostgreSQL 15 is the approved database for all new microservices"
            BAD claims (DO NOT generate): "Security is important", "The system has features", "There are multiple components", "The document describes a process"
 
+           Prioritize NEGATION, CONDITION, and BOUNDARY claims — these are the most valuable because they prevent misunderstandings.
+
            Aim for 3-10 meaningful claims per substantive section. Prioritize QUALITY over QUANTITY — every claim should carry real information value.
 
         3. **Relationships**: How topics connect. The "type" MUST be one of: ${RELATIONSHIP_VOCABULARY.join(', ')}. Do not invent other relationship types.
@@ -703,7 +674,7 @@ export async function extractKnowledge(text: string, existingTopicNames: string[
         Return ONLY a valid JSON object:
         {
             "topics": [{"name": "...", "description": "...", "category": "..."}],
-            "claims": [{"topic": "...", "claim": "..."}],
+            "claims": [{"topic": "...", "claim": "...", "type": "assertion|negation|condition|comparison|boundary"}],
             "relationships": [{"source": "...", "target": "...", "type": "..."}]
         }
 

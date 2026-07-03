@@ -1,5 +1,5 @@
 # Stage 1: Build the SvelteKit app using Node.js
-FROM node:22-slim AS builder
+FROM node:24-slim AS builder
 
 # Install build dependencies for better-sqlite3 native bindings
 RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
@@ -12,7 +12,7 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Final production image
-FROM node:22-slim
+FROM node:24-slim
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \

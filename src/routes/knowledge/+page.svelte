@@ -1,22 +1,20 @@
 <script lang="ts">
     import { onMount, tick } from 'svelte';
-    import { 
-        Database, 
-        Network, 
-        FileCheck, 
-        AlertTriangle, 
-        Search, 
-        Filter, 
-        ArrowRight, 
-        Tag,
-        BookOpen,
-        Activity,
-        ChevronRight,
-        ChevronLeft,
-        RefreshCw,
-        GitBranch,
-        Layers
-    } from 'lucide-svelte';
+    import Database from 'lucide-svelte/icons/database';
+import Network from 'lucide-svelte/icons/network';
+import FileCheck from 'lucide-svelte/icons/file-check';
+import AlertTriangle from 'lucide-svelte/icons/alert-triangle';
+import Search from 'lucide-svelte/icons/search';
+import Filter from 'lucide-svelte/icons/filter';
+import ArrowRight from 'lucide-svelte/icons/arrow-right';
+import Tag from 'lucide-svelte/icons/tag';
+import BookOpen from 'lucide-svelte/icons/book-open';
+import Activity from 'lucide-svelte/icons/activity';
+import ChevronRight from 'lucide-svelte/icons/chevron-right';
+import ChevronLeft from 'lucide-svelte/icons/chevron-left';
+import RefreshCw from 'lucide-svelte/icons/refresh-cw';
+import GitBranch from 'lucide-svelte/icons/git-branch';
+import Layers from 'lucide-svelte/icons/layers';
     import { fade, slide, fly } from 'svelte/transition';
 
     interface Topic { id: number; name: string; description: string; category: string; }
@@ -610,8 +608,8 @@
 
 <style>
     :global(body) {
-        background-color: #050505;
-        color: #e2e8f0;
+        background-color: var(--bg-page);
+        color: var(--text-primary);
         font-family: 'Inter', system-ui, sans-serif;
     }
 
@@ -620,9 +618,9 @@
     }
 
     .glass {
-        background: rgba(15, 15, 15, 0.7);
+        background: var(--bg-surface);
         backdrop-filter: blur(12px);
-        border: 1px solid rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-primary);
     }
 
     .neon-glow-cyan {
@@ -639,8 +637,8 @@
 
     .card-hover:hover {
         transform: translateY(-4px);
-        border-color: rgba(255, 255, 255, 0.15);
-        background: rgba(25, 25, 25, 0.8);
+        border-color: var(--border-hover);
+        background: var(--bg-raised);
     }
 </style>
 

@@ -2,12 +2,27 @@
     import { onMount } from 'svelte';
     import { fade, fly, slide, scale } from 'svelte/transition';
     import { cubicOut, elasticOut, quintOut } from 'svelte/easing';
-    import {
-        ArrowLeft, Bot, FileText, Brain, Network, Search,
-        Database, Zap, GitBranch, MessageSquare, Upload,
-        Layers, Cpu, ChevronDown, Sparkles, ArrowRight,
-        BookOpen, Activity, Link2, Target, Workflow
-    } from 'lucide-svelte';
+    import ArrowLeft from 'lucide-svelte/icons/arrow-left';
+import Bot from 'lucide-svelte/icons/bot';
+import FileText from 'lucide-svelte/icons/file-text';
+import Brain from 'lucide-svelte/icons/brain';
+import Network from 'lucide-svelte/icons/network';
+import Search from 'lucide-svelte/icons/search';
+import Database from 'lucide-svelte/icons/database';
+import Zap from 'lucide-svelte/icons/zap';
+import GitBranch from 'lucide-svelte/icons/git-branch';
+import MessageSquare from 'lucide-svelte/icons/message-square';
+import Upload from 'lucide-svelte/icons/upload';
+import Layers from 'lucide-svelte/icons/layers';
+import Cpu from 'lucide-svelte/icons/cpu';
+import ChevronDown from 'lucide-svelte/icons/chevron-down';
+import Sparkles from 'lucide-svelte/icons/sparkles';
+import ArrowRight from 'lucide-svelte/icons/arrow-right';
+import BookOpen from 'lucide-svelte/icons/book-open';
+import Activity from 'lucide-svelte/icons/activity';
+import Link2 from 'lucide-svelte/icons/link-2';
+import Target from 'lucide-svelte/icons/target';
+import Workflow from 'lucide-svelte/icons/workflow';
 
     let mounted = $state(false);
     let activeSection = $state(0);
@@ -116,7 +131,7 @@
     <title>About — ARCHIE</title>
 </svelte:head>
 
-<div class="min-h-screen bg-[#050505] text-white overflow-x-hidden">
+<div class="min-h-screen bg-[var(--bg-page)] text-[var(--text-primary)] overflow-x-hidden">
     <!-- Floating particles background -->
     <div class="fixed inset-0 pointer-events-none overflow-hidden z-0">
         {#each particles as p, i}
@@ -140,15 +155,15 @@
     </div>
 
     <!-- Navigation bar -->
-    <nav class="fixed top-0 left-0 right-0 z-50 bg-[#050505]/80 backdrop-blur-xl border-b border-slate-800/50">
+    <nav class="fixed top-0 left-0 right-0 z-50 bg-[var(--bg-page)]/80 backdrop-blur-xl border-b border-[var(--border-secondary)]">
         <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
             <a href="/" class="flex items-center gap-3 group">
-                <ArrowLeft class="w-4 h-4 text-slate-500 group-hover:text-[#78FAAE] transition-colors" />
-                <span class="text-xs font-black uppercase tracking-[0.2em] text-slate-500 group-hover:text-white transition-colors">Back to Chat</span>
+                <ArrowLeft class="w-4 h-4 text-[var(--text-faint)] group-hover:text-[#78FAAE] transition-colors" />
+                <span class="text-xs font-black uppercase tracking-[0.2em] text-[var(--text-faint)] group-hover:text-[var(--text-primary)] transition-colors">Back to Chat</span>
             </a>
             <div class="flex items-center gap-2">
                 <div class="w-2 h-2 rounded-full bg-[#78FAAE] animate-pulse shadow-[0_0_8px_rgba(120,250,174,0.5)]"></div>
-                <span class="text-[10px] font-black text-slate-600 uppercase tracking-[0.2em]">ARCHIE</span>
+                <span class="text-[10px] font-black text-[var(--text-faintest)] uppercase tracking-[0.2em]">ARCHIE</span>
             </div>
         </div>
     </nav>
@@ -169,7 +184,7 @@
                     <h1 class="text-6xl md:text-8xl font-black tracking-tighter">
                         <span class="bg-gradient-to-r from-[#78FAAE] via-cyan-400 to-purple-400 bg-clip-text text-transparent">ARCHIE</span>
                     </h1>
-                    <p class="text-lg md:text-xl text-slate-400 mt-4 font-light tracking-wide">
+                    <p class="text-lg md:text-xl text-[var(--text-muted)] mt-4 font-light tracking-wide">
                         Your AI-Powered Knowledge Assistant
                     </p>
                 </div>
@@ -187,8 +202,8 @@
                     {/each}
                 </div>
 
-                <p class="text-sm text-slate-500 max-w-lg mx-auto leading-relaxed" in:fly={{ y: 20, duration: 600, delay: 800 }}>
-                    Archie doesn't just search your documents — it <strong class="text-white">understands</strong> them.
+                <p class="text-sm text-[var(--text-faint)] max-w-lg mx-auto leading-relaxed" in:fly={{ y: 20, duration: 600, delay: 800 }}>
+                    Archie doesn't just search your documents — it <strong class="text-[var(--text-primary)]">understands</strong> them.
                     It extracts topics, discovers relationships, and builds a living knowledge graph
                     to give you precise, sourced answers.
                 </p>
@@ -197,8 +212,8 @@
             <!-- Scroll indicator -->
             {#if showScrollHint}
                 <div class="absolute bottom-10 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 animate-bounce" transition:fade>
-                    <span class="text-[10px] font-bold text-slate-600 uppercase tracking-widest">Scroll to explore</span>
-                    <ChevronDown class="w-5 h-5 text-slate-600" />
+                    <span class="text-[10px] font-bold text-[var(--text-faintest)] uppercase tracking-widest">Scroll to explore</span>
+                    <ChevronDown class="w-5 h-5 text-[var(--text-faintest)]" />
                 </div>
             {/if}
         {/if}
@@ -210,7 +225,7 @@
             <div class="text-center mb-20">
                 <p class="text-[10px] font-black text-[#78FAAE] uppercase tracking-[0.3em] mb-3">How It Works</p>
                 <h2 class="text-4xl md:text-5xl font-black tracking-tight">From Documents to Answers</h2>
-                <p class="text-slate-500 mt-4 max-w-lg mx-auto">Three intelligent layers work together to transform your raw documents into an interactive knowledge system.</p>
+                <p class="text-[var(--text-faint)] mt-4 max-w-lg mx-auto">Three intelligent layers work together to transform your raw documents into an interactive knowledge system.</p>
             </div>
 
             <div class="grid md:grid-cols-3 gap-8">
@@ -221,7 +236,7 @@
                 ] as card, i}
                     <div class="group relative">
                         <div class="absolute inset-0 {card.bg} rounded-3xl blur-xl opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
-                        <div class="relative p-8 rounded-3xl bg-[#0a0a0a] border {card.border} hover:border-opacity-60 transition-all duration-500 h-full">
+                        <div class="relative p-8 rounded-3xl bg-[var(--bg-surface)] border {card.border} hover:border-opacity-60 transition-all duration-500 h-full">
                             <div class="w-14 h-14 rounded-2xl flex items-center justify-center mb-6 transition-transform group-hover:scale-110 group-hover:rotate-6 duration-500"
                                 style="background: {card.color}15; border: 1px solid {card.color}30;">
                                 <card.icon class="w-7 h-7" style="color: {card.color}" />
@@ -230,7 +245,7 @@
                                 <span class="text-[10px] font-black uppercase tracking-[0.2em] rounded-full px-2 py-0.5" style="color: {card.color}; background: {card.color}15;">Step {i + 1}</span>
                             </div>
                             <h3 class="text-xl font-black tracking-tight mb-3">{card.title}</h3>
-                            <p class="text-sm text-slate-500 leading-relaxed">{card.desc}</p>
+                            <p class="text-sm text-[var(--text-faint)] leading-relaxed">{card.desc}</p>
                         </div>
                     </div>
                 {/each}
@@ -244,7 +259,7 @@
             <div class="text-center mb-16">
                 <p class="text-[10px] font-black text-cyan-400 uppercase tracking-[0.3em] mb-3">The Pipeline</p>
                 <h2 class="text-4xl md:text-5xl font-black tracking-tight">RAG: Retrieval-Augmented Generation</h2>
-                <p class="text-slate-500 mt-4 max-w-2xl mx-auto">Every question travels through a seven-stage pipeline. Each stage refines the raw data into a precise, trustworthy answer.</p>
+                <p class="text-[var(--text-faint)] mt-4 max-w-2xl mx-auto">Every question travels through a seven-stage pipeline. Each stage refines the raw data into a precise, trustworthy answer.</p>
             </div>
 
             <!-- Pipeline visualization -->
@@ -261,8 +276,8 @@
                             <div
                                 class="w-16 h-16 rounded-2xl flex items-center justify-center relative z-10 transition-all duration-500 {isActive ? 'scale-125' : 'scale-100'}"
                                 style="
-                                    background: {isActive || isPast ? step.color + '20' : '#0a0a0a'};
-                                    border: 2px solid {isActive ? step.color : isPast ? step.color + '60' : '#1e293b'};
+                                    background: {isActive || isPast ? step.color + '20' : 'var(--bg-muted)'};
+                                    border: 2px solid {isActive ? step.color : isPast ? step.color + '60' : 'var(--border-primary)'};
                                     box-shadow: {isActive ? `0 0 30px ${step.color}40, 0 0 60px ${step.color}15` : 'none'};
                                 "
                             >
@@ -278,7 +293,7 @@
                             <!-- Arrow (desktop) -->
                             {#if i < pipelineSteps.length - 1}
                                 <div class="absolute top-8 -right-1 z-20 hidden lg:block">
-                                    <ArrowRight class="w-3 h-3 {isPast ? 'text-slate-500' : 'text-slate-800'} transition-colors duration-500" />
+                                    <ArrowRight class="w-3 h-3 {isPast ? 'text-[var(--text-faint)]' : 'text-slate-800'} transition-colors duration-500" />
                                 </div>
                             {/if}
 
@@ -288,10 +303,10 @@
                                     style="color: {isActive ? step.color : '#94a3b8'}">
                                     {step.title}
                                 </p>
-                                <p class="text-[10px] text-slate-600 leading-relaxed max-w-[140px] mx-auto hidden lg:block">
+                                <p class="text-[10px] text-[var(--text-faintest)] leading-relaxed max-w-[140px] mx-auto hidden lg:block">
                                     {step.desc}
                                 </p>
-                                <p class="text-xs text-slate-500 leading-relaxed lg:hidden">
+                                <p class="text-xs text-[var(--text-faint)] leading-relaxed lg:hidden">
                                     {step.desc}
                                 </p>
                             </div>
@@ -302,27 +317,27 @@
 
             <!-- Pipeline detail cards -->
             <div class="grid md:grid-cols-2 gap-6 mt-20">
-                <div class="p-6 rounded-3xl bg-[#0a0a0a] border border-cyan-500/10">
+                <div class="p-6 rounded-3xl bg-[var(--bg-surface)] border border-cyan-500/10">
                     <div class="flex items-center gap-3 mb-4">
                         <div class="w-10 h-10 rounded-xl bg-cyan-950 border border-cyan-500/20 flex items-center justify-center">
                             <Search class="w-5 h-5 text-cyan-400" />
                         </div>
                         <h3 class="text-sm font-black uppercase tracking-wider text-cyan-400">Hybrid Search</h3>
                     </div>
-                    <p class="text-sm text-slate-400 leading-relaxed">
-                        Archie combines <strong class="text-white">vector similarity search</strong> (finding semantically similar content using 768-dimensional embeddings)
-                        with <strong class="text-white">full-text search</strong> (BM25 keyword matching via SQLite FTS5). The results are merged and re-ranked to give the best of both worlds — understanding meaning <em>and</em> matching exact terms.
+                    <p class="text-sm text-[var(--text-muted)] leading-relaxed">
+                        Archie combines <strong class="text-[var(--text-primary)]">vector similarity search</strong> (finding semantically similar content using 768-dimensional embeddings)
+                        with <strong class="text-[var(--text-primary)]">full-text search</strong> (BM25 keyword matching via SQLite FTS5). The results are merged and re-ranked to give the best of both worlds — understanding meaning <em>and</em> matching exact terms.
                     </p>
                 </div>
-                <div class="p-6 rounded-3xl bg-[#0a0a0a] border border-purple-500/10">
+                <div class="p-6 rounded-3xl bg-[var(--bg-surface)] border border-purple-500/10">
                     <div class="flex items-center gap-3 mb-4">
                         <div class="w-10 h-10 rounded-xl bg-purple-950 border border-purple-500/20 flex items-center justify-center">
                             <Sparkles class="w-5 h-5 text-purple-400" />
                         </div>
                         <h3 class="text-sm font-black uppercase tracking-wider text-purple-400">Grounded Generation</h3>
                     </div>
-                    <p class="text-sm text-slate-400 leading-relaxed">
-                        Unlike generic AI, Archie's responses are <strong class="text-white">grounded in your documents</strong>.
+                    <p class="text-sm text-[var(--text-muted)] leading-relaxed">
+                        Unlike generic AI, Archie's responses are <strong class="text-[var(--text-primary)]">grounded in your documents</strong>.
                         The retrieved chunks, relevant knowledge claims, and topic context are injected into the prompt — so the AI can only speak about what it actually knows from your data. Every answer can be traced back to its source.
                     </p>
                 </div>
@@ -336,7 +351,7 @@
             <div class="text-center mb-16">
                 <p class="text-[10px] font-black text-purple-400 uppercase tracking-[0.3em] mb-3">The Secret Weapon</p>
                 <h2 class="text-4xl md:text-5xl font-black tracking-tight">The Knowledge Graph</h2>
-                <p class="text-slate-500 mt-4 max-w-2xl mx-auto">
+                <p class="text-[var(--text-faint)] mt-4 max-w-2xl mx-auto">
                     This is what makes Archie different. Instead of just storing text, it builds a structured map of concepts, their relationships, and verified facts.
                 </p>
             </div>
@@ -344,7 +359,7 @@
             <div class="grid lg:grid-cols-2 gap-12 items-center">
                 <!-- Interactive Graph Visualization -->
                 <div class="relative aspect-square max-w-lg mx-auto w-full">
-                    <div class="absolute inset-0 rounded-3xl bg-[#0a0a0a] border border-slate-800/50 overflow-hidden">
+                    <div class="absolute inset-0 rounded-3xl bg-[var(--bg-surface)] border border-[var(--border-secondary)] overflow-hidden">
                         <!-- Grid background -->
                         <svg class="absolute inset-0 w-full h-full opacity-10">
                             <defs>
@@ -452,7 +467,7 @@
                             </div>
                             <div>
                                 <h3 class="font-black text-sm tracking-tight mb-1" style="color: {item.color}">{item.title}</h3>
-                                <p class="text-xs text-slate-500 leading-relaxed">{item.desc}</p>
+                                <p class="text-xs text-[var(--text-faint)] leading-relaxed">{item.desc}</p>
                             </div>
                         </div>
                     {/each}
@@ -467,7 +482,7 @@
             <div class="text-center mb-16">
                 <p class="text-[10px] font-black text-amber-400 uppercase tracking-[0.3em] mb-3">Under The Hood</p>
                 <h2 class="text-4xl md:text-5xl font-black tracking-tight">How Knowledge Is Extracted</h2>
-                <p class="text-slate-500 mt-4 max-w-2xl mx-auto">
+                <p class="text-[var(--text-faint)] mt-4 max-w-2xl mx-auto">
                     When a document enters the system, it goes through a multi-stage AI analysis. Here's what happens behind the scenes.
                 </p>
             </div>
@@ -511,7 +526,7 @@
                         color: '#f59e0b'
                     },
                 ] as proc, i}
-                    <div class="group relative grid md:grid-cols-[80px_1fr] gap-6 p-6 rounded-3xl bg-[#0a0a0a]/80 border border-slate-800/30 hover:border-slate-700/50 transition-all duration-500">
+                    <div class="group relative grid md:grid-cols-[80px_1fr] gap-6 p-6 rounded-3xl bg-[var(--bg-surface)]/80 border border-[var(--border-secondary)] hover:border-[var(--border-hover)] transition-all duration-500">
                         <!-- Step number -->
                         <div class="flex md:flex-col items-center md:items-center gap-4 md:gap-2">
                             <span class="text-3xl font-black tracking-tighter transition-colors duration-500" style="color: {proc.color}30; group-hover:color: {proc.color}">
@@ -527,7 +542,7 @@
                             <h3 class="text-lg font-black tracking-tight transition-colors duration-300" style="color: {proc.color}">
                                 {proc.title}
                             </h3>
-                            <p class="text-sm text-slate-400 leading-relaxed">{proc.desc}</p>
+                            <p class="text-sm text-[var(--text-muted)] leading-relaxed">{proc.desc}</p>
 
                             <!-- Visual representation -->
                             {#if proc.visual === 'chunk'}
@@ -537,9 +552,9 @@
                                             class="h-8 rounded-lg flex items-center justify-center text-[8px] font-mono font-bold transition-all duration-500"
                                             style="
                                                 flex: {j === 3 ? 2 : 1};
-                                                background: {j === 3 ? '#78FAAE15' : '#0f0f0f'};
-                                                border: 1px solid {j === 3 ? '#78FAAE30' : '#1e293b'};
-                                                color: {j === 3 ? '#78FAAE' : '#475569'};
+                                                background: {j === 3 ? '#78FAAE15' : 'var(--bg-raised)'};
+                                                border: 1px solid {j === 3 ? '#78FAAE30' : 'var(--border-primary)'};
+                                                color: {j === 3 ? '#78FAAE' : 'var(--text-faint)'};
                                             "
                                         >
                                             {j === 2 ? '...overlap' : j === 3 ? 'CHUNK' : j === 4 ? 'overlap...' : ''}
@@ -583,10 +598,10 @@
                                         { from: 'SvelteKit', to: 'TypeScript', rel: 'uses' },
                                         { from: 'REST API', to: 'Auth', rel: 'implements' },
                                     ] as r}
-                                        <div class="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#0f0f0f] border border-pink-500/10">
+                                        <div class="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[var(--bg-raised)] border border-pink-500/10">
                                             <span class="text-[10px] font-bold text-cyan-400">{r.from}</span>
                                             <span class="text-[8px] font-mono text-pink-400 px-1.5 py-0.5 rounded bg-pink-500/10">{r.rel}</span>
-                                            <ArrowRight class="w-3 h-3 text-slate-600" />
+                                            <ArrowRight class="w-3 h-3 text-[var(--text-faintest)]" />
                                             <span class="text-[10px] font-bold text-purple-400">{r.to}</span>
                                         </div>
                                     {/each}
@@ -597,7 +612,7 @@
                                         'SvelteKit uses file-based routing for all endpoints',
                                         'Authentication is handled via session cookies',
                                     ] as claim}
-                                        <div class="flex items-start gap-2 px-3 py-2 rounded-xl bg-[#0f0f0f] border border-amber-500/10">
+                                        <div class="flex items-start gap-2 px-3 py-2 rounded-xl bg-[var(--bg-raised)] border border-amber-500/10">
                                             <div class="w-1.5 h-1.5 rounded-full bg-amber-400 mt-1.5 flex-shrink-0"></div>
                                             <span class="text-[10px] text-amber-200/70 leading-relaxed">{claim}</span>
                                         </div>
@@ -630,13 +645,13 @@
                     { name: 'Git Sync', desc: 'Repo integration', icon: GitBranch, color: '#78FAAE' },
                     { name: 'Tailwind', desc: 'Utility-first CSS', icon: Layers, color: '#38bdf8' },
                 ] as tech}
-                    <div class="group p-5 rounded-2xl bg-[#0a0a0a] border border-slate-800/30 hover:border-slate-700/50 transition-all duration-500 text-center">
+                    <div class="group p-5 rounded-2xl bg-[var(--bg-surface)] border border-[var(--border-secondary)] hover:border-[var(--border-hover)] transition-all duration-500 text-center">
                         <div class="w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-3 transition-transform group-hover:scale-110 group-hover:-rotate-6 duration-500"
                             style="background: {tech.color}10; border: 1px solid {tech.color}20;">
                             <tech.icon class="w-6 h-6" style="color: {tech.color}" />
                         </div>
                         <h3 class="text-sm font-black tracking-tight">{tech.name}</h3>
-                        <p class="text-[10px] text-slate-600 mt-1">{tech.desc}</p>
+                        <p class="text-[10px] text-[var(--text-faintest)] mt-1">{tech.desc}</p>
                     </div>
                 {/each}
             </div>
@@ -645,25 +660,25 @@
             <div class="mt-16 grid md:grid-cols-2 gap-6">
                 <div class="p-6 rounded-3xl bg-gradient-to-br from-[#0E3A2F]/20 to-transparent border border-[#78FAAE]/10">
                     <h3 class="text-sm font-black uppercase tracking-wider text-[#78FAAE] mb-3">🔒 Multi-User Auth</h3>
-                    <p class="text-xs text-slate-500 leading-relaxed">
+                    <p class="text-xs text-[var(--text-faint)] leading-relaxed">
                         Role-based access control with Admin, Contributor, and User roles. Admins manage everything, Contributors can edit and create Wiki pages, and Users can read pages and chat.
                     </p>
                 </div>
                 <div class="p-6 rounded-3xl bg-gradient-to-br from-cyan-950/20 to-transparent border border-cyan-500/10">
                     <h3 class="text-sm font-black uppercase tracking-wider text-cyan-400 mb-3">📁 Git Integration</h3>
-                    <p class="text-xs text-slate-500 leading-relaxed">
+                    <p class="text-xs text-[var(--text-faint)] leading-relaxed">
                         Connect any Git repository and Archie will clone, index, and watch it for changes. Supports filtering by file extension and directory. Push new docs and they're automatically processed.
                     </p>
                 </div>
                 <div class="p-6 rounded-3xl bg-gradient-to-br from-purple-950/20 to-transparent border border-purple-500/10">
                     <h3 class="text-sm font-black uppercase tracking-wider text-purple-400 mb-3">💬 Conversation Memory</h3>
-                    <p class="text-xs text-slate-500 leading-relaxed">
+                    <p class="text-xs text-[var(--text-faint)] leading-relaxed">
                         Full conversation history per user. Resume any previous chat, delete conversations you no longer need, and start fresh anytime. Context is carried through the entire thread.
                     </p>
                 </div>
                 <div class="p-6 rounded-3xl bg-gradient-to-br from-amber-950/20 to-transparent border border-amber-500/10">
                     <h3 class="text-sm font-black uppercase tracking-wider text-amber-400 mb-3">⚡ Conflict Detection</h3>
-                    <p class="text-xs text-slate-500 leading-relaxed">
+                    <p class="text-xs text-[var(--text-faint)] leading-relaxed">
                         When documents are updated, the knowledge graph detects conflicting claims. Old facts are retired, new ones take their place, and contradictions are flagged for review.
                     </p>
                 </div>
@@ -678,13 +693,13 @@
                 <Bot class="w-10 h-10 text-[#0E3A2F]" />
             </div>
             <h2 class="text-3xl md:text-4xl font-black tracking-tight">Ready to explore your knowledge?</h2>
-            <p class="text-slate-500 max-w-md mx-auto">Start a conversation with Archie or explore the knowledge graph to see the connections in your data.</p>
+            <p class="text-[var(--text-faint)] max-w-md mx-auto">Start a conversation with Archie or explore the knowledge graph to see the connections in your data.</p>
             <div class="flex flex-wrap justify-center gap-4">
                 <a href="/" class="inline-flex items-center gap-2 px-8 py-3 rounded-2xl bg-[#0E3A2F] border border-[#78FAAE]/30 text-[#78FAAE] font-black text-sm uppercase tracking-wider hover:bg-[#78FAAE] hover:text-[#0E3A2F] transition-all duration-300 shadow-lg shadow-[#0E3A2F]/40 hover:shadow-[#78FAAE]/20">
                     <MessageSquare class="w-4 h-4" />
                     Start Chatting
                 </a>
-                <a href="/knowledge" class="inline-flex items-center gap-2 px-8 py-3 rounded-2xl bg-[#0a0a0a] border border-slate-800 text-white font-black text-sm uppercase tracking-wider hover:border-cyan-500/50 hover:text-cyan-400 transition-all duration-300">
+                <a href="/knowledge" class="inline-flex items-center gap-2 px-8 py-3 rounded-2xl bg-[var(--bg-surface)] border border-[var(--border-primary)] text-[var(--text-primary)] font-black text-sm uppercase tracking-wider hover:border-cyan-500/50 hover:text-cyan-400 transition-all duration-300">
                     <Network class="w-4 h-4" />
                     Knowledge Graph
                 </a>
@@ -693,8 +708,8 @@
     </section>
 
     <!-- Footer -->
-    <footer class="border-t border-slate-800/30 py-8 text-center">
-        <p class="text-[10px] font-bold text-slate-700 uppercase tracking-[0.2em]">
+    <footer class="border-t border-[var(--border-secondary)] py-8 text-center">
+        <p class="text-[10px] font-bold text-[var(--text-faintest)] uppercase tracking-[0.2em]">
             Built with SvelteKit, SQLite & Gemini AI
         </p>
     </footer>
@@ -707,10 +722,10 @@
                     const el = document.querySelector(`[data-section="${i}"]`);
                     el?.scrollIntoView({ behavior: 'smooth' });
                 }}
-                class="group relative w-2.5 h-2.5 rounded-full transition-all duration-300 {activeSection === i ? 'bg-[#78FAAE] scale-125 shadow-[0_0_8px_rgba(120,250,174,0.5)]' : 'bg-slate-800 hover:bg-slate-600'}"
+                class="group relative w-2.5 h-2.5 rounded-full transition-all duration-300 {activeSection === i ? 'bg-[#78FAAE] scale-125 shadow-[0_0_8px_rgba(120,250,174,0.5)]' : 'bg-[var(--bg-slate-800)] hover:bg-slate-600'}"
                 aria-label="Go to {label}"
             >
-                <span class="absolute right-6 top-1/2 -translate-y-1/2 text-[9px] font-bold uppercase tracking-wider whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity text-slate-400 pointer-events-none">
+                <span class="absolute right-6 top-1/2 -translate-y-1/2 text-[9px] font-bold uppercase tracking-wider whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity text-[var(--text-muted)] pointer-events-none">
                     {label}
                 </span>
             </button>
@@ -769,7 +784,7 @@
         background: transparent;
     }
     :global(.custom-scrollbar::-webkit-scrollbar-thumb) {
-        background: #1e293b;
+        background: var(--scrollbar-thumb);
         border-radius: 4px;
     }
 </style>

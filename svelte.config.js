@@ -15,7 +15,7 @@ const config = {
 			mode: 'nonce',
 			directives: {
 				'default-src': ['self'],
-				'script-src': ['self'],
+				'script-src': ['self', 'sha256-jX1giMleF9KSRMJQyM1jb3B4tNFjYgeD7u7GfWEdTkY='],
 				'style-src': ['self', 'unsafe-inline'],
 				'img-src': ['self', 'data:', 'blob:'],
 				'font-src': ['self'],

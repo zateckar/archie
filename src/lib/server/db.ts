@@ -287,6 +287,35 @@ try {
     db.exec('CREATE INDEX IF NOT EXISTS idx_topics_community_id ON topics(community_id)');
 } catch (e) {}
 
+// Migration: Add chunk_id to knowledge_claims for source lineage
+try {
+    db.exec('ALTER TABLE knowledge_claims ADD COLUMN chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL');
+} catch (e) {}
+
+// Migration: Add claim_type to knowledge_claims for expanded claim types
+try {
+    db.exec("ALTER TABLE knowledge_claims ADD COLUMN claim_type TEXT DEFAULT 'assertion'");
+} catch (e) {}
+
+// Migration: Response feedback table for user ratings
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS response_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL,
+            message_index INTEGER NOT NULL,
+            rating INTEGER NOT NULL CHECK (rating IN (-1, 1)),
+            query_text TEXT,
+            response_text TEXT,
+            context_used TEXT,
+            search_query TEXT,
+            topic_ids TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+    `);
+} catch (e) {}
+
 
 export function getDocuments() {
     return db.prepare(`

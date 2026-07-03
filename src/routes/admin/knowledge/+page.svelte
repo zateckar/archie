@@ -1,10 +1,23 @@
 <script lang="ts">
     import { onMount, tick } from 'svelte';
-    import {
-        Network, AlertTriangle, CheckCircle, XCircle, ChevronDown, ChevronRight,
-        Trash2, Eye, Tag, FileCheck, Activity, Layers, GitBranch, Search, Filter, RefreshCw,
-        Wand2, Loader2
-    } from 'lucide-svelte';
+    import Network from 'lucide-svelte/icons/network';
+import AlertTriangle from 'lucide-svelte/icons/alert-triangle';
+import CheckCircle from 'lucide-svelte/icons/check-circle';
+import XCircle from 'lucide-svelte/icons/x-circle';
+import ChevronDown from 'lucide-svelte/icons/chevron-down';
+import ChevronRight from 'lucide-svelte/icons/chevron-right';
+import Trash2 from 'lucide-svelte/icons/trash-2';
+import Eye from 'lucide-svelte/icons/eye';
+import Tag from 'lucide-svelte/icons/tag';
+import FileCheck from 'lucide-svelte/icons/file-check';
+import Activity from 'lucide-svelte/icons/activity';
+import Layers from 'lucide-svelte/icons/layers';
+import GitBranch from 'lucide-svelte/icons/git-branch';
+import Search from 'lucide-svelte/icons/search';
+import Filter from 'lucide-svelte/icons/filter';
+import RefreshCw from 'lucide-svelte/icons/refresh-cw';
+import Wand2 from 'lucide-svelte/icons/wand-2';
+import Loader2 from 'lucide-svelte/icons/loader-2';
     import { fade, slide } from 'svelte/transition';
 
     // ── State ──
@@ -709,14 +722,14 @@
                 </div>
                 <span class="font-mono text-xs uppercase tracking-[0.2em] text-cyan-500/70 font-bold">Knowledge Management</span>
             </div>
-            <h1 class="text-3xl font-bold text-white mb-1">Knowledge Graph</h1>
-            <p class="text-slate-400">Visualize, manage, and resolve knowledge conflicts.</p>
+            <h1 class="text-3xl font-bold text-[var(--text-primary)] mb-1">Knowledge Graph</h1>
+            <p class="text-[var(--text-muted)]">Visualize, manage, and resolve knowledge conflicts.</p>
         </div>
 
         <div class="flex items-center gap-3">
             <button
                 onclick={loadKnowledge}
-                class="p-2 rounded-xl border border-slate-800 hover:border-cyan-500/50 text-slate-400 hover:text-cyan-400 transition-all"
+                class="p-2 rounded-xl border border-[var(--border-primary)] hover:border-cyan-500/50 text-[var(--text-muted)] hover:text-cyan-400 transition-all"
                 title="Refresh"
             >
                 <RefreshCw class="w-5 h-5 {loading ? 'animate-spin' : ''}" />
@@ -747,7 +760,7 @@
             </button>
             <a
                 href="/knowledge"
-                class="px-4 py-2 rounded-xl border border-slate-800 text-slate-400 hover:text-white hover:border-slate-600 transition-all text-sm font-medium"
+                class="px-4 py-2 rounded-xl border border-[var(--border-primary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-slate-600 transition-all text-sm font-medium"
             >
                 <Eye class="w-4 h-4 inline mr-1" /> Public View
             </a>
@@ -760,32 +773,32 @@
             { label: 'Topics', value: stats.topics, icon: Tag, color: 'text-cyan-400' },
             { label: 'Relationships', value: stats.relationships, icon: GitBranch, color: 'text-purple-400' },
             { label: 'Claims', value: stats.claims, icon: FileCheck, color: 'text-emerald-400' },
-            { label: 'Conflicts', value: stats.conflicts, icon: AlertTriangle, color: stats.conflicts > 0 ? 'text-red-400' : 'text-slate-500' },
+            { label: 'Conflicts', value: stats.conflicts, icon: AlertTriangle, color: stats.conflicts > 0 ? 'text-red-400' : 'text-[var(--text-faint)]' },
             { label: 'Categories', value: stats.categories, icon: Layers, color: 'text-amber-400' }
         ] as stat}
-            <div class="bg-slate-900 border border-slate-800 p-4 rounded-2xl flex items-center gap-3">
-                <div class="p-2 rounded-lg bg-slate-800/50">
+            <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] p-4 rounded-2xl flex items-center gap-3">
+                <div class="p-2 rounded-lg bg-[var(--bg-slate-800-50)]">
                     <stat.icon class="w-4 h-4 {stat.color}" />
                 </div>
                 <div>
-                    <p class="text-2xl font-black text-white tracking-tight">{stat.value}</p>
-                    <p class="text-xs text-slate-500 font-medium">{stat.label}</p>
+                    <p class="text-2xl font-black text-[var(--text-primary)] tracking-tight">{stat.value}</p>
+                    <p class="text-xs text-[var(--text-faint)] font-medium">{stat.label}</p>
                 </div>
             </div>
         {/each}
     </div>
 
     <!-- Tab Navigation -->
-    <div class="flex bg-slate-900/50 p-1 rounded-2xl border border-slate-800 mb-6 w-fit">
+    <div class="flex bg-[var(--bg-slate-900)]/50 p-1 rounded-2xl border border-[var(--border-primary)] mb-6 w-fit">
         <button
             onclick={() => activeTab = 'graph'}
-            class="px-5 py-2 rounded-xl text-sm font-bold transition-all {activeTab === 'graph' ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'text-slate-400 hover:text-white'}"
+            class="px-5 py-2 rounded-xl text-sm font-bold transition-all {activeTab === 'graph' ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'}"
         >
             <Network class="w-4 h-4 inline mr-1" /> Graph
         </button>
         <button
             onclick={() => activeTab = 'conflicts'}
-            class="px-5 py-2 rounded-xl text-sm font-bold transition-all {activeTab === 'conflicts' ? 'bg-red-500 text-white shadow-lg shadow-red-500/20' : 'text-slate-400 hover:text-white'}"
+            class="px-5 py-2 rounded-xl text-sm font-bold transition-all {activeTab === 'conflicts' ? 'bg-red-500 text-white shadow-lg shadow-red-500/20' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'}"
         >
             <AlertTriangle class="w-4 h-4 inline mr-1" /> Conflicts
             {#if stats.conflicts > 0}
@@ -794,7 +807,7 @@
         </button>
         <button
             onclick={() => activeTab = 'hierarchy'}
-            class="px-5 py-2 rounded-xl text-sm font-bold transition-all {activeTab === 'hierarchy' ? 'bg-purple-500 text-white shadow-lg shadow-purple-500/20' : 'text-slate-400 hover:text-white'}"
+            class="px-5 py-2 rounded-xl text-sm font-bold transition-all {activeTab === 'hierarchy' ? 'bg-purple-500 text-white shadow-lg shadow-purple-500/20' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'}"
         >
             <Layers class="w-4 h-4 inline mr-1" /> Hierarchy
         </button>
@@ -809,32 +822,32 @@
     {:else}
         <!-- ═══ GRAPH TAB ═══ -->
         {#if activeTab === 'graph'}
-            <div class="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden relative flex flex-col" in:fade>
+            <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-3xl overflow-hidden relative flex flex-col" in:fade>
                 <!-- Controls/Filters Bar -->
-                <div class="border-b border-slate-800/80 bg-slate-950/60 p-4 flex flex-wrap items-center justify-between gap-4 z-10 relative">
+                <div class="border-b border-[var(--border-secondary)] bg-[var(--bg-slate-950)]/60 p-4 flex flex-wrap items-center justify-between gap-4 z-10 relative">
                     <div class="flex flex-wrap items-center gap-4">
                         <!-- Search Input -->
                         <div class="relative min-w-[220px]">
-                            <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                            <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-faint)]" />
                             <input
                                 type="text"
                                 bind:value={searchQuery}
                                 oninput={() => initGraph()}
                                 placeholder="Search topic name/desc..."
-                                class="w-full pl-9 pr-8 py-1.5 bg-slate-900 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 transition-all"
+                                class="w-full pl-9 pr-8 py-1.5 bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-xl text-xs text-[var(--text-primary)] placeholder-[var(--text-faint)] focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 transition-all"
                             />
                             {#if searchQuery}
-                                <button onclick={() => { searchQuery = ''; initGraph(); }} class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white text-sm font-bold">×</button>
+                                <button onclick={() => { searchQuery = ''; initGraph(); }} class="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--text-faint)] hover:text-[var(--text-primary)] text-sm font-bold">×</button>
                             {/if}
                         </div>
 
                         <!-- Category Filter -->
                         <div class="flex items-center gap-1.5">
-                            <span class="text-[10px] font-mono uppercase text-slate-500">Category:</span>
+                            <span class="text-[10px] font-mono uppercase text-[var(--text-faint)]">Category:</span>
                             <select
                                 bind:value={selectedCategory}
                                 onchange={() => initGraph()}
-                                class="bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500/50"
+                                class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-xl px-2.5 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-cyan-500/50"
                             >
                                 <option value="All">All Categories</option>
                                 {#each categories.filter(c => c !== 'All') as cat}
@@ -845,24 +858,24 @@
 
                         <!-- Min Claims Slider -->
                         <div class="flex items-center gap-2">
-                            <span class="text-[10px] font-mono uppercase text-slate-500 min-w-[90px]">Min Claims: {minClaims}</span>
+                            <span class="text-[10px] font-mono uppercase text-[var(--text-faint)] min-w-[90px]">Min Claims: {minClaims}</span>
                             <input
                                 type="range"
                                 min="0"
                                 max="10"
                                 bind:value={minClaims}
                                 oninput={() => initGraph()}
-                                class="w-20 accent-cyan-500 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer"
+                                class="w-20 accent-cyan-500 h-1 bg-[var(--bg-slate-800)] rounded-lg appearance-none cursor-pointer"
                             />
                         </div>
 
                         <!-- Max Nodes Dropdown -->
                         <div class="flex items-center gap-1.5">
-                            <span class="text-[10px] font-mono uppercase text-slate-500">Max Nodes:</span>
+                            <span class="text-[10px] font-mono uppercase text-[var(--text-faint)]">Max Nodes:</span>
                             <select
                                 bind:value={maxNodesLimit}
                                 onchange={() => initGraph()}
-                                class="bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500/50"
+                                class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-xl px-2.5 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-cyan-500/50"
                             >
                                 <option value={50}>50</option>
                                 <option value={100}>100 (Default)</option>
@@ -882,7 +895,7 @@
                                 Clear Focus
                             </button>
                         {/if}
-                        <span class="text-xs font-mono text-slate-400">
+                        <span class="text-xs font-mono text-[var(--text-muted)]">
                             Showing <strong class="text-cyan-400">{graphNodes.length}</strong> / {data.topics.length} nodes
                         </span>
                     </div>
@@ -890,14 +903,14 @@
 
                 <div class="relative flex-1 w-full overflow-hidden">
                     <!-- Legend -->
-                    <div class="absolute top-4 left-4 z-10 bg-black/80 backdrop-blur-sm border border-slate-800 rounded-xl p-3 flex flex-wrap gap-3 text-[10px] font-mono uppercase tracking-wider">
+                    <div class="absolute top-4 left-4 z-10 bg-black/80 backdrop-blur-sm border border-[var(--border-primary)] rounded-xl p-3 flex flex-wrap gap-3 text-[10px] font-mono uppercase tracking-wider">
                         {#each [
                             { label: 'Technical', color: 'bg-cyan-400' },
                             { label: 'Architecture', color: 'bg-purple-400' },
                             { label: 'Best Practice', color: 'bg-emerald-400' },
                             { label: 'Org Norm', color: 'bg-amber-400' }
                         ] as item}
-                            <span class="flex items-center gap-1.5 text-slate-400">
+                            <span class="flex items-center gap-1.5 text-[var(--text-muted)]">
                                 <span class="w-2.5 h-2.5 rounded-full {item.color}"></span>
                                 {item.label}
                             </span>
@@ -907,28 +920,28 @@
                     <!-- Zoom controls -->
                     <div class="absolute top-4 right-4 z-10 flex flex-col gap-1">
                         <button onclick={() => { zoom = Math.min(3, zoom * 1.2); drawGraph(); }}
-                            class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-slate-400 hover:text-white flex items-center justify-center text-lg font-bold">+</button>
+                            class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] flex items-center justify-center text-lg font-bold">+</button>
                         <button onclick={() => { zoom = Math.max(0.2, zoom * 0.8); drawGraph(); }}
-                            class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-slate-400 hover:text-white flex items-center justify-center text-lg font-bold">−</button>
+                            class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] flex items-center justify-center text-lg font-bold">−</button>
                         <button onclick={() => initGraph(true)}
-                            class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-slate-400 hover:text-white flex items-center justify-center text-xs" title="Reset Camera">⟲</button>
+                            class="w-8 h-8 bg-black/80 border border-slate-700 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] flex items-center justify-center text-xs" title="Reset Camera">⟲</button>
                     </div>
 
                     <!-- Selected node details -->
                     {#if selectedNode}
                         <div class="absolute bottom-4 right-4 z-10 w-72 bg-black/90 backdrop-blur-sm border border-cyan-500/30 rounded-2xl p-4 flex flex-col gap-3" transition:slide>
                             <div>
-                                <h4 class="text-white font-bold text-sm mb-1.5">{selectedNode.name}</h4>
+                                <h4 class="text-[var(--text-primary)] font-bold text-sm mb-1.5">{selectedNode.name}</h4>
                                 <span class="font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border {getCategoryCss(selectedNode.category)}">
                                     {selectedNode.category}
                                 </span>
                             </div>
                             
-                            <div class="space-y-1 text-xs text-slate-400">
-                                <p class="font-semibold text-slate-300">{selectedNode.claimCount} claims · {selectedNode.relCount} relationships</p>
+                            <div class="space-y-1 text-xs text-[var(--text-muted)]">
+                                <p class="font-semibold text-[var(--text-secondary)]">{selectedNode.claimCount} claims · {selectedNode.relCount} relationships</p>
                                 <div class="max-h-36 overflow-y-auto pr-1 space-y-1">
                                     {#each graphEdges.filter(e => e.source.id === selectedNode?.id || e.target.id === selectedNode?.id) as edge}
-                                        <p class="text-[11px] text-slate-500 leading-tight">
+                                        <p class="text-[11px] text-[var(--text-faint)] leading-tight">
                                             {edge.source.id === selectedNode?.id ? '→' : '←'}
                                             <span class="text-cyan-400/70">{edge.type.replace(/_/g, ' ')}</span>
                                             {edge.source.id === selectedNode?.id ? edge.target.name : edge.source.name}
@@ -937,11 +950,11 @@
                                 </div>
                             </div>
 
-                            <div class="pt-2 border-t border-slate-800 flex gap-2">
+                            <div class="pt-2 border-t border-[var(--border-primary)] flex gap-2">
                                 {#if focusedNodeId === selectedNode.id}
                                     <button
                                         onclick={() => { focusedNodeId = null; initGraph(); }}
-                                        class="flex-1 py-1.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold transition-all"
+                                        class="flex-1 py-1.5 px-3 bg-[var(--bg-slate-800)] hover:bg-[var(--hover-surface)] text-[var(--text-secondary)] rounded-xl text-xs font-semibold transition-all"
                                     >
                                         Unfocus Node
                                     </button>
@@ -973,7 +986,7 @@
 
                 {#if data.topics.length === 0}
                     <div class="absolute inset-0 flex items-center justify-center">
-                        <p class="text-slate-500 text-sm">No topics yet. Upload documents to build the knowledge graph.</p>
+                        <p class="text-[var(--text-faint)] text-sm">No topics yet. Upload documents to build the knowledge graph.</p>
                     </div>
                 {/if}
             </div>
@@ -983,10 +996,10 @@
         {#if activeTab === 'conflicts'}
             <div class="space-y-4" in:fade>
                 {#if conflictGroups.length === 0}
-                    <div class="bg-slate-900 border border-slate-800 rounded-3xl p-12 text-center">
+                    <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-3xl p-12 text-center">
                         <CheckCircle class="w-12 h-12 text-emerald-400 mx-auto mb-4" />
-                        <h3 class="text-xl font-bold text-white mb-2">No Conflicts</h3>
-                        <p class="text-slate-400">All knowledge claims are consistent. No resolution needed.</p>
+                        <h3 class="text-xl font-bold text-[var(--text-primary)] mb-2">No Conflicts</h3>
+                        <p class="text-[var(--text-muted)]">All knowledge claims are consistent. No resolution needed.</p>
                     </div>
                 {:else}
                     <div class="bg-red-500/5 border border-red-500/20 rounded-2xl p-4 mb-2 flex items-center gap-3">
@@ -997,20 +1010,20 @@
                     </div>
 
                     {#each conflictGroups as group}
-                        <div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+                        <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-2xl overflow-hidden">
                             <!-- Topic header -->
                             <button
                                 onclick={() => expandedConflict = expandedConflict === group.topic?.id ? null : group.topic?.id}
-                                class="w-full flex items-center justify-between p-5 hover:bg-slate-800/50 transition-colors text-left"
+                                class="w-full flex items-center justify-between p-5 hover:bg-[var(--hover-surface)] transition-colors text-left"
                             >
                                 <div class="flex items-center gap-3">
                                     {#if expandedConflict === group.topic?.id}
-                                        <ChevronDown class="w-5 h-5 text-slate-500" />
+                                        <ChevronDown class="w-5 h-5 text-[var(--text-faint)]" />
                                     {:else}
-                                        <ChevronRight class="w-5 h-5 text-slate-500" />
+                                        <ChevronRight class="w-5 h-5 text-[var(--text-faint)]" />
                                     {/if}
                                     <div>
-                                        <h3 class="text-white font-bold">{group.topic?.name ?? 'Unknown Topic'}</h3>
+                                        <h3 class="text-[var(--text-primary)] font-bold">{group.topic?.name ?? 'Unknown Topic'}</h3>
                                         <span class="font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border {getCategoryCss(group.topic?.category || '')}">
                                             {group.topic?.category || 'Unknown'}
                                         </span>
@@ -1023,7 +1036,7 @@
 
                             <!-- Expanded: side-by-side comparison -->
                             {#if expandedConflict === group.topic?.id}
-                                <div class="border-t border-slate-800 p-5 space-y-4" transition:slide>
+                                <div class="border-t border-[var(--border-primary)] p-5 space-y-4" transition:slide>
                                     <!-- Active claims (existing truth) -->
                                     {#if group.active.length > 0}
                                         <div>
@@ -1033,8 +1046,8 @@
                                             <div class="space-y-2">
                                                 {#each group.active as claim}
                                                     <div class="bg-emerald-500/5 border border-emerald-500/10 rounded-xl p-3">
-                                                        <p class="text-slate-200 text-sm leading-relaxed">{claim.claim_text}</p>
-                                                        <div class="mt-2 flex items-center gap-2 text-[10px] text-slate-500 font-mono">
+                                                        <p class="text-[var(--text-secondary)] text-sm leading-relaxed">{claim.claim_text}</p>
+                                                        <div class="mt-2 flex items-center gap-2 text-[10px] text-[var(--text-faint)] font-mono">
                                                             <span>Source: {claim.doc_name}</span>
                                                             {#if claim.doc_content_hash}
                                                                 <span>· v:{claim.doc_content_hash?.slice(0, 8)}</span>
@@ -1054,15 +1067,15 @@
                                         <div class="space-y-3">
                                             {#each group.conflicting as claim}
                                                 <div class="bg-red-500/5 border border-red-500/10 rounded-xl p-4">
-                                                    <p class="text-slate-200 text-sm leading-relaxed mb-3">{claim.claim_text}</p>
+                                                        <p class="text-[var(--text-secondary)] text-sm leading-relaxed mb-3">{claim.claim_text}</p>
                                                     <div class="flex items-center justify-between">
-                                                        <div class="flex items-center gap-2 text-[10px] text-slate-500 font-mono">
-                                                            <span>Source: {claim.doc_name}</span>
-                                                            {#if claim.doc_content_hash}
-                                                                <span>· v:{claim.doc_content_hash?.slice(0, 8)}</span>
-                                                            {/if}
-                                                            {#if claim.current_doc_hash && claim.doc_content_hash && claim.current_doc_hash !== claim.doc_content_hash}
-                                                                <span class="text-amber-400">⚠ doc updated since</span>
+                                                        <div class="flex items-center gap-2 text-[10px] text-[var(--text-faint)] font-mono">
+                                                             <span>Source: {claim.doc_name}</span>
+                                                             {#if claim.doc_content_hash}
+                                                                 <span>· v:{claim.doc_content_hash?.slice(0, 8)}</span>
+                                                             {/if}
+                                                             {#if claim.current_doc_hash && claim.doc_content_hash && claim.current_doc_hash !== claim.doc_content_hash}
+                                                                 <span class="text-amber-400">⚠ doc updated since</span>
                                                             {/if}
                                                         </div>
                                                         <div class="flex items-center gap-2">
@@ -1073,10 +1086,10 @@
                                                             >
                                                                 <CheckCircle class="w-3 h-3" /> Accept
                                                             </button>
-                                                            <button
+                                                             <button
                                                                 onclick={() => resolveConflict(claim.id, 'dismiss')}
                                                                 disabled={resolving === claim.id}
-                                                                class="px-3 py-1.5 bg-slate-500/10 hover:bg-slate-500/20 text-slate-400 text-xs font-bold rounded-lg border border-slate-500/20 transition-all disabled:opacity-50 flex items-center gap-1"
+                                                                class="px-3 py-1.5 bg-slate-500/10 hover:bg-slate-500/20 text-[var(--text-muted)] text-xs font-bold rounded-lg border border-slate-500/20 transition-all disabled:opacity-50 flex items-center gap-1"
                                                             >
                                                                 <Eye class="w-3 h-3" /> Dismiss
                                                             </button>
@@ -1105,8 +1118,8 @@
         {#if activeTab === 'hierarchy'}
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6" in:fade>
                 <!-- Category Grouping -->
-                <div class="bg-slate-900 border border-slate-800 rounded-3xl p-6">
-                    <h3 class="text-lg font-bold text-white mb-4 flex items-center gap-2">
+                <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-3xl p-6">
+                    <h3 class="text-lg font-bold text-[var(--text-primary)] mb-4 flex items-center gap-2">
                         <Layers class="w-5 h-5 text-purple-400" />
                         By Category
                     </h3>
@@ -1117,13 +1130,13 @@
                                     <span class="font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border {getCategoryCss(category)}">
                                         {category}
                                     </span>
-                                    <span class="text-xs text-slate-500">{topics.length} topic{topics.length !== 1 ? 's' : ''}</span>
+                                    <span class="text-xs text-[var(--text-faint)]">{topics.length} topic{topics.length !== 1 ? 's' : ''}</span>
                                 </div>
                                 <div class="space-y-1">
                                     {#each topics as topic}
-                                        <div class="flex items-center justify-between py-1.5 px-3 rounded-lg hover:bg-slate-800/50 transition-colors group">
-                                            <span class="text-sm text-slate-300 group-hover:text-white transition-colors">{topic.name}</span>
-                                            <div class="flex items-center gap-2 text-[10px] text-slate-500">
+                                        <div class="flex items-center justify-between py-1.5 px-3 rounded-lg hover:bg-[var(--hover-surface)] transition-colors group">
+                                            <span class="text-sm text-[var(--text-secondary)] group-hover:text-[var(--text-primary)] transition-colors">{topic.name}</span>
+                                            <div class="flex items-center gap-2 text-[10px] text-[var(--text-faint)]">
                                                 <span>{data.claims.filter((c: any) => c.topic_id === topic.id).length} claims</span>
                                                 <span>{data.relationships.filter((r: any) => r.source_topic_id === topic.id || r.target_topic_id === topic.id).length} rels</span>
                                             </div>
@@ -1136,13 +1149,13 @@
                 </div>
 
                 <!-- Tree View (parent-child) -->
-                <div class="bg-slate-900 border border-slate-800 rounded-3xl p-6">
-                    <h3 class="text-lg font-bold text-white mb-4 flex items-center gap-2">
+                <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-3xl p-6">
+                    <h3 class="text-lg font-bold text-[var(--text-primary)] mb-4 flex items-center gap-2">
                         <GitBranch class="w-5 h-5 text-cyan-400" />
                         Topic Tree
                     </h3>
                     {#if hierarchyTree.roots.length === 0}
-                        <p class="text-slate-500 text-sm">No topics yet.</p>
+                        <p class="text-[var(--text-faint)] text-sm">No topics yet.</p>
                     {:else}
                         <div class="space-y-0.5">
                             {#each hierarchyTree.roots as node}
@@ -1155,15 +1168,15 @@
                     {#if taxonomyResult}
                         <div class="mt-6 p-3 bg-purple-500/10 rounded-xl border border-purple-500/20" transition:slide>
                             <p class="text-[10px] text-purple-400 font-mono uppercase tracking-wider mb-1">Taxonomy Rebuild Complete</p>
-                            <p class="text-sm text-slate-300">
-                                <strong class="text-white">{taxonomyResult.updated}</strong> of {taxonomyResult.total} topics assigned to parents.
+                            <p class="text-sm text-[var(--text-secondary)]">
+                                <strong class="text-[var(--text-primary)]">{taxonomyResult.updated}</strong> of {taxonomyResult.total} topics assigned to parents.
                             </p>
                         </div>
                     {/if}
 
-                    <div class="mt-4 p-3 bg-slate-800/30 rounded-xl border border-slate-700/50">
-                        <p class="text-[10px] text-slate-500 font-mono uppercase tracking-wider mb-1">How it works</p>
-                        <p class="text-xs text-slate-400">
+                    <div class="mt-4 p-3 bg-[var(--bg-slate-800-30)] rounded-xl border border-slate-700/50">
+                        <p class="text-[10px] text-[var(--text-faint)] font-mono uppercase tracking-wider mb-1">How it works</p>
+                        <p class="text-xs text-[var(--text-muted)]">
                             <strong class="text-cyan-400">Incremental:</strong> After each document import, new topics are automatically placed into the existing hierarchy.
                             <br />
                             <strong class="text-purple-400">Full rebuild:</strong> Click "Rebuild Taxonomy" to have the LLM review all topics and create an optimal hierarchy from scratch.
@@ -1180,18 +1193,18 @@
     <div style="margin-left: {node.depth * 20}px">
         <button
             onclick={() => node.children.length > 0 && toggleHierarchyNode(node.topic.id)}
-            class="w-full flex items-center gap-2 py-1.5 px-3 rounded-lg hover:bg-slate-800/50 transition-colors text-left group"
+            class="w-full flex items-center gap-2 py-1.5 px-3 rounded-lg hover:bg-[var(--hover-surface)] transition-colors text-left group"
         >
             {#if node.children.length > 0}
                 {#if node.expanded}
-                    <ChevronDown class="w-3.5 h-3.5 text-slate-500" />
+                    <ChevronDown class="w-3.5 h-3.5 text-[var(--text-faint)]" />
                 {:else}
-                    <ChevronRight class="w-3.5 h-3.5 text-slate-500" />
+                    <ChevronRight class="w-3.5 h-3.5 text-[var(--text-faint)]" />
                 {/if}
             {:else}
                 <span class="w-3.5 h-3.5 flex items-center justify-center text-slate-700">•</span>
             {/if}
-            <span class="text-sm text-slate-300 group-hover:text-white transition-colors flex-1">{node.topic.name}</span>
+            <span class="text-sm text-[var(--text-secondary)] group-hover:text-[var(--text-primary)] transition-colors flex-1">{node.topic.name}</span>
             <span class="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded border {getCategoryCss(node.topic.category || '')} opacity-60">
                 {node.topic.category || '?'}
             </span>

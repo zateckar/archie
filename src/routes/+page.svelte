@@ -1,12 +1,23 @@
 <script lang="ts">
-    import { onMount, untrack } from 'svelte';
-    import { 
-        Send, Bot,
-        Plus, LayoutDashboard, LogOut, ChevronDown,
-        MessageSquare, Trash, PanelLeftClose, PanelLeftOpen, Network, Info, BookOpen
-    } from 'lucide-svelte';
+    import { onMount, onDestroy, untrack } from 'svelte';
+    import Send from 'lucide-svelte/icons/send';
+import Bot from 'lucide-svelte/icons/bot';
+import Mic from 'lucide-svelte/icons/mic';
+import MicOff from 'lucide-svelte/icons/mic-off';
+import Plus from 'lucide-svelte/icons/plus';
+import LayoutDashboard from 'lucide-svelte/icons/layout-dashboard';
+import LogOut from 'lucide-svelte/icons/log-out';
+import ChevronDown from 'lucide-svelte/icons/chevron-down';
+import MessageSquare from 'lucide-svelte/icons/message-square';
+import Trash from 'lucide-svelte/icons/trash';
+import PanelLeftClose from 'lucide-svelte/icons/panel-left-close';
+import PanelLeftOpen from 'lucide-svelte/icons/panel-left-open';
+import Network from 'lucide-svelte/icons/network';
+import Info from 'lucide-svelte/icons/info';
+import BookOpen from 'lucide-svelte/icons/book-open';
     import { fade, fly } from 'svelte/transition';
     import MessageBubble from '$lib/components/MessageBubble.svelte';
+    import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 
     type Conversation = { id: string; title: string };
     type Message = { role: 'user' | 'assistant', content: string, sources?: any[] };
@@ -20,6 +31,21 @@
     let isChatting = $state(false);
     let isUserMenuOpen = $state(false);
     let isSidebarOpen = $state(true);
+    let isRecording = $state(false);
+    let recognition: any = null;
+    let speechSupported = $state(false);
+
+    function toggleVoiceInput() {
+        if (!speechSupported) return;
+
+        if (isRecording) {
+            recognition?.stop();
+            isRecording = false;
+        } else {
+            recognition?.start();
+            isRecording = true;
+        }
+    }
 
     async function loadConversation(id: string) {
         if (isChatting) return;
@@ -60,6 +86,11 @@
 
     async function handleChat(skipAnalysis = false) {
         if (!currentPrompt.trim() || isChatting) return;
+
+        if (isRecording) {
+            recognition?.stop();
+            isRecording = false;
+        }
 
         const prompt = currentPrompt;
         currentPrompt = '';
@@ -167,21 +198,53 @@
         if (conversations.length > 0) {
             loadConversation(conversations[0].id);
         }
+
+        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (SpeechRecognition) {
+            speechSupported = true;
+            recognition = new SpeechRecognition();
+            recognition.lang = 'en-US';
+            recognition.interimResults = true;
+            recognition.continuous = false;
+
+            recognition.onresult = (event: any) => {
+                let transcript = '';
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    transcript += event.results[i][0].transcript;
+                }
+                currentPrompt = transcript;
+            };
+
+            recognition.onend = () => {
+                isRecording = false;
+            };
+
+            recognition.onerror = (event: any) => {
+                console.error('Speech recognition error:', event.error);
+                isRecording = false;
+            };
+        }
+    });
+
+    onDestroy(() => {
+        if (recognition) {
+            recognition.abort();
+        }
     });
 </script>
 
-<div class="flex h-screen bg-[#050505] text-slate-100 font-sans overflow-hidden">
+<div class="flex h-screen bg-[var(--bg-page)] text-[var(--text-page)] font-sans overflow-hidden">
     <!-- Sidebar -->
     <aside 
-        class="sidebar-panel w-72 bg-[#0a0a0a] border-r border-slate-800/50 flex flex-col z-20 {isSidebarOpen ? 'sidebar-visible' : 'sidebar-hidden'}"
+        class="sidebar-panel w-72 bg-[var(--bg-surface)] border-r border-[var(--border-secondary)] flex flex-col z-20 {isSidebarOpen ? 'sidebar-visible' : 'sidebar-hidden'}"
     >
-            <div class="p-4 border-b border-slate-800/50 flex items-center justify-between">
+            <div class="p-4 border-b border-[var(--border-secondary)] flex items-center justify-between">
                 <h1 class="text-xs font-black bg-gradient-to-r from-[#78FAAE] to-[#0E3A2F] bg-clip-text text-transparent uppercase tracking-[0.2em]">
                     ARCHIE
                 </h1>
                 <button 
                     onclick={() => isSidebarOpen = false}
-                    class="p-1.5 hover:bg-slate-800 rounded-lg text-slate-500 transition-colors"
+                    class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg text-[var(--text-muted)] transition-colors"
                 >
                     <PanelLeftClose class="w-4 h-4" />
                 </button>
@@ -198,7 +261,7 @@
             </div>
 
             <div class="flex-1 overflow-y-auto px-2 space-y-1 custom-scrollbar">
-                <div class="px-3 py-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Recent Chats</div>
+                <div class="px-3 py-2 text-[10px] font-bold text-[var(--text-faint)] uppercase tracking-widest">Recent Chats</div>
                 {#each conversations as conv}
                     <div 
                         role="button"
@@ -206,10 +269,10 @@
                         onclick={() => loadConversation(conv.id)}
                         onkeydown={(e) => e.key === 'Enter' && loadConversation(conv.id)}
                         class="w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl transition-all group cursor-pointer
-                        {currentConversationId === conv.id ? 'bg-[#0E3A2F]/20 text-[#78FAAE] border border-[#78FAAE]/20' : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200 border border-transparent'}"
+                        {currentConversationId === conv.id ? 'bg-[#0E3A2F] text-[#78FAAE] border border-[#78FAAE]/20' : 'text-[var(--text-muted)] hover:bg-[var(--hover-surface)] hover:text-[var(--text-secondary)] border border-transparent'}"
                     >
                         <div class="flex items-center gap-3 overflow-hidden">
-                            <MessageSquare class="w-4 h-4 flex-shrink-0 {currentConversationId === conv.id ? 'text-[#78FAAE]' : 'text-slate-600'}" />
+                            <MessageSquare class="w-4 h-4 flex-shrink-0 {currentConversationId === conv.id ? 'text-[#78FAAE]' : 'text-[var(--text-faintest)]'}" />
                             <span class="text-xs font-medium truncate">{conv.title}</span>
                         </div>
                         <button 
@@ -223,46 +286,46 @@
                 {/each}
             </div>
 
-            <div class="p-4 border-t border-slate-800/50">
+            <div class="p-4 border-t border-[var(--border-secondary)]">
                 <div class="relative">
                     <button 
                         onclick={() => isUserMenuOpen = !isUserMenuOpen}
-                        class="w-full flex items-center gap-3 p-2 hover:bg-slate-900 rounded-xl transition-all border border-transparent hover:border-slate-800"
+                        class="w-full flex items-center gap-3 p-2 hover:bg-[var(--hover-surface)] rounded-xl transition-all border border-transparent hover:border-[var(--border-primary)]"
                     >
                         <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-[#0E3A2F] to-[#78FAAE] flex items-center justify-center text-[10px] font-bold shadow-lg shadow-[#0E3A2F]/20 text-[#0E3A2F]">
                             {user?.username.slice(0, 2).toUpperCase()}
                         </div>
                         <div class="flex-1 text-left overflow-hidden">
-                            <p class="text-xs font-bold text-slate-200 truncate">{user?.username}</p>
-                            <p class="text-[10px] text-slate-500 uppercase tracking-tighter">{user?.role}</p>
+                            <p class="text-xs font-bold text-[var(--text-secondary)] truncate">{user?.username}</p>
+                            <p class="text-[10px] text-[var(--text-faint)] uppercase tracking-tighter">{user?.role}</p>
                         </div>
-                        <ChevronDown class="w-4 h-4 text-slate-500 transition-transform {isUserMenuOpen ? 'rotate-180' : ''}" />
+                        <ChevronDown class="w-4 h-4 text-[var(--text-faint)] transition-transform {isUserMenuOpen ? 'rotate-180' : ''}" />
                     </button>
 
                     {#if isUserMenuOpen}
                         <div 
                             transition:fly={{ y: 10, duration: 200 }}
-                            class="absolute bottom-full left-0 right-0 mb-2 bg-[#0f0f0f] border border-slate-800 rounded-2xl shadow-2xl py-2 z-50 overflow-hidden"
+                            class="absolute bottom-full left-0 right-0 mb-2 bg-[var(--bg-raised)] border border-[var(--border-primary)] rounded-2xl shadow-2xl py-2 z-50 overflow-hidden"
                         >
-                            <a href="/knowledge" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-slate-800 hover:text-white transition-colors uppercase tracking-wider">
+                            <a href="/knowledge" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-[var(--hover-surface-solid)] hover:text-white transition-colors uppercase tracking-wider">
                                 <Network class="w-4 h-4 text-cyan-400" />
                                 Knowledge Graph
                             </a>
-                            <a href="/wiki" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-slate-800 hover:text-white transition-colors uppercase tracking-wider">
+                            <a href="/wiki" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-[var(--hover-surface-solid)] hover:text-white transition-colors uppercase tracking-wider">
                                 <BookOpen class="w-4 h-4 text-emerald-400" />
                                 Wiki
                             </a>
-                            <a href="/about" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-slate-800 hover:text-white transition-colors uppercase tracking-wider">
+                            <a href="/about" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-[var(--hover-surface-solid)] hover:text-white transition-colors uppercase tracking-wider">
                                 <Info class="w-4 h-4 text-purple-400" />
                                 About
                             </a>
-                            <div class="my-1 border-t border-slate-800/50"></div>
+                            <div class="my-1 border-t border-[var(--border-secondary)]"></div>
                             {#if user?.role === 'admin'}
-                                <a href="/admin" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-slate-800 hover:text-white transition-colors uppercase tracking-wider">
+                                <a href="/admin" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-[var(--hover-surface-solid)] hover:text-white transition-colors uppercase tracking-wider">
                                     <LayoutDashboard class="w-4 h-4 text-[#78FAAE]" />
                                     Admin Dashboard
                                 </a>
-                                <div class="my-1 border-t border-slate-800/50"></div>
+                                <div class="my-1 border-t border-[var(--border-secondary)]"></div>
                             {/if}
                             <form method="POST" action="/api/auth/logout">
                                 <button type="submit" class="w-full flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-red-400 hover:bg-red-900/20 transition-colors uppercase tracking-wider">
@@ -277,17 +340,17 @@
     </aside>
 
     <!-- Main: Chat Interface -->
-    <main class="flex-1 flex flex-col relative w-full bg-[#050505]">
-        <header class="h-14 px-4 border-b border-slate-800/50 flex items-center justify-between bg-[#050505]/80 backdrop-blur-xl sticky top-0 z-10">
+    <main class="flex-1 flex flex-col relative w-full bg-[var(--bg-page)]">
+        <header class="h-14 px-4 border-b border-[var(--border-secondary)] flex items-center justify-between bg-[var(--bg-page)]/80 backdrop-blur-xl sticky top-0 z-10">
             <div class="flex items-center gap-4">
-                <a href="/wiki" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-[#78FAAE]/50 transition-all group">
+                <a href="/wiki" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[var(--bg-slate-900)] border border-[var(--border-primary)] hover:border-[#78FAAE]/50 transition-all group">
                     <BookOpen class="w-4 h-4 text-[#78FAAE] group-hover:scale-110 transition-transform" />
-                    <span class="text-[10px] font-bold text-slate-400 group-hover:text-white uppercase tracking-widest">Wiki</span>
+                    <span class="text-[10px] font-bold text-[var(--text-muted)] group-hover:text-white uppercase tracking-widest">Wiki</span>
                 </a>
                 {#if !isSidebarOpen}
                     <button 
                         onclick={() => isSidebarOpen = true}
-                        class="p-1.5 hover:bg-slate-800 rounded-lg text-slate-500 transition-colors"
+                        class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg text-[var(--text-muted)] transition-colors"
                     >
                         <PanelLeftOpen class="w-4 h-4" />
                     </button>
@@ -295,8 +358,9 @@
             </div>
 
             <div class="flex items-center gap-3">
+                <ThemeToggle />
                 <div class="h-4 w-px bg-slate-800"></div>
-                <span class="text-[10px] font-bold text-slate-600 uppercase tracking-widest">v1.0.4</span>
+                <span class="text-[10px] font-bold text-[var(--text-faintest)] uppercase tracking-widest">v1.0.4</span>
             </div>
         </header>
 
@@ -307,67 +371,88 @@
                         <Bot class="w-8 h-8 text-[#0E3A2F]" />
                     </div>
                     <div class="space-y-2">
-                        <h2 class="text-xl font-black tracking-tight text-white">How can I help you today?</h2>
-                        <p class="text-sm text-slate-500 leading-relaxed">
+                        <h2 class="text-xl font-black tracking-tight text-[var(--text-primary)]">How can I help you today?</h2>
+                        <p class="text-sm text-[var(--text-faint)] leading-relaxed">
                             Ask me anything about your documents. I can search through your knowledge base and provide precise answers with sources.
                         </p>
                     </div>
                     <div class="grid grid-cols-2 gap-3 w-full">
-                        <button class="p-3 rounded-2xl bg-slate-900/50 border border-slate-800 hover:border-[#78FAAE]/50 transition-all text-left group">
+                        <button class="p-3 rounded-2xl bg-[var(--bg-slate-900)]/50 border border-[var(--border-primary)] hover:border-[#78FAAE]/50 transition-all text-left group">
                             <p class="text-[10px] font-bold text-[#78FAAE] uppercase tracking-wider mb-1">Analyze</p>
-                            <p class="text-xs text-slate-400 group-hover:text-slate-200 transition-colors">Summarize the latest project docs</p>
+                            <p class="text-xs text-[var(--text-muted)] group-hover:text-[var(--text-secondary)] transition-colors">Summarize the latest project docs</p>
                         </button>
-                        <button class="p-3 rounded-2xl bg-slate-900/50 border border-slate-800 hover:border-[#78FAAE]/50 transition-all text-left group">
+                        <button class="p-3 rounded-2xl bg-[var(--bg-slate-900)]/50 border border-[var(--border-primary)] hover:border-[#78FAAE]/50 transition-all text-left group">
                             <p class="text-[10px] font-bold text-[#78FAAE] uppercase tracking-wider mb-1">Search</p>
-                            <p class="text-xs text-slate-400 group-hover:text-slate-200 transition-colors">Find technical specs for TS-FIV</p>
+                            <p class="text-xs text-[var(--text-muted)] group-hover:text-[var(--text-secondary)] transition-colors">Find technical specs for TS-FIV</p>
                         </button>
                     </div>
                 </div>
             {/if}
 
             {#each messages as msg, i}
-                <MessageBubble {msg} />
+                <MessageBubble
+                    {msg}
+                    conversationId={currentConversationId}
+                    messageIndex={i}
+                    streaming={isChatting && i === messages.length - 1 && msg.role === 'assistant'}
+                />
             {/each}
 
             {#if isChatting}
                 <div class="flex justify-start" in:fade>
                     <div class="flex space-x-4">
-                        <div class="w-9 h-9 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center">
+                        <div class="w-9 h-9 rounded-xl bg-[var(--bg-slate-900)] border border-[var(--border-primary)] flex items-center justify-center">
                             <Bot class="w-5 h-5 text-[#78FAAE] animate-pulse" />
                         </div>
-                        <div class="bg-[#0f0f0f] border border-slate-800/50 p-5 rounded-2xl rounded-tl-none shadow-inner flex items-center gap-3">
+                        <div class="bg-[var(--bg-raised)] border border-[var(--border-secondary)] p-5 rounded-2xl rounded-tl-none shadow-inner flex items-center gap-3">
                             <div class="flex gap-1">
                                 <div class="w-1.5 h-1.5 bg-[#78FAAE] rounded-full animate-bounce [animation-delay:-0.3s]"></div>
                                 <div class="w-1.5 h-1.5 bg-[#78FAAE] rounded-full animate-bounce [animation-delay:-0.15s]"></div>
                                 <div class="w-1.5 h-1.5 bg-[#78FAAE] rounded-full animate-bounce"></div>
                             </div>
-                            <span class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Archie is thinking</span>
+                            <span class="text-[10px] font-bold text-[var(--text-faint)] uppercase tracking-widest">Archie is thinking</span>
                         </div>
                     </div>
                 </div>
             {/if}
         </div>
 
-        <footer class="p-6 bg-gradient-to-t from-[#050505] via-[#050505] to-transparent">
+        <footer class="p-6 bg-gradient-to-t from-[var(--bg-page)] via-[var(--bg-page)] to-transparent">
             <div class="max-w-4xl mx-auto relative group">
                 <div class="absolute -inset-1 bg-gradient-to-r from-[#0E3A2F] to-[#78FAAE] rounded-2xl blur opacity-20 group-focus-within:opacity-40 transition duration-500"></div>
                 <textarea 
                     bind:value={currentPrompt}
                     onkeydown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleChat())}
                     placeholder="Ask anything about your documents..."
-                    class="relative w-full bg-[#0a0a0a] border border-slate-800 rounded-2xl py-5 pl-6 pr-16 focus:outline-none focus:border-[#78FAAE]/50 transition-all resize-none shadow-2xl text-sm text-slate-200 placeholder:text-slate-600"
+                    class="relative w-full bg-[var(--bg-surface)] border border-[var(--border-primary)] rounded-2xl py-5 pl-6 pr-28 focus:outline-none focus:border-[#78FAAE]/50 transition-all resize-none shadow-2xl text-sm text-[var(--text-secondary)] placeholder:text-[var(--text-faintest)]"
                     rows="1"
                 ></textarea>
-                <button
-                    onclick={() => handleChat()}
-                    disabled={!currentPrompt.trim() || isChatting}
-                    class="absolute right-3 bottom-3 p-2.5 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] disabled:bg-slate-800 disabled:text-slate-600 rounded-xl transition-all shadow-lg shadow-[#0E3A2F]/20 border border-[#78FAAE]/20"
-                >
-                    <Send class="w-5 h-5" />
-                </button>
+                <div class="absolute right-3 bottom-3 flex items-center gap-2">
+                    {#if speechSupported}
+                        <button
+                            onclick={toggleVoiceInput}
+                            disabled={isChatting}
+                            class="p-2.5 rounded-xl transition-all shadow-lg border {isRecording ? 'bg-red-500/20 hover:bg-red-500/30 text-red-400 border-red-500/30 animate-pulse' : 'bg-[var(--bg-slate-800)] hover:bg-[var(--hover-surface-solid)] text-[var(--text-muted)] border-[var(--border-hover)]'} disabled:bg-[var(--bg-slate-800)] disabled:text-[var(--text-faintest)] disabled:border-[var(--border-primary)]"
+                            aria-label={isRecording ? 'Stop recording' : 'Start voice input'}
+                        >
+                            {#if isRecording}
+                                <MicOff class="w-5 h-5" />
+                            {:else}
+                                <Mic class="w-5 h-5" />
+                            {/if}
+                        </button>
+                    {/if}
+                    <button
+                        onclick={() => handleChat()}
+                        disabled={!currentPrompt.trim() || isChatting}
+                        class="p-2.5 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] disabled:bg-[var(--bg-slate-800)] disabled:text-[var(--text-faintest)] rounded-xl transition-all shadow-lg shadow-[#0E3A2F]/20 border border-[#78FAAE]/20"
+                    >
+                        <Send class="w-5 h-5" />
+                    </button>
+                </div>
             </div>
             <div class="flex items-center justify-center gap-6 mt-4">
-                <p class="text-[9px] text-slate-700 uppercase tracking-[0.3em] font-black">
+                <p class="text-[9px] text-[var(--text-faintest)] uppercase tracking-[0.3em] font-black">
                     Powered by SQLite-Vector & Gemini AI
                 </p>
             </div>
@@ -378,7 +463,7 @@
 <style>
     :global(body) {
         margin: 0;
-        background: #050505;
+        background: var(--bg-page);
     }
 
     .sidebar-panel {
@@ -406,22 +491,22 @@
     }
 
     .custom-scrollbar::-webkit-scrollbar-thumb {
-        background: #1a1a1a;
+        background: var(--scrollbar-thumb);
         border-radius: 10px;
     }
 
     .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-        background: #2a2a2a;
+        background: var(--scrollbar-hover);
     }
 
     :global(.prose pre) {
-        background: #0a0a0a !important;
-        border: 1px solid #1a1a1a;
+        background: var(--code-bg) !important;
+        border: 1px solid var(--code-border);
         border-radius: 12px;
     }
 
     :global(.prose code) {
-        color: #78FAAE !important;
+        color: var(--code-text) !important;
         font-family: 'JetBrains Mono', monospace;
     }
 </style>

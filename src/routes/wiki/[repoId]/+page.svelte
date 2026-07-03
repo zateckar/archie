@@ -1,7 +1,10 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { page } from '$app/state';
-    import { BookOpen, FileText, Plus, Loader2 } from 'lucide-svelte';
+    import BookOpen from 'lucide-svelte/icons/book-open';
+import FileText from 'lucide-svelte/icons/file-text';
+import Plus from 'lucide-svelte/icons/plus';
+import Loader2 from 'lucide-svelte/icons/loader-2';
 
     let { params }: {
         params: { repoId: string };
@@ -87,11 +90,11 @@
         <div class="w-6 h-6 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
     {:else if !defaultPath}
         <div class="max-w-md text-center">
-            <div class="inline-flex p-4 bg-slate-900 rounded-2xl border border-slate-800 mb-6">
-                <BookOpen class="w-10 h-10 text-slate-600" />
+            <div class="inline-flex p-4 bg-[var(--bg-slate-900)] rounded-2xl border border-[var(--border-primary)] mb-6">
+                <BookOpen class="w-10 h-10 text-[var(--text-faintest)]" />
             </div>
-            <h2 class="text-2xl font-bold text-white mb-3">No documents yet</h2>
-            <p class="text-slate-400 mb-8">
+            <h2 class="text-2xl font-bold text-[var(--text-primary)] mb-3">No documents yet</h2>
+            <p class="text-[var(--text-muted)] mb-8">
                 This repository doesn't have any markdown documents yet. Create your first one to get started.
             </p>
 
@@ -101,19 +104,19 @@
                         type="text" 
                         bind:value={newFileName}
                         placeholder="README.md"
-                        class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#78FAAE]/50"
+                        class="w-full bg-[var(--bg-slate-900)] border border-[var(--border-hover)] rounded-xl px-4 py-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-faintest)] focus:outline-none focus:border-[#78FAAE]/50"
                     />
                     <div class="flex gap-2 justify-center">
-                        <button type="submit" class="px-6 py-3 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 rounded-xl font-bold text-sm transition-all">
+                        <button type="submit" class="px-6 py-3 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] rounded-xl font-bold text-sm transition-all">
                             Create Page
                         </button>
-                        <button type="button" onclick={() => showCreateForm = false} class="px-4 py-3 hover:bg-slate-800 rounded-xl text-sm transition-all">
+                        <button type="button" onclick={() => showCreateForm = false} class="px-4 py-3 hover:bg-[var(--hover-surface)] rounded-xl text-sm transition-all">
                             Cancel
                         </button>
                     </div>
                 </form>
             {:else}
-                <button onclick={() => showCreateForm = true} class="inline-flex items-center gap-2 px-6 py-3 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 rounded-xl font-bold text-sm transition-all">
+                <button onclick={() => showCreateForm = true} class="inline-flex items-center gap-2 px-6 py-3 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] rounded-xl font-bold text-sm transition-all">
                     <Plus class="w-4 h-4" />
                     Create First Page
                 </button>
