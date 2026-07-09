@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { searchChunks, buildKnowledgeContext } from '$lib/server/rag';
-import { chatStream, condenseQuery, analyzeQuery, evaluateContext, synthesizeContext, buildConversationBriefing } from '$lib/server/gemini';
+import { chatStream, condenseQuery, analyzeAndCondenseQuery, evaluateContext, synthesizeContext, buildConversationBriefing } from '$lib/server/gemini';
 import { db } from '$lib/server/db';
 
 export async function POST({ request, locals }) {
@@ -13,9 +13,13 @@ export async function POST({ request, locals }) {
         return json({ error: 'Missing prompt' }, { status: 400 });
     }
 
-    // Step 1: Analyze query quality (can be skipped if user already provided clarification)
+    // Step 1+2: Analyze query quality AND condense it with conversation history
+    // in a single LLM call (previously two sequential calls: analyzeQuery then
+    // condenseQuery). Skipped entirely when the user already answered a
+    // clarification prompt — in that case we only need condensing.
+    let searchPrompt: string;
     if (!skipAnalysis) {
-        const analysis = await analyzeQuery(prompt, history);
+        const analysis = await analyzeAndCondenseQuery(prompt, history);
 
         // If query needs clarification, return questions instead of searching
         if (analysis.needsClarification && analysis.clarificationQuestions && analysis.clarificationQuestions.length > 0) {
@@ -25,19 +29,19 @@ export async function POST({ request, locals }) {
                 suggestedQuery: analysis.searchableQuery
             });
         }
+        searchPrompt = analysis.searchableQuery;
+    } else {
+        searchPrompt = await condenseQuery(history, prompt);
     }
-
-    // Step 2: Condense query with conversation history
-    const searchPrompt = await condenseQuery(history, prompt);
 
     // Step 3: Multi-pass context gathering
     // Pass 1: Primary search — knowledge graph + verbatim chunks in parallel
-    const [knowledgeContext, relevantChunks] = await Promise.all([
+    const [knowledgeResult, relevantChunks] = await Promise.all([
         buildKnowledgeContext(searchPrompt, 5, 15),
         searchChunks(searchPrompt, 3)
     ]);
 
-    let context = knowledgeContext;
+    let context = knowledgeResult.text;
     if (relevantChunks.length > 0) {
         const chunkContext = relevantChunks.map(c => `[${c.path || c.filename}]\n${c.content}`).join('\n\n');
         context += `\n\n---\n\nVERBATIM EXCERPTS (for direct quotes if needed):\n\n${chunkContext}`;
@@ -45,8 +49,10 @@ export async function POST({ request, locals }) {
 
     // Pass 2: Evaluate context quality — if insufficient, refine and search again
     const evaluation = await evaluateContext(searchPrompt, context);
+    let refinementHappened = false;
 
     if (!evaluation.sufficient && evaluation.refinedQueries.length > 0) {
+        refinementHappened = true;
         console.log(`[MultiPassRAG] Context insufficient for "${searchPrompt.slice(0, 60)}". Missing: ${evaluation.missingAspects.join(', ')}. Refining with: ${evaluation.refinedQueries.join(', ')}`);
 
         const additionalContexts = await Promise.all(
@@ -56,8 +62,8 @@ export async function POST({ request, locals }) {
                     searchChunks(refinedQuery, 2)
                 ]);
                 let addlContext = '';
-                if (addlKnowledge && !addlKnowledge.includes('No relevant knowledge found')) {
-                    addlContext += addlKnowledge;
+                if (addlKnowledge.text && !addlKnowledge.text.includes('No relevant knowledge found')) {
+                    addlContext += addlKnowledge.text;
                 }
                 if (addlChunks.length > 0) {
                     addlContext += '\n' + addlChunks.map(c => `[${c.path || c.filename}]\n${c.content}`).join('\n\n');
@@ -79,13 +85,32 @@ export async function POST({ request, locals }) {
         ? await buildConversationBriefing(history)
         : '';
 
-    // Synthesize context into a coherent briefing
+    // Synthesize context into a coherent briefing. Skipped for simple,
+    // well-covered, single-topic queries — buildKnowledgeContext already
+    // produces well-structured markdown (headers, Facts, Constraints), and
+    // sending it through another LLM pass purely to reformat it costs a full
+    // extra round trip and risks additional paraphrase drift for zero benefit
+    // when there's nothing to synthesize across topics or reconcile from a
+    // second search pass. Multi-topic or refined-search results still get the
+    // full synthesis pass since that's where it earns its cost.
+    const canSkipSynthesis =
+        !refinementHappened &&
+        !knowledgeResult.hasConflicts &&
+        knowledgeResult.topicCount <= 1 &&
+        relevantChunks.length <= 1 &&
+        context.length < 4000;
+
     let synthesizedContext: string;
     if (context && !context.includes('No relevant knowledge found')) {
-        const verbatimSection = relevantChunks.length > 0
-            ? relevantChunks.map((c: any) => `[${c.path || c.filename}]\n${c.content}`).join('\n\n')
-            : '';
-        synthesizedContext = await synthesizeContext(searchPrompt, context, verbatimSection, conversationBriefing || undefined);
+        if (canSkipSynthesis) {
+            synthesizedContext = context;
+            console.log(`[MultiPassRAG] Skipping synthesis pass for "${searchPrompt.slice(0, 60)}" — single-topic, well-covered query.`);
+        } else {
+            const verbatimSection = relevantChunks.length > 0
+                ? relevantChunks.map((c: any) => `[${c.path || c.filename}]\n${c.content}`).join('\n\n')
+                : '';
+            synthesizedContext = await synthesizeContext(searchPrompt, context, verbatimSection, conversationBriefing || undefined);
+        }
     } else {
         synthesizedContext = context;
     }

@@ -1,8 +1,73 @@
 import { db } from './db';
 import { processDocumentKnowledge } from './knowledge';
-import { recomputeCommunities } from './communities';
+import { recomputeCommunities, RELATIONSHIP_WEIGHTS, DEFAULT_EDGE_WEIGHT } from './communities';
 import crypto from 'crypto';
-import { getEmbedding, rerank, semanticChunk, cleanDocument, summarizeDocument } from './gemini';
+import { getEmbedding, rerank, semanticChunk, cleanDocument, summarizeDocument, splitIntoSections } from './gemini';
+
+/**
+ * Runs `fn` over `items` with at most `concurrency` calls in flight at once.
+ * Used for embedding generation, which previously ran one chunk at a time —
+ * for a 50-chunk document that meant 50 sequential network round trips before
+ * ingestion could even start knowledge extraction. Embedding calls are
+ * independent of each other (unlike per-chunk knowledge extraction, which
+ * intentionally stays sequential — see the comment in processDocumentKnowledge
+ * about why parallelizing that would degrade topic de-duplication quality).
+ */
+async function mapWithConcurrency<T, R>(
+    items: T[],
+    concurrency: number,
+    fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let cursor = 0;
+    async function worker() {
+        while (true) {
+            const i = cursor++;
+            if (i >= items.length) return;
+            results[i] = await fn(items[i], i);
+        }
+    }
+    const workerCount = Math.max(1, Math.min(concurrency, items.length));
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return results;
+}
+
+const EMBED_CONCURRENCY = 5;
+
+// ── Embedding dimension configuration ───────────────────────────────────────
+// Fallback dimension used ONLY when a vector index needs to be initialized
+// and no embeddings exist yet anywhere in that table (so there's nothing to
+// detect a real dimension from). Previously this was hardcoded to 768 in one
+// place (ensureVectorInit) and as inline literal strings in two others
+// (searchTopics, searchClaims), while the ingestion path derived it correctly
+// from the actual embedding output — an inconsistency that could silently
+// lock in the wrong dimension for the whole vector index if a search ran
+// against a fresh, empty table before any document had ever been ingested,
+// and the configured EMBEDDING_MODEL's real output dimension differs from
+// 768. Overridable via EMBEDDING_DIMENSION so operators aren't stuck with a
+// wrong guess if they change EMBEDDING_MODEL to one with a different output
+// size (e.g. via Gemini's `outputDimensionality` parameter).
+const EMBEDDING_DIMENSION = Number(process.env.EMBEDDING_DIMENSION) || 768;
+
+/**
+ * Detects the actual stored embedding dimension from an existing row in
+ * `table`, if one exists. Preferred over guessing whenever possible — a
+ * table that already has embedded rows tells us its real dimension with
+ * certainty, removing any need to trust a hardcoded fallback. Only tables
+ * with zero embedded rows (nothing to search yet) fall back to
+ * EMBEDDING_DIMENSION, and in that case the fallback's correctness doesn't
+ * matter yet, because the first real embedding written (via addDocument /
+ * embedTopic / embedClaim, all of which derive dimension from the actual
+ * embedding output) is what actually fixes the index's dimension in sqlite-vector.
+ */
+function detectStoredDimension(table: 'chunks' | 'topics' | 'knowledge_claims'): number | null {
+    try {
+        const row = db.prepare(`SELECT LENGTH(embedding) AS len FROM ${table} WHERE embedding IS NOT NULL LIMIT 1`).get() as { len: number } | undefined;
+        return row ? row.len / 4 : null;
+    } catch {
+        return null;
+    }
+}
 
 export async function addDocument(filename: string, content: string, metadata: { repoId?: number, path?: string } = {}) {
     const contentHash = crypto.createHash('sha256').update(content).digest('hex');
@@ -21,38 +86,21 @@ export async function addDocument(filename: string, content: string, metadata: {
     // This prevents "cannot start a transaction within a transaction" when the
     // auto-sync timer fires a second time before the first document finishes.
 
-    // Semantic Chunking using LLM, fallback to regex.
-    // We require the LLM result to cover at least 80% of the source character
-    // count. The previous implementation accepted *any* non-empty array, which
-    // led to documents being silently truncated to 7-50% coverage when the LLM
-    // hit output token limits or returned partial JSON.
-    let chunks: string[] = [];
-    const COVERAGE_THRESHOLD = 0.8;
-    if (cleanedContent.length < 50000) {
-        const semantic = await semanticChunk(cleanedContent);
-        const coveredChars = semantic.reduce((n: number, c: string) => n + (c?.length ?? 0), 0);
-        if (semantic.length > 0 && coveredChars >= cleanedContent.length * COVERAGE_THRESHOLD) {
-            chunks = semantic;
-        } else if (semantic.length > 0) {
-            console.warn(
-                `Semantic chunking covered only ${Math.round(
-                    (100 * coveredChars) / cleanedContent.length
-                )}% of "${filename}" (${semantic.length} chunks); falling back to markdown-aware chunker.`
-            );
-        }
-    }
-    if (!chunks || chunks.length === 0) {
-        chunks = chunkText(cleanedContent, 1500, 200);
-    }
+    // Semantic Chunking using LLM, falling back to the regex/markdown chunker
+    // only where coverage falls short (see semanticChunkDocument for why
+    // large documents no longer skip semantic chunking entirely, and
+    // semanticChunkSection for the 80%-coverage safety check).
+    const chunks = await semanticChunkDocument(cleanedContent, filename);
     // Enrich chunks with metadata for better embedding context
     const chunksWithMetadata = chunks.map(chunk => `Document: ${metadata.path || filename}\n\n${chunk}`);
 
-    // Fetch all embeddings before opening any transaction
-    const embeddings: number[][] = [];
-    for (let i = 0; i < chunks.length; i++) {
-        const embedding = await getEmbedding(chunksWithMetadata[i], "RETRIEVAL_DOCUMENT", filename);
-        embeddings.push(embedding);
-    }
+    // Fetch all embeddings before opening any transaction. Independent calls,
+    // so run them with bounded concurrency instead of one at a time.
+    const embeddings = await mapWithConcurrency(
+        chunksWithMetadata,
+        EMBED_CONCURRENCY,
+        (text) => getEmbedding(text, "RETRIEVAL_DOCUMENT", filename)
+    );
 
     // Ensure vector index is initialised before the transaction
     if (embeddings.length > 0) {
@@ -107,7 +155,7 @@ export async function addDocument(filename: string, content: string, metadata: {
 }
 
 async function ensureVectorInit() {
-    const dimension = 768; // Gemini embedding dimension
+    const dimension = detectStoredDimension('chunks') ?? EMBEDDING_DIMENSION;
     try {
         db.prepare("SELECT vector_init('chunks', 'embedding', ?)").get(`dimension=${dimension},distance=cosine`);
     } catch (e) {
@@ -327,24 +375,20 @@ async function embedAndStoreChunks(
     content: string,
     pathHint: string | undefined
 ): Promise<string[]> {
-    let chunks: string[] = [];
-    const COVERAGE_THRESHOLD = 0.8;
-    if (content.length < 50000) {
-        const semantic = await semanticChunk(content);
-        const coveredChars = semantic.reduce((n: number, c: string) => n + (c?.length ?? 0), 0);
-        if (semantic.length > 0 && coveredChars >= content.length * COVERAGE_THRESHOLD) {
-            chunks = semantic;
-        }
-    }
-    if (!chunks || chunks.length === 0) {
-        chunks = chunkText(content, 1500, 200);
-    }
+    const chunks = await semanticChunkDocument(content, filename);
     const chunksWithMetadata = chunks.map((chunk) => `Document: ${pathHint || filename}\n\n${chunk}`);
 
+    // Independent calls — fetch with bounded concurrency, then write sequentially
+    // (DB writes are cheap/synchronous; only the network-bound embedding calls
+    // benefit from parallelism).
+    const embeddings = await mapWithConcurrency(
+        chunksWithMetadata,
+        EMBED_CONCURRENCY,
+        (text) => getEmbedding(text, 'RETRIEVAL_DOCUMENT', filename)
+    );
+
     for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        const chunkWithMetadata = chunksWithMetadata[i];
-        const embedding = await getEmbedding(chunkWithMetadata, 'RETRIEVAL_DOCUMENT', filename);
+        const embedding = embeddings[i];
         const dimension = embedding.length;
         try {
             db.prepare("SELECT vector_init('chunks', 'embedding', ?)").get(`dimension=${dimension},distance=cosine`);
@@ -353,11 +397,66 @@ async function embedAndStoreChunks(
         }
         db.prepare('INSERT INTO chunks (doc_id, content, embedding) VALUES (?, ?, vector_as_f32(?))').run(
             docId,
-            chunk,
+            chunks[i],
             JSON.stringify(embedding)
         );
     }
     return chunks;
+}
+
+// Semantic (LLM) chunking used to be limited outright to documents under
+// 50K chars, with anything larger falling back ENTIRELY to the regex/
+// markdown chunker below — inverting the relationship between document size
+// and chunking quality (the largest, most content-rich documents got the
+// dumbest treatment, precisely where good section boundaries matter most).
+// Documents over this size are now split into sections first (reusing the
+// same markdown-aware splitter cleanDocument's own large-document path uses)
+// and each section is semantically chunked independently, so every part of
+// a large document still gets a chance at LLM-quality chunking; only
+// sections that individually fail the coverage bar fall back to regex.
+const SEMANTIC_CHUNK_SECTION_SIZE = 45000;
+const CHUNK_COVERAGE_THRESHOLD = 0.8;
+
+/**
+ * Semantically chunk a single section (must already be under
+ * SEMANTIC_CHUNK_SECTION_SIZE), falling back to the regex chunker if the LLM
+ * result doesn't cover at least CHUNK_COVERAGE_THRESHOLD of the section's
+ * characters (guards against silent truncation when the LLM hits output
+ * token limits or returns partial JSON).
+ */
+async function semanticChunkSection(section: string, label: string): Promise<string[]> {
+    const semantic = await semanticChunk(section);
+    const coveredChars = semantic.reduce((n: number, c: string) => n + (c?.length ?? 0), 0);
+    if (semantic.length > 0 && coveredChars >= section.length * CHUNK_COVERAGE_THRESHOLD) {
+        return semantic;
+    }
+    if (semantic.length > 0) {
+        console.warn(
+            `Semantic chunking covered only ${Math.round((100 * coveredChars) / section.length)}% of "${label}" (${semantic.length} chunks); falling back to markdown-aware chunker for this section.`
+        );
+    }
+    return chunkText(section, 1500, 200);
+}
+
+/**
+ * Chunk a full (already-cleaned) document into embeddable pieces, preferring
+ * LLM semantic chunking over the regex fallback wherever feasible — see
+ * SEMANTIC_CHUNK_SECTION_SIZE above for why large documents no longer skip
+ * semantic chunking entirely.
+ */
+async function semanticChunkDocument(content: string, label: string): Promise<string[]> {
+    if (content.length <= SEMANTIC_CHUNK_SECTION_SIZE) {
+        return semanticChunkSection(content, label);
+    }
+
+    const sections = splitIntoSections(content, SEMANTIC_CHUNK_SECTION_SIZE);
+    console.log(`[Chunking] "${label}" is ${content.length} chars — splitting into ${sections.length} section(s) for semantic chunking instead of falling back entirely to the regex chunker.`);
+
+    const allChunks: string[] = [];
+    for (const section of sections) {
+        allChunks.push(...(await semanticChunkSection(section, label)));
+    }
+    return allChunks;
 }
 
 function chunkText(text: string, maxChars: number, overlap: number = 200): string[] {
@@ -365,11 +464,32 @@ function chunkText(text: string, maxChars: number, overlap: number = 200): strin
     // 1. Split by headers
     const sections = text.split(/(?=\n#{1,6} )/);
     const chunks: string[] = [];
-    
+
+    // Accumulates consecutive small (<=maxChars) sections instead of emitting
+    // each as its own chunk. Header-dense documents (reference/API-style docs
+    // with many short subsections) previously produced a pile of tiny,
+    // context-poor chunks — e.g. a 40-char "### Prerequisites\n- Node 18+"
+    // section embedded and retrieved in near-total isolation — instead of
+    // packing adjacent small sections up to maxChars like the paragraph-level
+    // logic below already does within an oversized section.
+    let pendingSmallSections = "";
+    function flushPending() {
+        if (pendingSmallSections.trim()) {
+            chunks.push(pendingSmallSections.trim());
+        }
+        pendingSmallSections = "";
+    }
+
     for (const section of sections) {
         if (section.length <= maxChars) {
-            chunks.push(section.trim());
+            if ((pendingSmallSections.length + section.length) <= maxChars) {
+                pendingSmallSections += section;
+            } else {
+                flushPending();
+                pendingSmallSections = section;
+            }
         } else {
+            flushPending();
             // 2. Split by paragraphs
             const paragraphs = section.split(/\n\n+/);
             let currentChunk = "";
@@ -400,23 +520,48 @@ function chunkText(text: string, maxChars: number, overlap: number = 200): strin
             if (currentChunk) chunks.push(currentChunk.trim());
         }
     }
+    flushPending();
     return chunks.filter(c => c.length > overlap / 2); // Filter out tiny chunks that are mostly overlap
 }
 
+// Cosine similarity has no natural cutoff — vector_full_scan(..., limit)
+// always returns up to `limit` rows in distance order regardless of whether
+// any of them are actually relevant to the query. Without a floor,
+// searchTopics(query, 5) returns close to 5 results for almost any query,
+// including ones that are off-corpus or only tangentially related, diluting
+// buildKnowledgeContext's briefing with weakly-related material. Below this
+// threshold a topic is dropped rather than force-filled; buildKnowledgeContext
+// already has a keyword-based (LIKE) fallback for the "nothing cleared the
+// bar" case, so returning fewer (or zero) results here correctly hands off
+// to that fallback instead of injecting a barely-related vector match.
+const MIN_TOPIC_RELEVANCE = 0.45;
+const MIN_CLAIM_RELEVANCE = 0.4;
+
 /**
  * Semantic search on topics using embeddings.
- * Returns topics ranked by relevance to the query.
+ * Returns topics ranked by relevance to the query, filtered to those that
+ * clear `minScore` (see MIN_TOPIC_RELEVANCE for rationale).
+ *
+ * `useRerank`: when true, over-fetches a wider candidate pool and runs it
+ * through the same LLM reranker searchChunks() already uses for chunks.
+ * Previously chunks were the only retrieval type that got LLM reranking —
+ * topics and claims (the primary structured-knowledge path) relied on raw
+ * cosine order alone. Off by default so callers that don't need the extra
+ * LLM round trip (e.g. the vocabulary-hint lookup during ingestion) don't
+ * pay for it; buildKnowledgeContext enables it for the query-facing search.
  */
-export async function searchTopics(query: string, limit = 10): Promise<{ id: number; name: string; description: string | null; category: string | null; score: number }[]> {
+export async function searchTopics(query: string, limit = 10, minScore = MIN_TOPIC_RELEVANCE, useRerank = false): Promise<{ id: number; name: string; description: string | null; category: string | null; score: number }[]> {
     const queryEmbedding = await getEmbedding(query, "RETRIEVAL_QUERY");
 
     try {
-        db.prepare("SELECT vector_init('topics', 'embedding', ?)").get('dimension=768,distance=cosine');
+        const dimension = detectStoredDimension('topics') ?? EMBEDDING_DIMENSION;
+        db.prepare("SELECT vector_init('topics', 'embedding', ?)").get(`dimension=${dimension},distance=cosine`);
     } catch (e) {
         // Already initialized
     }
 
     try {
+        const fetchLimit = useRerank ? Math.max(limit * 3, 15) : limit;
         const results = db.prepare(`
             SELECT t.id, t.name, t.description, t.category,
                    (1 - v.distance) as score
@@ -424,9 +569,15 @@ export async function searchTopics(query: string, limit = 10): Promise<{ id: num
             JOIN topics t ON t.id = v.rowid
             WHERE t.embedding IS NOT NULL
             ORDER BY v.distance ASC
-        `).all(JSON.stringify(queryEmbedding), limit) as { id: number; name: string; description: string | null; category: string | null; score: number }[];
+        `).all(JSON.stringify(queryEmbedding), fetchLimit) as { id: number; name: string; description: string | null; category: string | null; score: number }[];
 
-        return results;
+        const filtered = results.filter(r => r.score >= minScore);
+        if (!useRerank || filtered.length <= limit) {
+            return filtered.slice(0, limit);
+        }
+
+        const rankedIndices = await rerank(query, filtered.map(t => ({ content: `${t.name}: ${t.description ?? ''}` })));
+        return rankedIndices.map(i => filtered[i]).filter(Boolean).slice(0, limit);
     } catch (e) {
         console.warn('searchTopics failed (no embeddings or vector extension unavailable):', (e as Error).message);
         return [];
@@ -435,16 +586,22 @@ export async function searchTopics(query: string, limit = 10): Promise<{ id: num
 
 /**
  * Semantic search on claims, optionally filtered by topic IDs.
+ *
+ * `useRerank`: see searchTopics — over-fetches a wider pool and applies the
+ * same LLM reranker used for chunks, instead of relying on raw cosine order.
  */
 export async function searchClaims(
     query: string,
     topicIds: number[] | null = null,
-    limit = 20
+    limit = 20,
+    minScore = MIN_CLAIM_RELEVANCE,
+    useRerank = false
 ): Promise<{ id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number; claim_type: string; filename: string; path: string | null }[]> {
     const queryEmbedding = await getEmbedding(query, "RETRIEVAL_QUERY");
 
     try {
-        db.prepare("SELECT vector_init('knowledge_claims', 'embedding', ?)").get('dimension=768,distance=cosine');
+        const dimension = detectStoredDimension('knowledge_claims') ?? EMBEDDING_DIMENSION;
+        db.prepare("SELECT vector_init('knowledge_claims', 'embedding', ?)").get(`dimension=${dimension},distance=cosine`);
     } catch (e) {
         // Already initialized
     }
@@ -452,6 +609,7 @@ export async function searchClaims(
     try {
         let sql: string;
         let params: any[];
+        const fetchLimit = useRerank ? Math.max(limit * 2, 20) : limit * 2;
 
         if (topicIds && topicIds.length > 0) {
             const placeholders = topicIds.map(() => '?').join(',');
@@ -469,7 +627,7 @@ export async function searchClaims(
                   AND kc.topic_id IN (${placeholders})
                 ORDER BY v.distance ASC
             `;
-            params = [JSON.stringify(queryEmbedding), limit * 2, ...topicIds]; // Fetch more then filter
+            params = [JSON.stringify(queryEmbedding), fetchLimit, ...topicIds]; // Fetch more then filter
         } else {
             sql = `
                 SELECT kc.id, kc.claim_text, kc.topic_id, kc.doc_id, t.name as topic_name,
@@ -484,11 +642,18 @@ export async function searchClaims(
                   AND kc.status = 'active'
                 ORDER BY v.distance ASC
             `;
-            params = [JSON.stringify(queryEmbedding), limit];
+            params = [JSON.stringify(queryEmbedding), fetchLimit];
         }
 
         const results = db.prepare(sql).all(...params) as { id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number; claim_type: string; filename: string; path: string | null }[];
-        return results.slice(0, limit);
+        const filtered = results.filter(r => r.score >= minScore);
+
+        if (!useRerank || filtered.length <= limit) {
+            return filtered.slice(0, limit);
+        }
+
+        const rankedIndices = await rerank(query, filtered.map(c => ({ content: `[${c.topic_name}] ${c.claim_text}` })));
+        return rankedIndices.map(i => filtered[i]).filter(Boolean).slice(0, limit);
     } catch (e) {
         console.warn('searchClaims failed (no embeddings or vector extension unavailable):', (e as Error).message);
         return [];
@@ -498,11 +663,18 @@ export async function searchClaims(
 /**
  * Traverse topic relationships via BFS to find related topics.
  * Returns topics connected to the starting topic within maxDepth hops.
+ *
+ * Relationships are explored in descending edge-weight order (using the same
+ * RELATIONSHIP_WEIGHTS map community detection uses) so that when a caller
+ * caps how many related topics it will accept — see buildKnowledgeContext's
+ * `allTopicIds.size < maxTopics * 2` — strong structural relationships
+ * (is_part_of, is_a, governs) are preferred over weak referential ones
+ * (references, uses) instead of whichever order SQLite happens to return.
  */
-export function getRelatedTopics(topicId: number, maxDepth = 2): { id: number; name: string; relationship_path: string[]; depth: number }[] {
+export function getRelatedTopics(topicId: number, maxDepth = 2): { id: number; name: string; relationship_path: string[]; depth: number; weight: number }[] {
     const visited = new Set<number>();
     const queue: { id: number; depth: number; path: string[] }[] = [{ id: topicId, depth: 0, path: [] }];
-    const results: { id: number; name: string; relationship_path: string[]; depth: number }[] = [];
+    const results: { id: number; name: string; relationship_path: string[]; depth: number; weight: number }[] = [];
 
     visited.add(topicId);
 
@@ -526,11 +698,20 @@ export function getRelatedTopics(topicId: number, maxDepth = 2): { id: number; n
             WHERE source_topic_id = ? OR target_topic_id = ?
         `).all(current.id, current.id, current.id, current.id) as { related_id: number; rel_type: string }[];
 
+        // Strongest relationships first, so BFS discovers/queues the most
+        // structurally significant neighbors before weaker ones at this level.
+        relationships.sort((a, b) => {
+            const wa = RELATIONSHIP_WEIGHTS[a.rel_type.replace(/^inverse_/, '')] ?? DEFAULT_EDGE_WEIGHT;
+            const wb = RELATIONSHIP_WEIGHTS[b.rel_type.replace(/^inverse_/, '')] ?? DEFAULT_EDGE_WEIGHT;
+            return wb - wa;
+        });
+
         for (const rel of relationships) {
             if (visited.has(rel.related_id)) continue;
 
             visited.add(rel.related_id);
             const newPath = [...current.path, rel.rel_type];
+            const weight = RELATIONSHIP_WEIGHTS[rel.rel_type.replace(/^inverse_/, '')] ?? DEFAULT_EDGE_WEIGHT;
 
             // Get topic name
             const topicRow = db.prepare('SELECT id, name FROM topics WHERE id = ?').get(rel.related_id) as { id: number; name: string } | undefined;
@@ -539,7 +720,8 @@ export function getRelatedTopics(topicId: number, maxDepth = 2): { id: number; n
                     id: topicRow.id,
                     name: topicRow.name,
                     relationship_path: newPath,
-                    depth: current.depth + 1
+                    depth: current.depth + 1,
+                    weight
                 });
 
                 queue.push({ id: rel.related_id, depth: current.depth + 1, path: newPath });
@@ -547,7 +729,8 @@ export function getRelatedTopics(topicId: number, maxDepth = 2): { id: number; n
         }
     }
 
-    return results;
+    // Present strongest relationships first regardless of which BFS depth found them.
+    return results.sort((a, b) => b.weight - a.weight || a.depth - b.depth);
 }
 
 /**
@@ -573,12 +756,70 @@ export function getTopicClaims(topicIds: number[], status = 'active'): { id: num
 }
 
 /**
+ * Get active AND conflicting claims for a set of topics, tagged with their
+ * status. Unlike `getTopicClaims('active')`, this surfaces `conflicting`
+ * claims too (capped per topic) so callers can present documented
+ * contradictions instead of silently hiding them. Previously, claims flagged
+ * `conflicting` by the consistency checker were written to the DB but never
+ * read back by anything — `synthesizeContext`'s prompt explicitly asks the
+ * model to "note contradictions or gaps", but it never had any contradictory
+ * material to work with because this data path excluded them entirely.
+ */
+export function getTopicClaimsWithConflicts(
+    topicIds: number[],
+    maxConflictingPerTopic = 3
+): { id: number; claim_text: string; topic_name: string; topic_id: number; claim_type: string; filename: string; path: string | null; status: string }[] {
+    if (topicIds.length === 0) return [];
+
+    const placeholders = topicIds.map(() => '?').join(',');
+    const sql = `
+        SELECT kc.id, kc.claim_text, kc.topic_id, t.name as topic_name,
+               COALESCE(kc.claim_type, 'assertion') as claim_type,
+               COALESCE(d.filename, '') as filename, d.path, kc.status
+        FROM knowledge_claims kc
+        JOIN topics t ON kc.topic_id = t.id
+        LEFT JOIN documents d ON kc.doc_id = d.id
+        WHERE kc.topic_id IN (${placeholders})
+          AND kc.status IN ('active', 'conflicting')
+        ORDER BY kc.topic_id, kc.status, kc.created_at
+    `;
+
+    const rows = db.prepare(sql).all(...topicIds) as { id: number; claim_text: string; topic_name: string; topic_id: number; claim_type: string; filename: string; path: string | null; status: string }[];
+
+    // Cap conflicting claims per topic so a topic with a long history of
+    // superseded/contradicted claims doesn't crowd out the active facts.
+    const conflictingCountByTopic = new Map<number, number>();
+    return rows.filter(r => {
+        if (r.status !== 'conflicting') return true;
+        const count = conflictingCountByTopic.get(r.topic_id) ?? 0;
+        if (count >= maxConflictingPerTopic) return false;
+        conflictingCountByTopic.set(r.topic_id, count + 1);
+        return true;
+    });
+}
+
+export interface KnowledgeContextResult {
+    text: string;
+    topicCount: number;
+    claimCount: number;
+    hasConflicts: boolean;
+}
+
+/**
  * Build structured knowledge context from the knowledge graph for a query.
  * This is the main function used by the chat endpoint to retrieve information.
+ *
+ * Returns metadata (topicCount/claimCount/hasConflicts) alongside the text so
+ * callers can make cheap decisions — e.g. the chat endpoint skips the extra
+ * `synthesizeContext` LLM pass entirely for simple single-topic queries that
+ * are already well covered, instead of always paying for a reformatting pass.
  */
-export async function buildKnowledgeContext(query: string, maxTopics = 5, maxClaims = 15): Promise<string> {
-    // Step 1: Find most relevant topics
-    const relevantTopics = await searchTopics(query, maxTopics);
+export async function buildKnowledgeContext(query: string, maxTopics = 5, maxClaims = 15): Promise<KnowledgeContextResult> {
+    // Step 1: Find most relevant topics. Reranked — this is the primary
+    // query-facing retrieval path, so it's worth the extra LLM round trip
+    // (previously only searchChunks() got LLM reranking; topics/claims relied
+    // on raw cosine order alone).
+    const relevantTopics = await searchTopics(query, maxTopics, MIN_TOPIC_RELEVANCE, true);
 
     if (relevantTopics.length === 0) {
         // Keyword-based fallback: works even when no topic embeddings exist yet
@@ -599,11 +840,14 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
         }
         if (relevantTopics.length === 0) {
             console.log(`[KnowledgeContext] No topics found for: "${query.slice(0, 80)}"`);
-            return 'No relevant knowledge found for this query.';
+            return { text: 'No relevant knowledge found for this query.', topicCount: 0, claimCount: 0, hasConflicts: false };
         }
     }
 
-    // Step 2: Expand to related topics (depth 1 only to avoid explosion)
+    // Step 2: Expand to related topics (depth 1 only to avoid explosion).
+    // getRelatedTopics now returns strongest relationships first, so when the
+    // `maxTopics * 2` cap is hit, structurally significant neighbors
+    // (is_part_of, is_a, governs, ...) win over weak referential ones.
     const allTopicIds = new Set<number>(relevantTopics.map(t => t.id));
     const topicMap = new Map<number, { name: string; description: string | null; category: string | null; score: number }>();
 
@@ -624,21 +868,42 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
         }
     }
 
-    // Step 3: Get claims for all topics (primary + related)
-    const topicClaims = getTopicClaims(Array.from(allTopicIds), 'active');
+    // Step 3: Get claims for all topics (primary + related), including
+    // documented conflicts so they can be surfaced rather than silently
+    // dropped (previously `status='conflicting'` claims were written to the
+    // DB but never read back by any retrieval path).
+    const topicClaims = getTopicClaimsWithConflicts(Array.from(allTopicIds));
 
-    // Step 4: Semantic search for most relevant claims (to ensure we get the best ones)
-    const semanticClaims = await searchClaims(query, null, maxClaims);
+    // Step 4: Semantic search for most relevant claims (to ensure we get the best ones).
+    // Reranked for the same reason as the topic search above.
+    const semanticClaims = await searchClaims(query, null, maxClaims, MIN_CLAIM_RELEVANCE, true);
 
     // Step 5: Merge and deduplicate claims, prioritizing semantic search results
-    const claimMap = new Map<number, { claim_text: string; topic_name: string; topic_id: number; score: number; claim_type: string; filename?: string; path?: string | null }>();
+    const claimMap = new Map<number, { claim_text: string; topic_name: string; topic_id: number; score: number; claim_type: string; filename?: string; path?: string | null; status: string }>();
+
+    // Conflicting claims are inserted FIRST and unconditionally (they're already
+    // capped per-topic at the source by getTopicClaimsWithConflicts). If these
+    // were subject to the same `claimMap.size < maxClaims` cap as everything
+    // else, a topic with many active claims — like the pre-existing "SLA
+    // Management" topic in this corpus — fills the cap before the loop ever
+    // reaches its one conflicting claim (status sorts after 'active' in the
+    // source query), silently dropping exactly the signal `getTopicClaimsWithConflicts`
+    // exists to surface. Conflicts are rare in practice, so guaranteeing them a
+    // slot doesn't meaningfully crowd out active facts.
+    for (const claim of topicClaims) {
+        if (claim.status === 'conflicting' && !claimMap.has(claim.id)) {
+            claimMap.set(claim.id, { ...claim, score: 0.2, claim_type: claim.claim_type || 'assertion' });
+        }
+    }
 
     for (const claim of semanticClaims) {
-        claimMap.set(claim.id, { ...claim, score: claim.score, claim_type: claim.claim_type || 'assertion' });
+        if (!claimMap.has(claim.id)) {
+            claimMap.set(claim.id, { ...claim, score: claim.score, claim_type: claim.claim_type || 'assertion', status: 'active' });
+        }
     }
 
     for (const claim of topicClaims) {
-        if (!claimMap.has(claim.id) && claimMap.size < maxClaims) {
+        if (claim.status !== 'conflicting' && !claimMap.has(claim.id) && claimMap.size < maxClaims) {
             claimMap.set(claim.id, { ...claim, score: 0.3, claim_type: claim.claim_type || 'assertion' });
         }
     }
@@ -652,13 +917,14 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
         }
     }
 
-    console.log(`[KnowledgeContext] query="${query.slice(0, 60)}" topics=${relevantTopics.length} claims=${claimMap.size}`);
+    const hasConflicts = Array.from(claimMap.values()).some(c => c.status === 'conflicting');
+    console.log(`[KnowledgeContext] query="${query.slice(0, 60)}" topics=${relevantTopics.length} claims=${claimMap.size}${hasConflicts ? ' (includes conflicting claims)' : ''}`);
 
     // Step 6: Build structured context
     const lines: string[] = ['KNOWLEDGE CONTEXT:', ''];
 
-    // Group claims by topic
-    const claimsByTopic = new Map<number, { claim_text: string; score: number; claim_type: string; source?: string }[]>();
+    // Group claims by topic, separating active from conflicting
+    const claimsByTopic = new Map<number, { claim_text: string; score: number; claim_type: string; source?: string; status: string }[]>();
     for (const claim of claimMap.values()) {
         if (!claimsByTopic.has(claim.topic_id)) {
             claimsByTopic.set(claim.topic_id, []);
@@ -667,7 +933,8 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
             claim_text: claim.claim_text,
             score: claim.score,
             claim_type: claim.claim_type || 'assertion',
-            source: claim.path || claim.filename
+            source: claim.path || claim.filename,
+            status: claim.status
         });
     }
 
@@ -675,17 +942,34 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
     const sortedTopics = Array.from(topicMap.entries())
         .sort((a, b) => b[1].score - a[1].score);
 
+    // Counts topics that actually rendered content (a claim or a description),
+    // as opposed to `relevantTopics.length` which is just the raw semantic
+    // -search result count. searchTopics(query, 5) tends to return close to 5
+    // results for almost any query regardless of how relevant they actually
+    // are (cosine similarity has no natural cutoff), so using that raw count
+    // for the synthesis-skip decision in the chat endpoint would make the
+    // "single-topic query" fast path effectively never fire. Counting
+    // topics-with-actual-content is a much more honest signal of how complex
+    // this context really is.
+    let topicsWithContent = 0;
+
     for (const [topicId, topic] of sortedTopics) {
-        const claims = claimsByTopic.get(topicId);
-        if (!claims || claims.length === 0) {
+        const allClaimsForTopic = claimsByTopic.get(topicId);
+        if (!allClaimsForTopic || allClaimsForTopic.length === 0) {
             // Still surface the topic with its description if no claims exist yet
             if (topic.description) {
                 lines.push(`### ${topic.name}${topic.category ? ` (${topic.category})` : ''}`);
                 lines.push(`*${topic.description}*`);
                 lines.push('');
+                topicsWithContent++;
             }
             continue;
         }
+
+        const claims = allClaimsForTopic.filter(c => c.status !== 'conflicting');
+        const conflicting = allClaimsForTopic.filter(c => c.status === 'conflicting');
+        topicsWithContent++;
+
         lines.push(`### ${topic.name}${topic.category ? ` (${topic.category})` : ''}`);
         if (topic.description) {
             lines.push(`*${topic.description}*`);
@@ -709,9 +993,17 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
                 lines.push(`- ${c.claim_text}${c.source ? ` [${c.source}]` : ''}`);
             }
         }
-        if (assertions.length === 0 && constraints.length === 0) {
+        if (assertions.length === 0 && constraints.length === 0 && claims.length > 0) {
             lines.push('**Claims:**');
             for (const c of claims) {
+                lines.push(`- ${c.claim_text}${c.source ? ` [${c.source}]` : ''}`);
+            }
+        }
+
+        if (conflicting.length > 0) {
+            conflicting.sort((a, b) => b.score - a.score);
+            lines.push('**⚠ Disputed / Unverified (conflicts with another claim on this topic — treat with caution and flag the discrepancy to the user):**');
+            for (const c of conflicting) {
                 lines.push(`- ${c.claim_text}${c.source ? ` [${c.source}]` : ''}`);
             }
         }
@@ -730,5 +1022,10 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
         lines.push('');
     }
 
-    return lines.join('\n');
+    return {
+        text: lines.join('\n'),
+        topicCount: topicsWithContent,
+        claimCount: claimMap.size,
+        hasConflicts
+    };
 }

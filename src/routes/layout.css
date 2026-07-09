@@ -104,22 +104,46 @@ html[data-theme="dark"] {
   background: var(--bg-slate-900);
   border: 1px solid var(--border-primary);
   border-radius: 0.75rem;
-  overflow-x: auto;
   display: flex;
   flex-direction: column;
   align-items: center;
   min-height: 4rem;
 }
 
-.mermaid-diagram-wrapper .mermaid-diagram-svg {
+/* Large diagrams are capped to a scrollable box so a single diagram can't
+   dominate the chat window; the toolbar's "Expand" button opens the full
+   diagram in a zoomable/pannable fullscreen viewer (MermaidFullscreenModal). */
+.mermaid-diagram-wrapper .mermaid-diagram-scroll {
   width: 100%;
   display: flex;
   justify-content: center;
+  align-items: flex-start;
+  max-height: 26rem;
+  overflow: auto;
+}
+
+.mermaid-diagram-wrapper .mermaid-diagram-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.mermaid-diagram-wrapper .mermaid-diagram-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.mermaid-diagram-wrapper .mermaid-diagram-scroll::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 9999px;
+}
+
+.mermaid-diagram-wrapper .mermaid-diagram-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-hover);
 }
 
 .mermaid-diagram-wrapper svg {
   max-width: 100%;
   height: auto;
+  flex-shrink: 0;
 }
 
 .mermaid-diagram-source,

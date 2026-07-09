@@ -39,7 +39,11 @@ export const GET: RequestHandler = async ({ url }) => {
 };
 
 /** PATCH: update claim status (resolve conflicts) */
-export const PATCH: RequestHandler = async ({ request }) => {
+export const PATCH: RequestHandler = async ({ request, locals }) => {
+    if (!locals.user || locals.user.role !== 'admin') {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
     const { claimId, action } = await request.json();
     if (!claimId || !action) {
         return json({ error: 'claimId and action required' }, { status: 400 });
@@ -63,7 +67,11 @@ export const PATCH: RequestHandler = async ({ request }) => {
 };
 
 /** DELETE: remove a topic and all its relationships/claims */
-export const DELETE: RequestHandler = async ({ request }) => {
+export const DELETE: RequestHandler = async ({ request, locals }) => {
+    if (!locals.user || locals.user.role !== 'admin') {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
     const { topicId } = await request.json();
     if (!topicId) return json({ error: 'topicId required' }, { status: 400 });
     
@@ -72,7 +80,11 @@ export const DELETE: RequestHandler = async ({ request }) => {
 };
 
 /** POST: trigger full taxonomy rebuild */
-export const POST: RequestHandler = async ({ request }) => {
+export const POST: RequestHandler = async ({ request, locals }) => {
+    if (!locals.user || locals.user.role !== 'admin') {
+        return json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
     const body = await request.json().catch(() => ({}));
     
     if (body.action === 'rebuild-taxonomy') {

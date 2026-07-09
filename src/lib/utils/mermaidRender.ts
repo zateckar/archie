@@ -10,6 +10,7 @@
  */
 
 import { renderMermaid, hashId } from './mermaid';
+import { openMermaidFullscreen } from '$lib/stores/mermaidFullscreen';
 
 const RENDERED_ATTR = 'data-mermaid-rendered';
 
@@ -41,8 +42,13 @@ export async function renderMermaidBlocksIn(container: HTMLElement): Promise<voi
         wrapper.setAttribute('data-mermaid-source', source);
 
         if (result.ok) {
-            wrapper.innerHTML = result.svg;
-            const svgEl = wrapper.querySelector('svg');
+            // Diagrams can render very tall (e.g. long flowcharts); constrain them to a
+            // scrollable box so a single diagram can't dominate the chat window. The full
+            // diagram remains available via the "Expand" button's zoom/pan fullscreen view.
+            const scroll = document.createElement('div');
+            scroll.className = 'mermaid-diagram-scroll';
+            scroll.innerHTML = result.svg;
+            const svgEl = scroll.querySelector('svg');
             if (svgEl) {
                 svgEl.setAttribute('role', 'img');
                 svgEl.setAttribute('aria-label', 'Mermaid diagram');
@@ -51,15 +57,18 @@ export async function renderMermaidBlocksIn(container: HTMLElement): Promise<voi
                 svgEl.style.maxWidth = '100%';
                 svgEl.style.height = 'auto';
             }
-            // Source toggle: a small button overlay.
+            wrapper.appendChild(scroll);
+
+            // Toolbar: copy source, toggle source view, expand to fullscreen zoom/pan viewer.
             const toolbar = document.createElement('div');
             toolbar.className = 'mermaid-diagram-toolbar';
             toolbar.innerHTML = `
                 <button type="button" class="mermaid-btn" data-action="copy" title="Copy source">Copy</button>
                 <button type="button" class="mermaid-btn" data-action="source" title="View source">Source</button>
+                <button type="button" class="mermaid-btn" data-action="expand" title="View fullscreen">Expand</button>
             `;
             wrapper.appendChild(toolbar);
-            wireToolbar(wrapper, source);
+            wireToolbar(wrapper, source, result.svg);
         } else {
             wrapper.classList.add('mermaid-diagram-error');
             const errMsg = escapeHtml(result.error);
@@ -78,7 +87,7 @@ export async function renderMermaidBlocksIn(container: HTMLElement): Promise<voi
     }
 }
 
-function wireToolbar(wrapper: HTMLElement, source: string) {
+function wireToolbar(wrapper: HTMLElement, source: string, svg: string) {
     const toolbar = wrapper.querySelector('.mermaid-diagram-toolbar');
     if (!toolbar) return;
     toolbar.addEventListener('click', (e) => {
@@ -106,6 +115,8 @@ function wireToolbar(wrapper: HTMLElement, source: string) {
             } else {
                 btn.textContent = 'Source';
             }
+        } else if (action === 'expand') {
+            openMermaidFullscreen(svg, source);
         }
     });
 }

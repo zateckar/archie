@@ -34,6 +34,16 @@ import BookOpen from 'lucide-svelte/icons/book-open';
     let isRecording = $state(false);
     let recognition: any = null;
     let speechSupported = $state(false);
+    let micError = $state<string | null>(null);
+
+    const SPEECH_ERROR_MESSAGES: Record<string, string> = {
+        'not-allowed': 'Microphone blocked. Allow microphone access for this site, and in Edge check Settings > Privacy, search, and services > Speech > "Online speech recognition" is turned on.',
+        'service-not-allowed': 'Speech service blocked. In Edge check Settings > Privacy, search, and services > Speech > "Online speech recognition" is turned on.',
+        'audio-capture': 'No microphone was found. Check that a microphone is connected and enabled.',
+        'no-speech': 'No speech detected. Try again.',
+        'network': 'Speech recognition network error. Check your internet connection.',
+        'aborted': 'Voice input was cancelled.'
+    };
 
     function toggleVoiceInput() {
         if (!speechSupported) return;
@@ -42,8 +52,15 @@ import BookOpen from 'lucide-svelte/icons/book-open';
             recognition?.stop();
             isRecording = false;
         } else {
-            recognition?.start();
-            isRecording = true;
+            micError = null;
+            try {
+                recognition?.start();
+                isRecording = true;
+            } catch (err) {
+                console.error('Failed to start speech recognition:', err);
+                isRecording = false;
+                micError = 'Could not start voice input. Please try again.';
+            }
         }
     }
 
@@ -207,6 +224,10 @@ import BookOpen from 'lucide-svelte/icons/book-open';
             recognition.interimResults = true;
             recognition.continuous = false;
 
+            recognition.onstart = () => {
+                micError = null;
+            };
+
             recognition.onresult = (event: any) => {
                 let transcript = '';
                 for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -222,6 +243,7 @@ import BookOpen from 'lucide-svelte/icons/book-open';
             recognition.onerror = (event: any) => {
                 console.error('Speech recognition error:', event.error);
                 isRecording = false;
+                micError = SPEECH_ERROR_MESSAGES[event.error] ?? `Speech recognition error: ${event.error}`;
             };
         }
     });
@@ -432,8 +454,9 @@ import BookOpen from 'lucide-svelte/icons/book-open';
                         <button
                             onclick={toggleVoiceInput}
                             disabled={isChatting}
-                            class="p-2.5 rounded-xl transition-all shadow-lg border {isRecording ? 'bg-red-500/20 hover:bg-red-500/30 text-red-400 border-red-500/30 animate-pulse' : 'bg-[var(--bg-slate-800)] hover:bg-[var(--hover-surface-solid)] text-[var(--text-muted)] border-[var(--border-hover)]'} disabled:bg-[var(--bg-slate-800)] disabled:text-[var(--text-faintest)] disabled:border-[var(--border-primary)]"
+                            class="p-2.5 rounded-xl transition-all shadow-lg border {micError ? 'bg-red-500/10 hover:bg-red-500/20 text-red-400 border-red-500/40' : isRecording ? 'bg-red-500/20 hover:bg-red-500/30 text-red-400 border-red-500/30 animate-pulse' : 'bg-[var(--bg-slate-800)] hover:bg-[var(--hover-surface-solid)] text-[var(--text-muted)] border-[var(--border-hover)]'} disabled:bg-[var(--bg-slate-800)] disabled:text-[var(--text-faintest)] disabled:border-[var(--border-primary)]"
                             aria-label={isRecording ? 'Stop recording' : 'Start voice input'}
+                            title={micError ?? (isRecording ? 'Stop recording' : 'Start voice input')}
                         >
                             {#if isRecording}
                                 <MicOff class="w-5 h-5" />
@@ -451,6 +474,11 @@ import BookOpen from 'lucide-svelte/icons/book-open';
                     </button>
                 </div>
             </div>
+            {#if micError}
+                <div class="max-w-4xl mx-auto mt-3 px-4 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs text-center" in:fade>
+                    {micError}
+                </div>
+            {/if}
             <div class="flex items-center justify-center gap-6 mt-4">
                 <p class="text-[9px] text-[var(--text-faintest)] uppercase tracking-[0.3em] font-black">
                     Powered by SQLite-Vector & Gemini AI

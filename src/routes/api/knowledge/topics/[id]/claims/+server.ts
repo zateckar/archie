@@ -18,8 +18,8 @@ export async function GET({ params, url, locals }) {
     const offset = offsetParam ? parseInt(offsetParam, 10) : 0;
     const limit = limitParam ? parseInt(limitParam, 10) : 50;
 
-    if (!['active', 'conflicting', 'all'].includes(status)) {
-        return json({ error: 'Invalid status. Must be "active", "conflicting", or "all"' }, { status: 400 });
+    if (!['active', 'conflicting', 'flagged', 'all'].includes(status)) {
+        return json({ error: 'Invalid status. Must be "active", "conflicting", "flagged", or "all"' }, { status: 400 });
     }
 
     try {

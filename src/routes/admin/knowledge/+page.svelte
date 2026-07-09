@@ -23,7 +23,7 @@ import Loader2 from 'lucide-svelte/icons/loader-2';
     // ── State ──
     let data = $state<{ topics: any[]; relationships: any[]; claims: any[] }>({ topics: [], relationships: [], claims: [] });
     let loading = $state(true);
-    let activeTab = $state<'graph' | 'conflicts' | 'hierarchy'>('graph');
+    let activeTab = $state<'graph' | 'conflicts' | 'flagged' | 'hierarchy'>('graph');
     let searchQuery = $state('');
 
     // Graph state and filters
@@ -50,6 +50,13 @@ import Loader2 from 'lucide-svelte/icons/loader-2';
     let conflictGroups = $derived(buildConflictGroups());
     let expandedConflict = $state<number | null>(null);
     let resolving = $state<number | null>(null);
+
+    // Flagged-claim review state. `flagged` claims fail the claim-topic
+    // alignment check (see validateClaimTopicAlignment in knowledge.ts) and
+    // are excluded from retrieval until an admin reviews them here — this
+    // tab is their only path back into (or out of) the knowledge base.
+    let flaggedGroups = $derived(buildFlaggedGroups());
+    let expandedFlagged = $state<number | null>(null);
     let rebuildingTaxonomy = $state(false);
     let taxonomyResult = $state<{ total: number; updated: number } | null>(null);
     let backfillingEmbeddings = $state(false);
@@ -64,6 +71,7 @@ import Loader2 from 'lucide-svelte/icons/loader-2';
         relationships: data.relationships.length,
         claims: data.claims.length,
         conflicts: data.claims.filter(c => c.status === 'conflicting').length,
+        flagged: data.claims.filter(c => c.status === 'flagged').length,
         categories: [...new Set(data.topics.map(t => t.category).filter(Boolean))].length
     });
 
@@ -595,6 +603,24 @@ import Loader2 from 'lucide-svelte/icons/loader-2';
         return Array.from(groups.values());
     }
 
+    // ── Flagged Claim Review ──
+    // Mirrors buildConflictGroups(): group claims whose claim-topic alignment
+    // check failed by topic, so an admin can review and either accept (moves
+    // to 'active', making it retrievable again) or reject (deletes it) each one.
+    function buildFlaggedGroups() {
+        const flagged = data.claims.filter(c => c.status === 'flagged');
+        const groups = new Map<number, { topic: any; flagged: any[] }>();
+
+        for (const c of flagged) {
+            if (!groups.has(c.topic_id)) {
+                const topic = data.topics.find(t => t.id === c.topic_id);
+                groups.set(c.topic_id, { topic, flagged: [] });
+            }
+            groups.get(c.topic_id)!.flagged.push(c);
+        }
+        return Array.from(groups.values());
+    }
+
     async function resolveConflict(claimId: number, action: 'accept' | 'reject' | 'dismiss') {
         resolving = claimId;
         try {
@@ -768,12 +794,13 @@ import Loader2 from 'lucide-svelte/icons/loader-2';
     </header>
 
     <!-- Stats Row -->
-    <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
+    <div class="grid grid-cols-2 md:grid-cols-6 gap-4 mb-8">
         {#each [
             { label: 'Topics', value: stats.topics, icon: Tag, color: 'text-cyan-400' },
             { label: 'Relationships', value: stats.relationships, icon: GitBranch, color: 'text-purple-400' },
             { label: 'Claims', value: stats.claims, icon: FileCheck, color: 'text-emerald-400' },
             { label: 'Conflicts', value: stats.conflicts, icon: AlertTriangle, color: stats.conflicts > 0 ? 'text-red-400' : 'text-[var(--text-faint)]' },
+            { label: 'Flagged', value: stats.flagged, icon: Eye, color: stats.flagged > 0 ? 'text-amber-400' : 'text-[var(--text-faint)]' },
             { label: 'Categories', value: stats.categories, icon: Layers, color: 'text-amber-400' }
         ] as stat}
             <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] p-4 rounded-2xl flex items-center gap-3">
@@ -803,6 +830,15 @@ import Loader2 from 'lucide-svelte/icons/loader-2';
             <AlertTriangle class="w-4 h-4 inline mr-1" /> Conflicts
             {#if stats.conflicts > 0}
                 <span class="ml-1 px-1.5 py-0.5 bg-red-600 text-white text-[10px] rounded-full font-bold">{stats.conflicts}</span>
+            {/if}
+        </button>
+        <button
+            onclick={() => activeTab = 'flagged'}
+            class="px-5 py-2 rounded-xl text-sm font-bold transition-all {activeTab === 'flagged' ? 'bg-amber-500 text-black shadow-lg shadow-amber-500/20' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'}"
+        >
+            <Eye class="w-4 h-4 inline mr-1" /> Flagged
+            {#if stats.flagged > 0}
+                <span class="ml-1 px-1.5 py-0.5 bg-amber-600 text-black text-[10px] rounded-full font-bold">{stats.flagged}</span>
             {/if}
         </button>
         <button
@@ -1106,6 +1142,88 @@ import Loader2 from 'lucide-svelte/icons/loader-2';
                                             {/each}
                                         </div>
                                     </div>
+                                </div>
+                            {/if}
+                        </div>
+                    {/each}
+                {/if}
+            </div>
+        {/if}
+
+        <!-- ═══ FLAGGED TAB ═══ -->
+        {#if activeTab === 'flagged'}
+            <div class="space-y-4" in:fade>
+                {#if flaggedGroups.length === 0}
+                    <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-3xl p-12 text-center">
+                        <CheckCircle class="w-12 h-12 text-emerald-400 mx-auto mb-4" />
+                        <h3 class="text-xl font-bold text-[var(--text-primary)] mb-2">No Flagged Claims</h3>
+                        <p class="text-[var(--text-muted)]">Every extracted claim passed the claim-topic alignment check.</p>
+                    </div>
+                {:else}
+                    <div class="bg-amber-500/5 border border-amber-500/20 rounded-2xl p-4 mb-2 flex items-center gap-3">
+                        <Eye class="w-5 h-5 text-amber-400 shrink-0" />
+                        <p class="text-sm text-amber-300">
+                            <strong>{stats.flagged}</strong> claim{stats.flagged !== 1 ? 's' : ''} across <strong>{flaggedGroups.length}</strong> topic{flaggedGroups.length !== 1 ? 's' : ''} failed the automatic claim-topic alignment check and are hidden from search/chat until reviewed. Accept to restore them to active use, or reject to delete.
+                        </p>
+                    </div>
+
+                    {#each flaggedGroups as group}
+                        <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-2xl overflow-hidden">
+                            <!-- Topic header -->
+                            <button
+                                onclick={() => expandedFlagged = expandedFlagged === group.topic?.id ? null : group.topic?.id}
+                                class="w-full flex items-center justify-between p-5 hover:bg-[var(--hover-surface)] transition-colors text-left"
+                            >
+                                <div class="flex items-center gap-3">
+                                    {#if expandedFlagged === group.topic?.id}
+                                        <ChevronDown class="w-5 h-5 text-[var(--text-faint)]" />
+                                    {:else}
+                                        <ChevronRight class="w-5 h-5 text-[var(--text-faint)]" />
+                                    {/if}
+                                    <div>
+                                        <h3 class="text-[var(--text-primary)] font-bold">{group.topic?.name ?? 'Unknown Topic'}</h3>
+                                        <span class="font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border {getCategoryCss(group.topic?.category || '')}">
+                                            {group.topic?.category || 'Unknown'}
+                                        </span>
+                                    </div>
+                                </div>
+                                <span class="px-3 py-1 bg-amber-500/10 text-amber-400 text-xs font-bold rounded-full border border-amber-500/20">
+                                    {group.flagged.length} flagged
+                                </span>
+                            </button>
+
+                            <!-- Expanded: review list -->
+                            {#if expandedFlagged === group.topic?.id}
+                                <div class="border-t border-[var(--border-primary)] p-5 space-y-3" transition:slide>
+                                    {#each group.flagged as claim}
+                                        <div class="bg-amber-500/5 border border-amber-500/10 rounded-xl p-4">
+                                            <p class="text-[var(--text-secondary)] text-sm leading-relaxed mb-3">{claim.claim_text}</p>
+                                            <div class="flex items-center justify-between">
+                                                <div class="flex items-center gap-2 text-[10px] text-[var(--text-faint)] font-mono">
+                                                    <span>Source: {claim.doc_name}</span>
+                                                    {#if claim.doc_content_hash}
+                                                        <span>· v:{claim.doc_content_hash?.slice(0, 8)}</span>
+                                                    {/if}
+                                                </div>
+                                                <div class="flex items-center gap-2">
+                                                    <button
+                                                        onclick={() => resolveConflict(claim.id, 'accept')}
+                                                        disabled={resolving === claim.id}
+                                                        class="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-bold rounded-lg border border-emerald-500/20 transition-all disabled:opacity-50 flex items-center gap-1"
+                                                    >
+                                                        <CheckCircle class="w-3 h-3" /> Accept
+                                                    </button>
+                                                    <button
+                                                        onclick={() => resolveConflict(claim.id, 'reject')}
+                                                        disabled={resolving === claim.id}
+                                                        class="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-bold rounded-lg border border-red-500/20 transition-all disabled:opacity-50 flex items-center gap-1"
+                                                    >
+                                                        <XCircle class="w-3 h-3" /> Reject
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    {/each}
                                 </div>
                             {/if}
                         </div>

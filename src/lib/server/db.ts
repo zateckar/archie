@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 import { platform, arch } from 'os';
 import { join } from 'path';
 import fs from 'fs';
+import { normalizeTopicName } from './topic-normalize';
 
 const isWindows = platform() === 'win32';
 
@@ -295,6 +296,141 @@ try {
 // Migration: Add claim_type to knowledge_claims for expanded claim types
 try {
     db.exec("ALTER TABLE knowledge_claims ADD COLUMN claim_type TEXT DEFAULT 'assertion'");
+} catch (e) {}
+
+// Migration: Add extraction_failed to chunks so a failed knowledge-extraction
+// pass (LLM error or unparseable JSON, as opposed to a chunk that genuinely
+// has nothing to extract) is visible and queryable instead of only appearing
+// as a transient console.error during ingestion. Set by processDocumentKnowledge.
+try {
+    db.exec('ALTER TABLE chunks ADD COLUMN extraction_failed INTEGER DEFAULT 0');
+} catch (e) {}
+try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_extraction_failed ON chunks(extraction_failed) WHERE extraction_failed = 1');
+} catch (e) {}
+
+// ── Migration: canonical_key for robust topic de-duplication ────────────────
+// `topics.name UNIQUE` only prevents byte-for-byte duplicate names. Two chunks
+// processed concurrently (e.g. two /api/documents uploads in flight at once)
+// can each independently decide "IT-PEP" and "IT PEP" are new topics, since
+// they don't share the in-memory dedup map that `processDocumentKnowledge`
+// seeds per-call. `canonical_key` stores the normalised dedup key from
+// `normalizeTopicName` with its own UNIQUE index, so the database itself
+// rejects/merges near-duplicate names regardless of which process/request
+// created them first.
+try {
+    db.exec('ALTER TABLE topics ADD COLUMN canonical_key TEXT');
+} catch (e) {}
+
+try {
+    const rows = db.prepare('SELECT id, name FROM topics WHERE canonical_key IS NULL').all() as { id: number; name: string }[];
+    if (rows.length > 0) {
+        const update = db.prepare('UPDATE topics SET canonical_key = ? WHERE id = ?');
+        const backfillTx = db.transaction(() => {
+            for (const row of rows) {
+                const { key } = normalizeTopicName(row.name);
+                update.run(key || null, row.id);
+            }
+        });
+        backfillTx();
+        console.log(`[Migration] Backfilled canonical_key for ${rows.length} existing topics.`);
+    }
+} catch (e) {
+    console.error('[Migration] Failed to backfill topics.canonical_key:', e);
+}
+
+try {
+    // Legacy databases may already contain duplicate topics whose names differ
+    // but whose canonical_key now collides (that's the whole point of this
+    // migration — surfacing exactly those). Creating a UNIQUE index would fail
+    // on such data, so we keep the oldest row's key and null out the rest,
+    // leaving them as regular (unindexed) topics that an admin can merge via
+    // the knowledge admin UI rather than crashing the app on startup.
+    const dupes = db.prepare(`
+        SELECT canonical_key, COUNT(*) AS c FROM topics
+        WHERE canonical_key IS NOT NULL AND canonical_key != ''
+        GROUP BY canonical_key HAVING c > 1
+    `).all() as { canonical_key: string; c: number }[];
+
+    if (dupes.length > 0) {
+        console.warn(`[Migration] Found ${dupes.length} legacy duplicate-topic group(s) by canonical_key; keeping the oldest row per group and clearing the key on the rest so they can be merged manually.`);
+        const nullOutExtras = db.prepare(`
+            UPDATE topics SET canonical_key = NULL
+            WHERE canonical_key = ? AND id NOT IN (
+                SELECT MIN(id) FROM topics WHERE canonical_key = ?
+            )
+        `);
+        for (const d of dupes) {
+            nullOutExtras.run(d.canonical_key, d.canonical_key);
+        }
+    }
+
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_canonical_key ON topics(canonical_key) WHERE canonical_key IS NOT NULL AND canonical_key != \'\'');
+} catch (e) {
+    console.error('[Migration] Failed to create topics.canonical_key unique index:', e);
+}
+
+// ── Migration: enforce claim_hash uniqueness at the DB level ────────────────
+// Ingestion already checks `SELECT ... WHERE claim_hash = ?` before inserting,
+// but that check-then-insert is not atomic: two concurrent ingestion runs can
+// both pass the check for the same claim text before either commits. A
+// partial unique index closes that race and makes the invariant durable.
+try {
+    const dupeHashes = db.prepare(`
+        SELECT claim_hash, COUNT(*) AS c FROM knowledge_claims
+        WHERE claim_hash IS NOT NULL
+        GROUP BY claim_hash HAVING c > 1
+    `).all() as { claim_hash: string; c: number }[];
+
+    if (dupeHashes.length > 0) {
+        console.warn(`[Migration] Found ${dupeHashes.length} legacy duplicate-claim group(s) by claim_hash; clearing the hash on all but the oldest row per group so they are preserved but no longer block the unique index.`);
+        const nullOutExtras = db.prepare(`
+            UPDATE knowledge_claims SET claim_hash = NULL
+            WHERE claim_hash = ? AND id NOT IN (
+                SELECT MIN(id) FROM knowledge_claims WHERE claim_hash = ?
+            )
+        `);
+        for (const d of dupeHashes) {
+            nullOutExtras.run(d.claim_hash, d.claim_hash);
+        }
+    }
+
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_claims_hash ON knowledge_claims(claim_hash) WHERE claim_hash IS NOT NULL');
+} catch (e) {
+    console.error('[Migration] Failed to create knowledge_claims.claim_hash unique index:', e);
+}
+
+// ── Missing hot-path indexes ─────────────────────────────────────────────
+// These four columns are queried constantly (every chat turn and every
+// ingestion chunk) but had no supporting index, forcing full table scans
+// that grow linearly with the size of the two biggest tables in the schema
+// (knowledge_claims, topic_relationships). None of these change behavior —
+// purely additive, zero-risk performance fixes.
+try {
+    // getTopicClaims / getTopicClaimsWithConflicts (every chat query) and the
+    // per-topic "existing active claims" lookup inside checkConsistencyBatch
+    // (every chunk during ingestion) both filter on topic_id.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_claims_topic_id ON knowledge_claims(topic_id)');
+} catch (e) {}
+try {
+    // Bulk cleanup during document deletion/reprocessing.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_claims_doc_id ON knowledge_claims(doc_id)');
+} catch (e) {}
+try {
+    // getRelatedTopics()'s `WHERE source_topic_id = ? OR target_topic_id = ?`
+    // is only covered on the source side by the (source,target,type) PRIMARY
+    // KEY — the target side requires a full table scan without this index.
+    // Called on every chat turn via buildKnowledgeContext's topic expansion.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_topic_relationships_target ON topic_relationships(target_topic_id)');
+} catch (e) {}
+try {
+    // getCanonicalTopicNames() (called once per chunk during ingestion via
+    // buildVocabularyHint) joins document_topics on topic_id and groups by it.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_document_topics_topic_id ON document_topics(topic_id)');
+} catch (e) {}
+try {
+    // Chunk lookups/cleanup by document (reprocessing, deletion).
+    db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id)');
 } catch (e) {}
 
 // Migration: Response feedback table for user ratings

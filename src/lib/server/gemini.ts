@@ -18,6 +18,27 @@ try {
 
 const genAI = new GoogleGenerativeAI(apiKey);
 
+// ── Sampling configuration ────────────────────────────────────────────────
+// Every generateContent() call in this file previously relied on the SDK's
+// default sampling settings (temperature ~1.0, free-form text output parsed
+// via brittle bracket-matching in parseJSON()). That default is far too high
+// for the majority of calls in this pipeline, which are structured
+// extraction/classification tasks that want a deterministic, repeatable
+// answer, not creative variation — high temperature here directly causes
+// paraphrase drift during cleaning (which checkContentPreservation exists
+// solely to detect after the fact), unstable topic/claim extraction, and
+// inconsistent JSON that fails to parse. `responseMimeType: 'application/json'`
+// also asks Gemini to return raw JSON instead of markdown-fenced JSON,
+// removing an entire class of parse failures (parseJSON's fence-stripping
+// remains as a defensive fallback, not the primary mechanism).
+const DETERMINISTIC_JSON_CONFIG = { temperature: 0.1, responseMimeType: 'application/json' };
+const RERANK_CONFIG = { temperature: 0, responseMimeType: 'application/json' };
+const EXTRACTION_CONFIG = { temperature: 0.15, responseMimeType: 'application/json' };
+const REWRITE_CONFIG = { temperature: 0.2 }; // faithful rewriting (cleaning) — free text
+const SUMMARY_CONFIG = { temperature: 0.3 }; // summarization — free text
+const SYNTHESIS_CONFIG = { temperature: 0.4 }; // briefing synthesis — free text
+const CHAT_CONFIG = { temperature: 0.4 }; // final user-facing answer — free text
+
 export async function listModels() {
     const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
         headers: { 'X-Goog-Api-Key': apiKey }
@@ -26,18 +47,137 @@ export async function listModels() {
 }
 
 /**
+ * Splits `text` into chunks of at most `maxChars`, preferring to break on
+ * markdown section headers first and falling back to paragraph boundaries if
+ * headers don't produce small-enough sections. Shared by `cleanDocument` and
+ * `summarizeDocument` so large-document handling stays consistent between
+ * the two LLM preprocessing passes.
+ */
+export function splitIntoSections(text: string, maxChars: number): string[] {
+    const sections = text.split(/(?=\n#{1,3} )/);
+    const chunks: string[] = [];
+    let currentChunk = '';
+
+    for (const section of sections) {
+        if ((currentChunk.length + section.length) > maxChars && currentChunk.length > 0) {
+            chunks.push(currentChunk);
+            currentChunk = section;
+        } else {
+            currentChunk += section;
+        }
+    }
+    if (currentChunk) chunks.push(currentChunk);
+
+    // If section-based splitting didn't work (no headers), split by paragraphs
+    if (chunks.length === 1 && chunks[0].length > maxChars) {
+        chunks.length = 0;
+        currentChunk = '';
+        const paragraphs = text.split(/\n\n+/);
+        for (const para of paragraphs) {
+            if ((currentChunk.length + para.length) > maxChars && currentChunk.length > 0) {
+                chunks.push(currentChunk);
+                currentChunk = para;
+            } else {
+                currentChunk += (currentChunk ? '\n\n' : '') + para;
+            }
+        }
+        if (currentChunk) chunks.push(currentChunk);
+    }
+
+    return chunks;
+}
+
+/**
+ * Extracts tokens from `text` that are cheap to verify were preserved after
+ * an LLM rewrite: numbers/percentages, ISO/slash dates, multi-word proper
+ * -noun-looking phrases, and standalone acronyms. These are exactly the kind
+ * of detail an LLM "cleaning" pass is most likely to silently drop, garble,
+ * or paraphrase away (a specific threshold, a system name, a compliance
+ * deadline) while still producing plausible-looking, correctly-shaped prose
+ * that passes a pure length check.
+ */
+// Common sentence-initial words that capitalization rules put at the start of
+// many multi-word capitalized matches ("The Test Reliability Engineer...").
+// Stripped from the front of a matched phrase before it's treated as a
+// "significant token" — otherwise nearly every English sentence produces a
+// false-positive "missing" token purely because the LLM rephrased around a
+// leading "The"/"This"/etc., drowning out genuinely dropped content in noise.
+const LEADING_STOPWORDS = new Set([
+    'The', 'This', 'That', 'These', 'Those', 'Each', 'Every', 'All', 'Any',
+    'A', 'An', 'It', 'Its', 'They', 'Their', 'Such', 'Both', 'Either'
+]);
+
+function extractSignificantTokens(text: string): Set<string> {
+    const tokens = new Set<string>();
+    const numberMatches = text.match(/\b\d[\d,.]*%?\b/g) || [];
+    for (const n of numberMatches) if (n.replace(/[.,]/g, '').length > 0) tokens.add(n);
+
+    const dateMatches = text.match(/\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g) || [];
+    for (const d of dateMatches) tokens.add(d);
+
+    const properNounMatches = text.match(/\b[A-Z][A-Za-z0-9]*(?:[-\s][A-Z][A-Za-z0-9]*){1,3}\b/g) || [];
+    for (const raw of properNounMatches) {
+        const words = raw.split(/[-\s]+/);
+        while (words.length > 1 && LEADING_STOPWORDS.has(words[0])) words.shift();
+        const cleaned = words.join(' ');
+        if (words.length >= 2 || (words.length === 1 && !LEADING_STOPWORDS.has(words[0]))) {
+            tokens.add(cleaned);
+        }
+    }
+
+    const acronyms = text.match(/\b[A-Z]{2,}\b/g) || [];
+    for (const a of acronyms) tokens.add(a);
+
+    return tokens;
+}
+
+/**
+ * Compares the significant tokens (numbers, dates, proper nouns, acronyms)
+ * found in `original` against `rewritten`, returning what fraction survived
+ * and a sample of what's missing. Used as a content-preservation safety net
+ * after `cleanDocument`'s LLM rewrite — a pure length check (the previous
+ * only safeguard) cannot catch an LLM that drops a specific number or name
+ * while otherwise producing plausible, correctly-sized prose.
+ */
+function checkContentPreservation(original: string, rewritten: string): { preservedRatio: number; missing: string[] } {
+    const originalTokens = extractSignificantTokens(original);
+    if (originalTokens.size === 0) return { preservedRatio: 1, missing: [] };
+
+    const rewrittenLower = rewritten.toLowerCase();
+    let preserved = 0;
+    const missing: string[] = [];
+    for (const token of originalTokens) {
+        if (rewrittenLower.includes(token.toLowerCase())) {
+            preserved++;
+        } else {
+            missing.push(token);
+        }
+    }
+    return { preservedRatio: preserved / originalTokens.size, missing };
+}
+
+/**
  * Cleans and restructures a document using LLM.
  * Removes noise, improves formatting, creates logical structure.
  * For large documents, splits into chunks and processes each.
  * Always uses LLM — no regex fallback.
+ *
+ * Safety nets against silent information loss (the highest-risk step in the
+ * ingestion pipeline, since everything downstream — chunking, extraction,
+ * embeddings — operates on this function's output, not the original text):
+ *   1. Length check: reject if the cleaned text is implausibly short.
+ *   2. Content-preservation check: verify that numbers, dates, proper nouns,
+ *      and acronyms from the source still appear in the cleaned output.
+ * Either check failing falls back to the original (or original chunk) text
+ * rather than risk shipping a rewrite that quietly dropped a figure or name.
  */
 export async function cleanDocument(text: string): Promise<string> {
     // Very short documents don't need cleaning
     if (text.length < 200) return text;
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: REWRITE_CONFIG });
 
-    const buildPrompt = (chunk: string, isPartial: boolean) => `
+    const buildPrompt = (chunk: string, isPartial: boolean, prevTailContext?: string) => `
         You are an expert document editor and preprocessor. Transform the following ${isPartial ? 'section of a ' : ''}document into a clean, well-structured, professional version:
 
         1. **Remove noise**: Strip boilerplate headers/footers, navigation elements, page numbers, repetitive disclaimers, auto-generated metadata, table of contents entries, and formatting artifacts.
@@ -45,11 +185,12 @@ export async function cleanDocument(text: string): Promise<string> {
         3. **Restructure for clarity**: Organize content into logical sections with clear markdown headers (##, ###). Group related information together. Ensure a coherent logical flow from general concepts to specific details.
         4. **Improve formatting**: Use proper markdown throughout — headers for sections, bullet lists for enumerations, numbered lists for sequential steps/procedures, tables for structured data, bold for key terms and definitions. Fix broken line breaks, garbled unicode, and normalize whitespace.
         5. **Enhance readability**: Write clear topic sentences for sections. Ensure paragraphs flow logically. Break up walls of text into digestible chunks.
-        6. **Preserve ALL substantive content**: Every meaningful fact, procedure, policy, requirement, technical detail, and piece of knowledge must be preserved. Do NOT omit, summarize, or condense any information.
+        6. **Preserve ALL substantive content**: Every meaningful fact, procedure, policy, requirement, technical detail, and piece of knowledge must be preserved. Do NOT omit, summarize, or condense any information. Numbers, dates, thresholds, names, and acronyms must be carried over EXACTLY as written.
         7. **Standardize to English**: If the document is in any language other than English, translate all content to English while preserving the original meaning, terminology, and technical accuracy. If the document is already in English, keep it as-is.
 
         The output must be a polished, well-organized markdown document written entirely in English with the same informational content but significantly improved structure and readability.
         ${isPartial ? '\nNote: This is a section of a larger document. Maintain coherent structure within this section and do not add an overall title.' : ''}
+        ${prevTailContext ? `\nEND OF THE PREVIOUS SECTION (already cleaned; shown ONLY so headings, terminology, and tone stay consistent — do NOT repeat, re-output, or continue this text, just pick up coherently after it):\n"""\n${prevTailContext}\n"""\n` : ''}
 
         Document${isPartial ? ' section' : ''}:
         ${chunk}
@@ -62,10 +203,18 @@ export async function cleanDocument(text: string): Promise<string> {
         try {
             const result = await withRetry(() => model.generateContent(buildPrompt(text, false)));
             const cleaned = result.response.text().trim();
-            // Safety: if cleaning removed more than 90% of content, something went wrong
+            // Safety 1: if cleaning removed more than 90% of content, something went wrong
             if (cleaned.length < text.length * 0.1) {
                 console.warn(`[CleanDocument] Cleaning removed ${Math.round((1 - cleaned.length / text.length) * 100)}% of content — using original`);
                 return text;
+            }
+            // Safety 2: verify numbers/dates/names/acronyms survived the rewrite
+            const { preservedRatio, missing } = checkContentPreservation(text, cleaned);
+            if (preservedRatio < 0.7) {
+                console.warn(`[CleanDocument] Only ${Math.round(preservedRatio * 100)}% of significant tokens preserved after cleaning — using original. Sample missing: ${missing.slice(0, 10).join(', ')}`);
+                return text;
+            } else if (preservedRatio < 0.9) {
+                console.warn(`[CleanDocument] ${Math.round(preservedRatio * 100)}% of significant tokens preserved after cleaning (some loss detected). Sample missing: ${missing.slice(0, 10).join(', ')}`);
             }
             return cleaned;
         } catch (e) {
@@ -75,44 +224,37 @@ export async function cleanDocument(text: string): Promise<string> {
     }
 
     // For large documents: split by section headers, clean each chunk, reassemble
-    const sections = text.split(/(?=\n#{1,3} )/);
-    const chunks: string[] = [];
-    let currentChunk = '';
-
-    for (const section of sections) {
-        if ((currentChunk.length + section.length) > CHUNK_SIZE && currentChunk.length > 0) {
-            chunks.push(currentChunk);
-            currentChunk = section;
-        } else {
-            currentChunk += section;
-        }
-    }
-    if (currentChunk) chunks.push(currentChunk);
-
-    // If section-based splitting didn't work (no headers), split by paragraphs
-    if (chunks.length === 1 && chunks[0].length > CHUNK_SIZE) {
-        chunks.length = 0;
-        currentChunk = '';
-        const paragraphs = text.split(/\n\n+/);
-        for (const para of paragraphs) {
-            if ((currentChunk.length + para.length) > CHUNK_SIZE && currentChunk.length > 0) {
-                chunks.push(currentChunk);
-                currentChunk = para;
-            } else {
-                currentChunk += (currentChunk ? '\n\n' : '') + para;
-            }
-        }
-        if (currentChunk) chunks.push(currentChunk);
-    }
+    const chunks = splitIntoSections(text, CHUNK_SIZE);
 
     console.log(`[CleanDocument] Large document (${text.length} chars), split into ${chunks.length} chunks for cleaning`);
 
+    // Cross-section context: previously each 80K-char section was cleaned in
+    // total isolation, which could produce inconsistent heading structure/tone
+    // across the reassembled document (the same class of problem cross-chunk
+    // context already fixed for knowledge extraction, applied here to the
+    // stage that runs before — and everything downstream depends on).
+    const PREV_TAIL_CONTEXT_CHARS = 600;
     const cleanedChunks: string[] = [];
     for (const chunk of chunks) {
+        const prevTailContext = cleanedChunks.length > 0
+            ? cleanedChunks[cleanedChunks.length - 1].slice(-PREV_TAIL_CONTEXT_CHARS)
+            : undefined;
         try {
-            const result = await withRetry(() => model.generateContent(buildPrompt(chunk, chunks.length > 1)));
+            const result = await withRetry(() => model.generateContent(buildPrompt(chunk, chunks.length > 1, prevTailContext)));
             const cleaned = result.response.text().trim();
-            cleanedChunks.push(cleaned || chunk);
+
+            if (!cleaned || cleaned.length < chunk.length * 0.1) {
+                console.warn(`[CleanDocument] Chunk cleaning removed too much content — using original chunk.`);
+                cleanedChunks.push(chunk);
+                continue;
+            }
+            const { preservedRatio, missing } = checkContentPreservation(chunk, cleaned);
+            if (preservedRatio < 0.7) {
+                console.warn(`[CleanDocument] Chunk cleaning preserved only ${Math.round(preservedRatio * 100)}% of significant tokens — using original chunk. Sample missing: ${missing.slice(0, 10).join(', ')}`);
+                cleanedChunks.push(chunk);
+                continue;
+            }
+            cleanedChunks.push(cleaned);
         } catch (e) {
             console.error(`[CleanDocument] Chunk cleaning failed, using original chunk:`, e);
             cleanedChunks.push(chunk);
@@ -122,24 +264,29 @@ export async function cleanDocument(text: string): Promise<string> {
     return cleanedChunks.join('\n\n');
 }
 
+const SUMMARY_SECTION_MAX_CHARS = 80000;
+
 /**
  * Generates a comprehensive summary of a document that captures its overall meaning.
  * The summary is stored as metadata and used for better knowledge extraction and search.
+ *
+ * For documents larger than one context-window-friendly section, this now
+ * summarizes each section independently and merges the section summaries
+ * into one cohesive final summary, instead of silently truncating at 80K
+ * characters (which previously meant the summary — and everything
+ * downstream that relies on it, like knowledge extraction's document-context
+ * hint — was blind to the back half of any sufficiently large document).
  */
 export async function summarizeDocument(text: string, filename: string): Promise<string> {
     if (text.length < 100) return text; // Too short to summarize
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
-    // For very large documents, truncate to fit model context
-    const truncatedText = text.length > 80000
-        ? text.substring(0, 80000) + '\n\n[Document truncated for summarization]'
-        : text;
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: SUMMARY_CONFIG });
 
-    const prompt = `
-        You are an expert document analyst. Create a comprehensive summary of the following document that captures its complete meaning and purpose.
+    const buildSectionPrompt = (chunk: string, isPartial: boolean) => `
+        You are an expert document analyst. Create a comprehensive summary of the following ${isPartial ? 'section of a ' : ''}document that captures its complete meaning and purpose.
 
         The summary must:
-        1. **State the document's purpose and scope** in the opening sentence
+        1. ${isPartial ? "**State what this section covers** in the opening sentence" : "**State the document's purpose and scope** in the opening sentence"}
         2. **Identify all major themes and topics** covered
         3. **Capture key facts, decisions, requirements, and policies** — anything someone might search for
         4. **Note important entities** — people, teams, systems, tools, processes mentioned
@@ -147,21 +294,71 @@ export async function summarizeDocument(text: string, filename: string): Promise
         6. **Preserve important specifics** — dates, thresholds, version numbers, concrete requirements
         7. **Be search-friendly** — use the same terminology as the document so keyword searches will match
 
-        The summary should be 200-500 words depending on document complexity.
+        The summary should be 200-500 words depending on ${isPartial ? 'section' : 'document'} complexity.
         Write it as direct factual statements about the subject matter. Do NOT use phrases like "this document describes" or "the document mentions".
 
         Filename: ${filename}
 
-        Document:
-        ${truncatedText}
+        Document${isPartial ? ' section' : ''}:
+        ${chunk}
+    `;
+
+    if (text.length <= SUMMARY_SECTION_MAX_CHARS) {
+        try {
+            const result = await withRetry(() => model.generateContent(buildSectionPrompt(text, false)));
+            return result.response.text().trim();
+        } catch (e) {
+            console.error('Document summarization failed:', e);
+            return '';
+        }
+    }
+
+    // Large document: summarize each section, then merge into one cohesive summary
+    // so the result reflects the WHOLE document instead of just the first 80K chars.
+    const sections = splitIntoSections(text, SUMMARY_SECTION_MAX_CHARS);
+    console.log(`[SummarizeDocument] Large document (${text.length} chars) for "${filename}" — summarizing ${sections.length} section(s) then merging`);
+
+    const sectionSummaries: string[] = [];
+    for (const section of sections) {
+        try {
+            const result = await withRetry(() => model.generateContent(buildSectionPrompt(section, sections.length > 1)));
+            const summary = result.response.text().trim();
+            if (summary) sectionSummaries.push(summary);
+        } catch (e) {
+            console.error(`[SummarizeDocument] Section summary failed for "${filename}":`, e);
+        }
+    }
+
+    if (sectionSummaries.length === 0) return '';
+    if (sectionSummaries.length === 1) return sectionSummaries[0];
+
+    const mergePrompt = `
+        You are an expert document analyst. Below are summaries of consecutive sections of a single large document titled "${filename}". Merge them into ONE comprehensive, cohesive summary of the document as a whole.
+
+        The merged summary must:
+        1. **State the document's overall purpose and scope** in the opening sentence
+        2. **Identify all major themes and topics** across all sections, not just the first
+        3. **Capture key facts, decisions, requirements, and policies** from every section — anything someone might search for
+        4. **Note important entities** — people, teams, systems, tools, processes mentioned anywhere in the document
+        5. **Describe relationships** between concepts, including ones that span multiple sections
+        6. **Preserve important specifics** — dates, thresholds, version numbers, concrete requirements — verbatim
+        7. **Be search-friendly** — use the same terminology as the document so keyword searches will match
+        8. **Remove redundancy** between section summaries; do not just concatenate them
+
+        The merged summary should be 300-700 words depending on overall document complexity.
+        Write it as direct factual statements about the subject matter. Do NOT use phrases like "this document describes", "section 1 covers", or "the document mentions".
+
+        Section summaries (in document order):
+        ${sectionSummaries.map((s, i) => `[Section ${i + 1}]\n${s}`).join('\n\n')}
     `;
 
     try {
-        const result = await withRetry(() => model.generateContent(prompt));
-        return result.response.text().trim();
+        const result = await withRetry(() => model.generateContent(mergePrompt));
+        const merged = result.response.text().trim();
+        return merged || sectionSummaries.join('\n\n');
     } catch (e) {
-        console.error('Document summarization failed:', e);
-        return '';
+        console.error(`[SummarizeDocument] Merge failed for "${filename}", concatenating section summaries:`, e);
+        return sectionSummaries.join('\n\n');
     }
 }
 
@@ -187,7 +384,7 @@ export interface QueryAnalysis {
 }
 
 export async function analyzeQuery(prompt: string, history: { role: string, content: string }[] = []): Promise<QueryAnalysis> {
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
 
     const historyContext = history.length > 0
         ? `Previous conversation:\n${history.slice(-3).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n`
@@ -239,11 +436,72 @@ export async function analyzeQuery(prompt: string, history: { role: string, cont
     }
 }
 
+/**
+ * Combines what `analyzeQuery` and `condenseQuery` used to do as two separate
+ * sequential LLM calls into one. The chat endpoint needs both — "is this
+ * query searchable?" and "what's the standalone search query given history?"
+ * — on effectively every turn that isn't a post-clarification retry, so
+ * merging them halves a very hot path's LLM round trips without changing
+ * behavior. `analyzeQuery` and `condenseQuery` are kept as separate exports
+ * for callers that only need one of the two (e.g. the post-clarification
+ * retry path only needs condensing).
+ */
+export async function analyzeAndCondenseQuery(prompt: string, history: { role: string, content: string }[] = []): Promise<QueryAnalysis> {
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
+
+    const historyContext = history.length > 0
+        ? `Previous conversation:\n${history.slice(-5).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n`
+        : '';
+
+    const analysisPrompt = `
+        You are a query analyzer AND query rewriter for a document search system.
+
+        ${historyContext}User Query: "${prompt}"
+
+        Perform two tasks in one pass:
+        1. ANALYZE: decide if the query is clear enough to search, or if clarification is truly required (see rules below).
+        2. REWRITE: produce a standalone, search-friendly query that resolves pronouns/references from the conversation history (e.g. "it", "that", "the above") and captures the user's full intent. If the query doesn't depend on history and is already standalone, return it close to as-is.
+
+        Return ONLY a JSON object:
+        {
+            "needsClarification": true/false,
+            "clarificationQuestions": ["question 1", "question 2"] or null,
+            "searchableQuery": "standalone, rewritten search query",
+            "confidence": "high/medium/low"
+        }
+
+        Rules:
+        - Set needsClarification: true ONLY when the query is completely unresolvable without more context — e.g., a bare pronoun with no referent ("how does it work?" with zero conversation history), a single character, or pure gibberish
+        - NEVER flag broad-but-valid queries such as "tell me about security", "what are the guidelines", "explain the process", "how does X work" — these should be sent directly to the knowledge graph
+        - The bar for clarification is very high; when in doubt, always set needsClarification: false and rely on searchableQuery
+        - clarificationQuestions should only appear when the query literally cannot be searched in any meaningful way
+        - Always provide a searchableQuery (best guess at user intent, standalone from history)
+        - confidence: high if query is specific, medium if somewhat vague, low if very unclear
+    `;
+
+    try {
+        const result = await withRetry(() => model.generateContent(analysisPrompt));
+        const text = result.response.text();
+        return parseJSON<QueryAnalysis>(text, {
+            needsClarification: false,
+            searchableQuery: prompt,
+            confidence: 'medium'
+        });
+    } catch (e) {
+        console.error('Query analysis+condense failed:', e);
+        return {
+            needsClarification: false,
+            searchableQuery: prompt,
+            confidence: 'medium'
+        };
+    }
+}
+
 export async function condenseQuery(history: { role: string, content: string }[], prompt: string) {
     if (history.length === 0) return prompt;
 
     try {
-        const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+        const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: { temperature: 0.1 } });
         const condensePrompt = `
             Given the following conversation history and a follow-up question, rephrase the follow-up question to be a standalone search query that captures the user's intent, including any necessary context from the history.
             If the follow-up question is already a standalone question or doesn't depend on history, return it as is.
@@ -312,7 +570,7 @@ export async function synthesizeContext(
     verbatimExcerpts: string,
     conversationSummary?: string
 ): Promise<string> {
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: SYNTHESIS_CONFIG });
 
     const prompt = `You are preparing a knowledge briefing for an AI assistant who will answer a user's question. Your job is to transform raw retrieved data into a clear, organized briefing.
 
@@ -331,7 +589,7 @@ INSTRUCTIONS:
 4. Drop retrieved facts that are irrelevant to the question
 5. Preserve exact figures, dates, names, thresholds, and version numbers verbatim
 6. When claims from different topics relate to each other, weave them together narratively
-7. Note contradictions or gaps: if the data is incomplete, say what's missing
+7. Note contradictions or gaps: if the data is incomplete, say what's missing. If a topic section contains a "⚠ Disputed / Unverified" claim, explicitly call out that the knowledge base has conflicting information on that point — state both versions and which source each comes from — rather than silently picking one
 8. Cite source documents inline: [filename.md] — but only where you use specific facts from excerpts
 9. Write in direct factual prose. Never say "the retrieved data shows" or "according to the claims"
 10. If the retrieved data does not contain information relevant to the question, say so in one sentence
@@ -359,7 +617,7 @@ export async function buildConversationBriefing(
 ): Promise<string> {
     if (history.length < 2) return ''; // No prior context to summarize
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: { temperature: 0.2 } });
     const recentHistory = history.slice(-8); // Last 4 exchanges
 
     const prompt = `Summarize the key facts, topics, and conclusions established in this conversation so far. Focus on:
@@ -385,7 +643,8 @@ Write a concise summary (100-200 words) in factual prose. Do not include pleasan
 export async function chatStream(prompt: string, context: string, history: { role: string, content: string }[] = []) {
     const model = genAI.getGenerativeModel({
         model: TEXT_MODEL,
-        systemInstruction: buildSystemPrompt(context)
+        systemInstruction: buildSystemPrompt(context),
+        generationConfig: CHAT_CONFIG
     });
 
     const chatSession = model.startChat({
@@ -402,7 +661,8 @@ export async function chatStream(prompt: string, context: string, history: { rol
 export async function chat(prompt: string, context: string, history: { role: string, content: string }[] = []) {
     const model = genAI.getGenerativeModel({
         model: TEXT_MODEL,
-        systemInstruction: buildSystemPrompt(context)
+        systemInstruction: buildSystemPrompt(context),
+        generationConfig: CHAT_CONFIG
     });
 
     const chatSession = model.startChat({
@@ -418,7 +678,7 @@ export async function chat(prompt: string, context: string, history: { role: str
 }
 
 export async function semanticChunk(text: string): Promise<string[]> {
-    const model = genAI.getGenerativeModel({ model: CHUNK_MODEL });
+    const model = genAI.getGenerativeModel({ model: CHUNK_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
     const prompt = `
         You are an expert document processor. Your task is to split the following text into semantically meaningful chunks.
         Each chunk should represent a distinct topic, concept, or logical section.
@@ -455,7 +715,7 @@ export async function assessRelevance(query: string, documents: { content: strin
         };
     }
 
-    const model = genAI.getGenerativeModel({ model: RERANK_MODEL });
+    const model = genAI.getGenerativeModel({ model: RERANK_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
 
     const prompt = `
         You are a relevance assessor. Determine if the retrieved documents can actually answer the user's query.
@@ -510,7 +770,7 @@ export async function evaluateContext(
         };
     }
 
-    const model = genAI.getGenerativeModel({ model: RERANK_MODEL });
+    const model = genAI.getGenerativeModel({ model: RERANK_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
     const prompt = `
         You are evaluating whether retrieved context is sufficient to answer a user's question.
 
@@ -548,10 +808,19 @@ export async function evaluateContext(
     }
 }
 
+// Cap per-chunk content sent into the rerank prompt. Relevance ranking only
+// needs enough text to judge topical fit — previously this dumped the FULL,
+// untruncated chunk content for up to 20 pooled candidates (searchChunks'
+// hybrid-search pool), which could balloon the prompt to tens of thousands
+// of characters and risked a truncated/malformed JSON response on the way
+// back out. assessRelevance() already truncated to 300 chars for the same
+// reason; this brings rerank() in line with that.
+const RERANK_CONTENT_PREVIEW_CHARS = 500;
+
 export async function rerank(query: string, documents: { content: string }[]): Promise<number[]> {
     if (documents.length === 0) return [];
 
-    const model = genAI.getGenerativeModel({ model: RERANK_MODEL });
+    const model = genAI.getGenerativeModel({ model: RERANK_MODEL, generationConfig: RERANK_CONFIG });
 
     const prompt = `
         You are an expert reranker. Given a query and a list of document chunks, rank the chunks based on their relevance to the query.
@@ -561,7 +830,7 @@ export async function rerank(query: string, documents: { content: string }[]): P
         Query: ${query}
 
         Chunks:
-        ${documents.map((doc, i) => `[${i}] ${doc.content}`).join('\n\n')}
+        ${documents.map((doc, i) => `[${i}] ${doc.content.substring(0, RERANK_CONTENT_PREVIEW_CHARS)}`).join('\n\n')}
 
         Indices:`;
 
@@ -612,8 +881,20 @@ const ALLOWED_CATEGORIES = [
     'Process', 'Role', 'Tool', 'Compliance'
 ];
 
-export async function extractKnowledge(text: string, existingTopicNames: string[] = [], documentSummary?: string): Promise<ExtractedKnowledge> {
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+/**
+ * Extracts structured knowledge (topics/claims/relationships) from a document
+ * chunk. Returns `null` — not an empty-but-valid result — when the LLM call
+ * or JSON parsing genuinely failed, so callers can distinguish "this chunk
+ * legitimately had nothing to extract" from "extraction failed and this
+ * chunk's knowledge was silently lost." Previously both cases returned the
+ * identical `{ topics: [], claims: [], relationships: [] }` shape, which
+ * made the `if (!knowledge.topics) continue` guard in processDocumentKnowledge
+ * a no-op (an empty array is truthy) — a transient API error or a truncated
+ * JSON response would drop a chunk's entire contribution to the knowledge
+ * base with nothing but a console.error to show for it.
+ */
+export async function extractKnowledge(text: string, existingTopicNames: string[] = [], documentSummary?: string): Promise<ExtractedKnowledge | null> {
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: EXTRACTION_CONFIG });
 
     const vocabularyHint = existingTopicNames.length > 0
         ? `
@@ -687,11 +968,24 @@ export async function extractKnowledge(text: string, existingTopicNames: string[
     try {
         const result = await withRetry(() => model.generateContent(prompt));
         const responseText = result.response.text();
-        return parseJSON<ExtractedKnowledge>(responseText, { topics: [], claims: [], relationships: [] });
+        const parsed = tryParseJSON<ExtractedKnowledge>(responseText);
+        if (parsed === undefined) {
+            console.error('Knowledge extraction failed: could not parse JSON from LLM response.');
+            return null;
+        }
+        // Normalize missing arrays (a technically-valid JSON object that omits
+        // a key, e.g. `{}`) to empty arrays so callers don't need null checks
+        // on every field — this is a genuine "nothing to extract" result, not
+        // a failure, so it still returns a real (non-null) object.
+        return {
+            topics: parsed.topics ?? [],
+            claims: parsed.claims ?? [],
+            relationships: parsed.relationships ?? []
+        };
     } catch (e) {
         console.error('Knowledge extraction failed:', e);
+        return null;
     }
-    return { topics: [], claims: [], relationships: [] };
 }
 
 /**
@@ -704,7 +998,7 @@ export async function deriveTaxonomyPlacements(
 ): Promise<{ topicId: number; parentId: number | null }[]> {
     if (orphanTopics.length === 0) return [];
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
 
     const taxonomyDesc = existingTaxonomy.length > 0
         ? existingTaxonomy.map(t => `  - id:${t.id} "${t.name}" [${t.category}]${t.parent_topic_id ? ` (child of id:${t.parent_topic_id})` : ' (root)'}`).join('\n')
@@ -752,7 +1046,7 @@ export async function deriveTaxonomyFull(
 ): Promise<{ topicId: number; parentId: number | null }[]> {
     if (allTopics.length === 0) return [];
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
     const results: { topicId: number; parentId: number | null }[] = [];
 
     // Batch topics to avoid context window limits (~40 per batch)
@@ -817,7 +1111,7 @@ Include an entry for EVERY topic in this batch. Do not include markdown formatti
 export async function checkConsistency(newClaim: string, existingClaims: string[]): Promise<{ status: 'unique' | 'duplicate' | 'conflict' | 'update', reason?: string }> {
     if (existingClaims.length === 0) return { status: 'unique' };
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
     const prompt = `
         You are a consistency checker for a knowledge base.
         Compare the following "New Claim" against a list of "Existing Claims" in the same topic.
@@ -862,7 +1156,7 @@ export async function checkConsistencyBatch(
         return newClaims.map((_, index) => ({ status: 'unique', claimIndex: index }));
     }
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
     const prompt = `
         You are a consistency checker for a knowledge base.
         Compare multiple "New Claims" against a list of "Existing Claims" in the same topic.
@@ -929,18 +1223,26 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Pr
     }
 }
 
-function parseJSON<T>(text: string, fallback: T): T {
+/**
+ * Core JSON extraction logic, returning `undefined` on failure instead of a
+ * fallback value. Callers that need to distinguish "the LLM call/parse
+ * genuinely failed" from "the LLM legitimately returned an empty-but-valid
+ * result" (e.g. extractKnowledge — see its call site) should use this
+ * directly rather than `parseJSON`, which collapses both cases into the same
+ * fallback and makes them indistinguishable downstream.
+ */
+function tryParseJSON<T>(text: string): T | undefined {
     try {
         // Clean up markdown code blocks if present
         const cleaned = text.replace(/```json\n?/, '').replace(/\n?```/, '').trim();
-        
+
         // Try to find the first [ or { and the last ] or }
         const startBracket = cleaned.indexOf('[');
         const startBrace = cleaned.indexOf('{');
-        
+
         let start = -1;
         let end = -1;
-        
+
         if (startBracket !== -1 && (startBrace === -1 || startBracket < startBrace)) {
             start = startBracket;
             end = cleaned.lastIndexOf(']');
@@ -948,14 +1250,14 @@ function parseJSON<T>(text: string, fallback: T): T {
             start = startBrace;
             end = cleaned.lastIndexOf('}');
         }
-        
+
         if (start !== -1 && end !== -1 && end > start) {
             const jsonStr = cleaned.substring(start, end + 1);
             try {
                 return JSON.parse(jsonStr);
             } catch (e) {
-                // If it's an unterminated string or similar, try to fix it? 
-                // For now, just log and fallback.
+                // If it's an unterminated string or similar, try to fix it?
+                // For now, just log and report failure.
                 console.error('JSON parse error after extraction:', e, 'JSON string:', jsonStr.substring(0, 100) + '...');
             }
         } else {
@@ -965,5 +1267,10 @@ function parseJSON<T>(text: string, fallback: T): T {
     } catch (e) {
         console.error('Failed to parse JSON from LLM response:', e, 'Raw text:', text.substring(0, 100) + '...');
     }
-    return fallback;
+    return undefined;
+}
+
+function parseJSON<T>(text: string, fallback: T): T {
+    const parsed = tryParseJSON<T>(text);
+    return parsed === undefined ? fallback : parsed;
 }

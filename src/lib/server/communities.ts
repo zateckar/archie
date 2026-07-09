@@ -14,7 +14,11 @@ import { db } from './db';
 // ── Edge weight map for relationship types ──────────────────────────
 // Strong structural links (is_part_of, is_a) get higher weight;
 // weak referential links get lower weight.
-const RELATIONSHIP_WEIGHTS: Record<string, number> = {
+// Exported so retrieval-time topic expansion (rag.ts::getRelatedTopics /
+// buildKnowledgeContext) can prioritise strong relationships over weak ones
+// when a cap on the number of expanded topics is hit, instead of taking
+// whatever order SQLite happens to return rows in.
+export const RELATIONSHIP_WEIGHTS: Record<string, number> = {
     is_part_of:     1.0,
     is_a:           1.0,
     governs:        0.8,
@@ -32,7 +36,7 @@ const RELATIONSHIP_WEIGHTS: Record<string, number> = {
     references:     0.3,
 };
 
-const DEFAULT_EDGE_WEIGHT = 0.3;
+export const DEFAULT_EDGE_WEIGHT = 0.3;
 
 // ── Graph diagnostic ────────────────────────────────────────────────
 
@@ -167,30 +171,33 @@ function buildGraph(): WeightedGraph {
 }
 
 /**
- * Louvain community detection algorithm.
- *
- * Phase 1: Local modularity optimization — move nodes between communities
- * to maximize modularity.
- * Phase 2: Graph aggregation — collapse communities into super-nodes.
- *
- * Returns a Map<topicId, communityId>.
+ * Phase 1 of Louvain: local modularity optimization. Repeatedly moves nodes
+ * between communities to maximize modularity gain until no move improves it
+ * (or MAX_ITERATIONS is hit). Operates on whatever graph is passed in — at
+ * level 0 that's the original topic graph; at level N it's the aggregated
+ * super-node graph built by `aggregateGraph`. Self-loops (which only appear
+ * in aggregated graphs, representing intra-community edges collapsed from
+ * the previous level) are handled without special-casing: by construction
+ * (see `aggregateGraph`) a self-loop's stored weight already equals 2x the
+ * sum of the internal edges it represents, matching the standard "doubled
+ * diagonal" convention modularity math expects for weighted degree.
  */
-function louvain(graph: WeightedGraph, seed = 42): Map<number, number> {
+function runLocalMoving(graph: WeightedGraph, seed: number): Map<number, number> {
     const { nodes, edges } = graph;
 
-    if (nodes.length === 0) return new Map();
+    // Initialize: each node in its own community
+    const community = new Map<number, number>();
+    for (let i = 0; i < nodes.length; i++) {
+        community.set(nodes[i], i);
+    }
+
+    if (nodes.length === 0) return community;
 
     // Simple seeded PRNG for reproducibility
     let rngState = seed;
     function seededRandom(): number {
         rngState = (rngState * 1664525 + 1013904223) & 0x7fffffff;
         return rngState / 0x7fffffff;
-    }
-
-    // Initialize: each node in its own community
-    let community = new Map<number, number>();
-    for (let i = 0; i < nodes.length; i++) {
-        community.set(nodes[i], i);
     }
 
     // Precompute total weight (2x sum of all edges since symmetrized)
@@ -206,10 +213,7 @@ function louvain(graph: WeightedGraph, seed = 42): Map<number, number> {
     const m2 = totalWeight; // = 2m in modularity formula
 
     if (m2 === 0) {
-        // No edges — return each node as its own community
-        for (let i = 0; i < nodes.length; i++) {
-            community.set(nodes[i], i);
-        }
+        // No edges — each node stays its own community
         return community;
     }
 
@@ -223,7 +227,6 @@ function louvain(graph: WeightedGraph, seed = 42): Map<number, number> {
     let iteration = 0;
     const MAX_ITERATIONS = 20;
 
-    // Phase 1: Local optimization
     while (improved && iteration < MAX_ITERATIONS) {
         improved = false;
         iteration++;
@@ -288,19 +291,103 @@ function louvain(graph: WeightedGraph, seed = 42): Map<number, number> {
         }
     }
 
-    // Phase 2: Aggregation (build reduced graph)
-    // After Phase 1, we have community assignments. Aggregate Phase 2 would
-    // collapse communities into super-nodes and repeat. For a graph of this
-    // scale (hundreds-nodes), a single pass is usually sufficient.
-    // We skip Phase 2 aggregation for simplicity and because the graphs are small.
+    return community;
+}
+
+/**
+ * Phase 2 of Louvain: collapse each community found by `runLocalMoving` into
+ * a single super-node, producing a smaller weighted graph to run Phase 1 on
+ * again. Edge weights between super-nodes are the sum of all edge weights
+ * between their constituent nodes; intra-community edges become a self-loop
+ * on the super-node. Because the input graph is symmetrized (every edge
+ * appears in both directions), summing every directed (node -> neighbor)
+ * pair naturally produces a symmetric aggregated graph AND gives self-loops
+ * the "doubled diagonal" weight that `runLocalMoving`'s modularity formula
+ * expects, with no special-casing required.
+ */
+function aggregateGraph(
+    graph: WeightedGraph,
+    community: Map<number, number>,
+    nodeToOriginal: Map<number, number[]>
+): { aggGraph: WeightedGraph; aggNodeToOriginal: Map<number, number[]> } {
+    const commIds = [...new Set(community.values())];
+
+    const aggNodeToOriginal = new Map<number, number[]>();
+    for (const c of commIds) aggNodeToOriginal.set(c, []);
+    for (const [levelNode, comm] of community) {
+        aggNodeToOriginal.get(comm)!.push(...(nodeToOriginal.get(levelNode) ?? []));
+    }
+
+    const aggEdges = new Map<number, Map<number, number>>();
+    for (const c of commIds) aggEdges.set(c, new Map());
+
+    for (const [node, neighbors] of graph.edges) {
+        const cA = community.get(node)!;
+        for (const [neighbor, weight] of neighbors) {
+            const cB = community.get(neighbor)!;
+            const m = aggEdges.get(cA)!;
+            m.set(cB, (m.get(cB) ?? 0) + weight);
+        }
+    }
+
+    return { aggGraph: { nodes: commIds, edges: aggEdges }, aggNodeToOriginal };
+}
+
+/**
+ * Louvain community detection algorithm, including the multi-level
+ * aggregation step (Phase 2) that the original single-pass implementation
+ * skipped. Repeatedly runs local-moving (Phase 1) then collapses the result
+ * into a super-node graph (Phase 2), feeding that back into Phase 1, until
+ * a level produces no further compression (every node is already its own
+ * community, i.e. no beneficial merge exists) or `MAX_LEVELS` is reached.
+ * This is what gives Louvain its name-brand modularity quality — a single
+ * Phase-1 pass alone tends to produce visibly over-fragmented communities.
+ *
+ * Returns a Map<topicId, communityId> covering the ORIGINAL node IDs.
+ */
+function louvain(graph: WeightedGraph, seed = 42): Map<number, number> {
+    if (graph.nodes.length === 0) return new Map();
+
+    let currentGraph = graph;
+    let nodeToOriginal = new Map<number, number[]>();
+    for (const n of graph.nodes) nodeToOriginal.set(n, [n]);
+
+    let finalAssignment = new Map<number, number>();
+    for (const n of graph.nodes) finalAssignment.set(n, n);
+
+    const MAX_LEVELS = 10;
+
+    for (let level = 0; level < MAX_LEVELS; level++) {
+        const community = runLocalMoving(currentGraph, seed + level);
+
+        // Map this level's community assignment down to the original node IDs
+        const newFinalAssignment = new Map<number, number>();
+        for (const [levelNode, origNodes] of nodeToOriginal) {
+            const comm = community.get(levelNode)!;
+            for (const orig of origNodes) newFinalAssignment.set(orig, comm);
+        }
+        finalAssignment = newFinalAssignment;
+
+        const numCommunities = new Set(community.values()).size;
+        // Converged: either no further compression is possible (every node
+        // stayed its own community) or the whole graph collapsed into one
+        // community — either way, another aggregation round can't help.
+        if (numCommunities === currentGraph.nodes.length || numCommunities === 1) {
+            break;
+        }
+
+        const { aggGraph, aggNodeToOriginal } = aggregateGraph(currentGraph, community, nodeToOriginal);
+        currentGraph = aggGraph;
+        nodeToOriginal = aggNodeToOriginal;
+    }
 
     // Renumber communities to sequential IDs for compactness
-    const uniqueComms = [...new Set(community.values())];
+    const uniqueComms = [...new Set(finalAssignment.values())];
     const renumber = new Map<number, number>();
     uniqueComms.forEach((c, i) => renumber.set(c, i + 1));
 
     const result = new Map<number, number>();
-    for (const [node, comm] of community) {
+    for (const [node, comm] of finalAssignment) {
         result.set(node, renumber.get(comm)!);
     }
 

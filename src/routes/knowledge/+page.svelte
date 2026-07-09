@@ -27,7 +27,13 @@ import Layers from 'lucide-svelte/icons/layers';
     let selectedCategory = $state('All');
     let activeTab = $state('topics'); // 'topics', 'claims', 'graph'
 
-    const categories = ['All', 'Technical', 'Architecture', 'Best Practice', 'Organizational Norm'];
+    // Derived from actual topic data rather than a hardcoded list — the
+    // extractor's category vocabulary (see ALLOWED_CATEGORIES in gemini.ts)
+    // has grown over time and a fixed list here previously fell out of sync,
+    // silently hiding the filter button for any category not in that list
+    // (e.g. "Process", "Role", "Tool", "Compliance" had no way to be
+    // isolated on this page even though topics were being tagged with them).
+    let categories = $derived(['All', ...new Set(data.topics.map(t => t.category).filter(Boolean))]);
 
     // ── Graph Visualization States ──
     interface GraphNode {

@@ -4,6 +4,7 @@
 	import { onMount } from 'svelte';
 	import { theme } from '$lib/stores/theme';
 	import { reinitializeMermaid } from '$lib/utils/mermaid';
+	import MermaidFullscreenModal from '$lib/components/MermaidFullscreenModal.svelte';
 
 	let { children } = $props();
 
@@ -25,3 +26,4 @@
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>
 {@render children()}
+<MermaidFullscreenModal />

@@ -1,8 +1,10 @@
 <script lang="ts">
     import { renderMermaid, hashId, registerReRenderCallback } from '$lib/utils/mermaid';
+    import { openMermaidFullscreen } from '$lib/stores/mermaidFullscreen';
     import Copy from 'lucide-svelte/icons/copy';
 import CodeIcon from 'lucide-svelte/icons/code';
 import Eye from 'lucide-svelte/icons/eye';
+import Maximize2 from 'lucide-svelte/icons/maximize-2';
 
     let { code, id }: { code: string; id?: string } = $props();
 
@@ -53,6 +55,10 @@ import Eye from 'lucide-svelte/icons/eye';
             console.error('Copy failed', e);
         }
     }
+
+    function expandFullscreen() {
+        if (svg) openMermaidFullscreen(svg, code);
+    }
 </script>
 
 <div class="mermaid-diagram-wrapper relative group">
@@ -70,7 +76,7 @@ import Eye from 'lucide-svelte/icons/eye';
             <pre>{code}</pre>
         </div>
     {:else if svg}
-        <div class="mermaid-diagram-svg">
+        <div class="mermaid-diagram-scroll">
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
             {@html svg}
         </div>
@@ -95,6 +101,12 @@ import Eye from 'lucide-svelte/icons/eye';
                     Source
                 {/if}
             </button>
+            {#if svg && !showSource}
+                <button type="button" class="mermaid-btn" title="View fullscreen" onclick={expandFullscreen}>
+                    <Maximize2 class="w-3 h-3" />
+                    Expand
+                </button>
+            {/if}
         </div>
     {/if}
 </div>
