@@ -173,34 +173,52 @@ import BookOpen from 'lucide-svelte/icons/book-open';
                 lastFlush = Date.now();
             }
 
+            // The server emits newline-delimited JSON objects, but reader.read()
+            // yields arbitrary byte boundaries — a single JSON line (especially a
+            // large "sources" payload) can be split across multiple reads. Buffer
+            // the incomplete trailing line and only parse complete lines.
+            let buffer = '';
+
+            function processLine(line: string) {
+                if (!line.trim()) return;
+                try {
+                    const parsed = JSON.parse(line);
+                    if (parsed.type === 'sources') {
+                        assistantMessage.sources = parsed.data;
+                    } else if (parsed.type === 'chunk') {
+                        assistantMessage.content += parsed.data;
+                    }
+                    // Schedule a batched update
+                    pendingUpdate = () => {
+                        messages[messages.length - 1] = { ...assistantMessage };
+                    };
+                    const now = Date.now();
+                    if (now - lastFlush >= FLUSH_INTERVAL) {
+                        flushUpdate();
+                    }
+                } catch (e) {
+                    console.error('Failed to parse stream chunk:', line, e);
+                }
+            }
+
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
 
-                const chunk = decoder.decode(value, { stream: true });
-                const lines = chunk.split('\n').filter(l => l.trim());
+                buffer += decoder.decode(value, { stream: true });
 
-                for (const line of lines) {
-                    try {
-                        const parsed = JSON.parse(line);
-                        if (parsed.type === 'sources') {
-                            assistantMessage.sources = parsed.data;
-                        } else if (parsed.type === 'chunk') {
-                            assistantMessage.content += parsed.data;
-                        }
-                        // Schedule a batched update
-                        pendingUpdate = () => {
-                            messages[messages.length - 1] = { ...assistantMessage };
-                        };
-                        const now = Date.now();
-                        if (now - lastFlush >= FLUSH_INTERVAL) {
-                            flushUpdate();
-                        }
-                    } catch (e) {
-                        console.error('Failed to parse stream chunk:', line, e);
-                    }
+                // Split off complete lines; keep the last (possibly partial) piece.
+                let newlineIdx: number;
+                while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
+                    const line = buffer.slice(0, newlineIdx);
+                    buffer = buffer.slice(newlineIdx + 1);
+                    processLine(line);
                 }
             }
+            // Flush the decoder and process any trailing line without a newline.
+            buffer += decoder.decode();
+            if (buffer.trim()) processLine(buffer);
+
             // Flush any remaining batch
             flushUpdate();
         } catch (err) {
@@ -382,7 +400,7 @@ import BookOpen from 'lucide-svelte/icons/book-open';
             <div class="flex items-center gap-3">
                 <ThemeToggle />
                 <div class="h-4 w-px bg-slate-800"></div>
-                <span class="text-[10px] font-bold text-[var(--text-faintest)] uppercase tracking-widest">v1.0.4</span>
+                <span class="text-[10px] font-bold text-[var(--text-faintest)] uppercase tracking-widest">v1.1.0</span>
             </div>
         </header>
 

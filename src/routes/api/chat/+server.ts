@@ -147,9 +147,21 @@ export async function POST({ request, locals }) {
                 console.error('Stream error:', err);
                 controller.enqueue(new TextEncoder().encode(JSON.stringify({ type: 'error', data: 'Stream failed' }) + '\n'));
             } finally {
-                // Save assistant response to history
+                // Save assistant response to history, together with the source
+                // documents used — trimmed to identifiers and de-duplicated — so
+                // past conversations can trace answers back to their sources.
                 if (fullResponse) {
-                    db.prepare('INSERT INTO chat_history (user_id, role, content, conversation_id) VALUES (?, ?, ?, ?)').run(user.id, 'assistant', fullResponse, currentConversationId);
+                    const seen = new Set<string>();
+                    const sourceIds = relevantChunks
+                        .map((c: any) => ({ filename: c.filename, path: c.path ?? null }))
+                        .filter((s: any) => {
+                            const key = s.path || s.filename;
+                            if (!key || seen.has(key)) return false;
+                            seen.add(key);
+                            return true;
+                        });
+                    const sourcesJson = sourceIds.length > 0 ? JSON.stringify(sourceIds) : null;
+                    db.prepare('INSERT INTO chat_history (user_id, role, content, conversation_id, sources) VALUES (?, ?, ?, ?, ?)').run(user.id, 'assistant', fullResponse, currentConversationId, sourcesJson);
                     db.prepare('UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(currentConversationId);
                 }
                 controller.close();

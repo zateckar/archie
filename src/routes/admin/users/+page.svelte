@@ -118,7 +118,14 @@ import ChevronRight from 'lucide-svelte/icons/chevron-right';
     }
 
     let filteredUsers = $derived(
-        users.filter(u => u.username.toLowerCase().includes(searchQuery.toLowerCase()))
+        users.filter(u => {
+            const q = searchQuery.toLowerCase();
+            return (
+                u.username?.toLowerCase().includes(q) ||
+                u.display_name?.toLowerCase().includes(q) ||
+                u.email?.toLowerCase().includes(q)
+            );
+        })
     );
 </script>
 
@@ -187,6 +194,7 @@ import ChevronRight from 'lucide-svelte/icons/chevron-right';
                 <thead>
                     <tr class="bg-[var(--bg-slate-800-30)]">
                         <th class="p-6 text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider">User</th>
+                        <th class="p-6 text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider">Email</th>
                         <th class="p-6 text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider">Role</th>
                         <th class="p-6 text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider">Provider</th>
                         <th class="p-6 text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider">Created</th>
@@ -196,13 +204,13 @@ import ChevronRight from 'lucide-svelte/icons/chevron-right';
                 <tbody class="divide-y divide-[var(--border-primary)]">
                     {#if loading}
                         <tr>
-                            <td colspan="5" class="p-12 text-center">
+                            <td colspan="6" class="p-12 text-center">
                                 <Loader2 class="w-8 h-8 animate-spin mx-auto text-[var(--text-faint)]" />
                             </td>
                         </tr>
                     {:else if filteredUsers.length === 0}
                         <tr>
-                            <td colspan="5" class="p-12 text-center text-[var(--text-faint)] italic">No users found.</td>
+                            <td colspan="6" class="p-12 text-center text-[var(--text-faint)] italic">No users found.</td>
                         </tr>
                     {:else}
                         {#each filteredUsers as user}
@@ -212,8 +220,20 @@ import ChevronRight from 'lucide-svelte/icons/chevron-right';
                                         <div class="w-10 h-10 rounded-xl bg-[var(--bg-slate-800)] flex items-center justify-center text-[var(--text-muted)]">
                                             <User class="w-5 h-5" />
                                         </div>
-                                        <span class="font-medium text-[var(--text-secondary)]">{user.username}</span>
+                                        <div class="flex flex-col">
+                                            <span class="font-medium text-[var(--text-secondary)]">{user.display_name || user.username}</span>
+                                            {#if user.display_name}
+                                                <span class="text-xs text-[var(--text-faint)]">@{user.username}</span>
+                                            {/if}
+                                        </div>
                                     </div>
+                                </td>
+                                <td class="p-6">
+                                    {#if user.email}
+                                        <span class="text-sm text-[var(--text-muted)]">{user.email}</span>
+                                    {:else}
+                                        <span class="text-sm text-[var(--text-faint)] italic">—</span>
+                                    {/if}
                                 </td>
                                 <td class="p-6">
                                     <button 

@@ -1,6 +1,10 @@
 import 'dotenv/config';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import * as providers from './providers';
 
+// Gemini model ids. These are used as the FALLBACK provider — every model call
+// below goes through ./providers, which prefers the custom LiteLLM gateway
+// (LLM_* env vars) when configured and transparently falls back to these
+// Gemini models otherwise (or on a LiteLLM error).
 let apiKey = process.env.GEMINI_API_KEY || '';
 const TEXT_MODEL = process.env.TEXT_MODEL || "gemini-3-flash-preview";
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "gemini-embedding-2";
@@ -15,8 +19,6 @@ try {
 } catch (e) {
     // Not in SvelteKit environment
 }
-
-const genAI = new GoogleGenerativeAI(apiKey);
 
 // ── Sampling configuration ────────────────────────────────────────────────
 // Every generateContent() call in this file previously relied on the SDK's
@@ -107,13 +109,78 @@ const LEADING_STOPWORDS = new Set([
     'A', 'An', 'It', 'Its', 'They', 'Their', 'Such', 'Both', 'Either'
 ]);
 
-function extractSignificantTokens(text: string): Set<string> {
-    const tokens = new Set<string>();
+// Section/outline numbering that cleaning is *supposed* to strip or reformat:
+// leading list/heading numbers like "1.", "1.2", "1.2.3", "31.11.1", "52.12."
+// (optionally with trailing punctuation), i.e. 2–3 dotted groups. These look
+// like "numbers" to a naive extractor but are structural artifacts (TOC entries,
+// numbered headings/steps), not substantive content. Counting them as
+// "significant tokens" made the preservation check punish the cleaner for doing
+// exactly what it was told to do (remove TOC entries / restructure numbering),
+// discarding otherwise-good cleaning.
+//
+// Deliberately limited to 2–3 groups so that 4-group dotted-decimals (IPv4
+// addresses like 193.108.108.209) are NOT treated as structural — those are real
+// content and must still be verified as preserved.
+const SECTION_NUMBERING = /^\d{1,3}(?:\.\d{1,3}){1,2}\.?$/;
+
+// Normalizes a token for a loose "did it survive the rewrite?" comparison:
+// lowercased, with commas and surrounding punctuation collapsed so that a value
+// re-rendered with different spacing/formatting (e.g. an IP or version number
+// beside reformatted markdown) still matches its source rather than being
+// falsely reported as dropped.
+function normalizeForMatch(token: string): string {
+    return token.toLowerCase().replace(/,/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Matches lowercase technical tokens the old extractor was completely blind to:
+ * identifiers with internal punctuation or mixed letters+digits that a cleaning
+ * pass could silently drop or garble while every capitalized/numeric token
+ * still survived. Examples: `max_connections`, `utf-8`, `v1.2.3`, `chmod`,
+ * `git-rebase`, `.tar.gz`, `0x1F`, `--force`, `api/v2`. These are exactly the
+ * high-value content that "numbers + ALLCAPS acronyms + Proper Nouns" misses,
+ * so they're treated as HARD tokens (must survive verbatim — cleaning is now
+ * deletion-only, so any real technical term either survives untouched or was
+ * dropped, and dropping one is real data loss).
+ */
+const TECHNICAL_TOKEN = /(?:[A-Za-z]+[._/\-][A-Za-z0-9._/\-]*[A-Za-z0-9]|[a-z]+\d[A-Za-z0-9]*|\d+[a-z]+[A-Za-z0-9]*|0x[0-9A-Fa-f]+|--?[a-z][a-z0-9-]+)/g;
+
+/**
+ * Significant tokens split into two classes:
+ *   - `hard`: numbers, percentages, dates, acronyms, and lowercase technical
+ *     identifiers. Cleaning is now deletion + reformatting only (no paraphrase,
+ *     no translation), so any of these either survives verbatim or was dropped —
+ *     and a drop is a reliable signal of real data loss.
+ *   - `soft`: multi-word proper-noun-looking phrases. Useful diagnostics, but
+ *     reformatting can legitimately reshape their surrounding punctuation, so
+ *     they don't gate the ratio on their own.
+ */
+function extractSignificantTokens(text: string): { hard: Set<string>; soft: Set<string> } {
+    const hard = new Set<string>();
+    const soft = new Set<string>();
+
+    // Numbers/percentages, but skip pure section-outline numbering (see above).
     const numberMatches = text.match(/\b\d[\d,.]*%?\b/g) || [];
-    for (const n of numberMatches) if (n.replace(/[.,]/g, '').length > 0) tokens.add(n);
+    for (const n of numberMatches) {
+        if (n.replace(/[.,]/g, '').length === 0) continue;
+        if (SECTION_NUMBERING.test(n)) continue; // structural, not content
+        hard.add(n);
+    }
 
     const dateMatches = text.match(/\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g) || [];
-    for (const d of dateMatches) tokens.add(d);
+    for (const d of dateMatches) hard.add(d);
+
+    const acronyms = text.match(/\b[A-Z]{2,}\b/g) || [];
+    for (const a of acronyms) hard.add(a);
+
+    // Lowercase/mixed technical identifiers — previously invisible to the check.
+    const techMatches = text.match(TECHNICAL_TOKEN) || [];
+    for (const t of techMatches) {
+        // Ignore trivially short matches and section numbering that slipped through.
+        if (t.length < 3) continue;
+        if (SECTION_NUMBERING.test(t)) continue;
+        hard.add(t);
+    }
 
     const properNounMatches = text.match(/\b[A-Z][A-Za-z0-9]*(?:[-\s][A-Z][A-Za-z0-9]*){1,3}\b/g) || [];
     for (const raw of properNounMatches) {
@@ -121,106 +188,262 @@ function extractSignificantTokens(text: string): Set<string> {
         while (words.length > 1 && LEADING_STOPWORDS.has(words[0])) words.shift();
         const cleaned = words.join(' ');
         if (words.length >= 2 || (words.length === 1 && !LEADING_STOPWORDS.has(words[0]))) {
-            tokens.add(cleaned);
+            soft.add(cleaned);
         }
     }
 
-    const acronyms = text.match(/\b[A-Z]{2,}\b/g) || [];
-    for (const a of acronyms) tokens.add(a);
-
-    return tokens;
+    return { hard, soft };
 }
 
 /**
- * Compares the significant tokens (numbers, dates, proper nouns, acronyms)
- * found in `original` against `rewritten`, returning what fraction survived
- * and a sample of what's missing. Used as a content-preservation safety net
- * after `cleanDocument`'s LLM rewrite — a pure length check (the previous
- * only safeguard) cannot catch an LLM that drops a specific number or name
- * while otherwise producing plausible, correctly-sized prose.
- */
-function checkContentPreservation(original: string, rewritten: string): { preservedRatio: number; missing: string[] } {
-    const originalTokens = extractSignificantTokens(original);
-    if (originalTokens.size === 0) return { preservedRatio: 1, missing: [] };
-
-    const rewrittenLower = rewritten.toLowerCase();
-    let preserved = 0;
-    const missing: string[] = [];
-    for (const token of originalTokens) {
-        if (rewrittenLower.includes(token.toLowerCase())) {
-            preserved++;
-        } else {
-            missing.push(token);
-        }
-    }
-    return { preservedRatio: preserved / originalTokens.size, missing };
-}
-
-/**
- * Cleans and restructures a document using LLM.
- * Removes noise, improves formatting, creates logical structure.
- * For large documents, splits into chunks and processes each.
- * Always uses LLM — no regex fallback.
+ * Compares significant tokens found in `original` against `cleaned`, returning
+ * what fraction survived and a sample of what's missing. Used as a
+ * content-preservation safety net after `cleanDocument` — a pure length check
+ * cannot catch a pass that drops a specific number, technical term, or name
+ * while otherwise producing plausible, correctly-sized output.
  *
- * Safety nets against silent information loss (the highest-risk step in the
- * ingestion pipeline, since everything downstream — chunking, extraction,
- * embeddings — operates on this function's output, not the original text):
- *   1. Length check: reject if the cleaned text is implausibly short.
- *   2. Content-preservation check: verify that numbers, dates, proper nouns,
- *      and acronyms from the source still appear in the cleaned output.
- * Either check failing falls back to the original (or original chunk) text
- * rather than risk shipping a rewrite that quietly dropped a figure or name.
+ * The ratio is driven by the `hard` token class (numbers, dates, acronyms, and
+ * lowercase technical identifiers). Because cleaning is now deletion +
+ * reformatting only (no paraphrase, no translation), a hard token either
+ * survives verbatim or was genuinely dropped — so its disappearance is a
+ * reliable data-loss signal. `soft` proper-noun tokens are reported in the
+ * `missing` sample for diagnostics but do NOT gate the ratio on their own.
+ * When a document has no hard tokens at all, soft tokens are used as a fallback.
  */
-export async function cleanDocument(text: string): Promise<string> {
-    // Very short documents don't need cleaning
-    if (text.length < 200) return text;
+function checkContentPreservation(original: string, cleaned: string): { preservedRatio: number; missing: string[] } {
+    const { hard, soft } = extractSignificantTokens(original);
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: REWRITE_CONFIG });
+    // Compare against a normalized copy of the cleaned text so that a value which
+    // survived but was re-rendered with different punctuation/spacing (common
+    // for IPs, version numbers, and figures next to reformatted markdown) is
+    // still counted as preserved rather than falsely flagged as dropped.
+    //
+    // Matching is boundary-aware rather than a bare substring test: previously
+    // `includes("30")` counted "30" as preserved if "300", "2030", or "v3.0"
+    // appeared anywhere, over-crediting survival and masking real drops. We pad
+    // the haystack with spaces and require the token to sit against a non-alnum
+    // boundary on both sides (numbers/words) so "30" no longer matches inside
+    // "300", while punctuation-bearing technical tokens (utf-8, v1.2.3) still do.
+    const rewrittenNorm = ` ${normalizeForMatch(cleaned)} `;
+    const survives = (token: string) => {
+        const t = normalizeForMatch(token);
+        if (!t) return true;
+        const idx = rewrittenNorm.indexOf(t);
+        if (idx === -1) return false;
+        const isWordChar = (ch: string) => /[a-z0-9]/.test(ch);
+        const startsWord = isWordChar(t[0]);
+        const endsWord = isWordChar(t[t.length - 1]);
+        // Scan every occurrence; accept if any sits on clean boundaries.
+        let from = idx;
+        while (from !== -1) {
+            const before = rewrittenNorm[from - 1] ?? ' ';
+            const after = rewrittenNorm[from + t.length] ?? ' ';
+            const okBefore = !startsWord || !isWordChar(before);
+            const okAfter = !endsWord || !isWordChar(after);
+            if (okBefore && okAfter) return true;
+            from = rewrittenNorm.indexOf(t, from + 1);
+        }
+        return false;
+    };
+
+    let hardPreserved = 0;
+    const missing: string[] = [];
+    for (const token of hard) {
+        if (survives(token)) hardPreserved++;
+        else missing.push(token);
+    }
+    // Soft tokens: diagnostics only (surfaced in the sample), don't gate the ratio.
+    for (const token of soft) {
+        if (!survives(token)) missing.push(token);
+    }
+
+    // Prefer the hard-token ratio. Fall back to soft tokens only when there are
+    // no hard tokens to judge by; if there's nothing to check at all, pass.
+    let preservedRatio: number;
+    if (hard.size > 0) {
+        preservedRatio = hardPreserved / hard.size;
+    } else if (soft.size > 0) {
+        let softPreserved = 0;
+        for (const token of soft) if (survives(token)) softPreserved++;
+        preservedRatio = softPreserved / soft.size;
+    } else {
+        preservedRatio = 1;
+    }
+
+    return { preservedRatio, missing };
+}
+
+export interface CleanRemoval {
+    text: string;
+    reason?: string;
+    category?: string;
+}
+
+export interface CleanResult {
+    /** The cleaned document text. */
+    text: string;
+    /** Structured audit log of spans the cleaner removed, and why. */
+    removals: CleanRemoval[];
+    /** 'cleaned' = accepted; 'cleaned_flagged' = accepted but some loss detected;
+     *  'fell_back' = cleaning was catastrophic, original text kept. */
+    verdict: 'cleaned' | 'cleaned_flagged' | 'fell_back';
+    /** Fraction of significant source tokens that survived cleaning (0..1). */
+    preservedRatio: number;
+}
+
+// ── Cleaning verification thresholds ────────────────────────────────────────
+// Per the design decision: clean AGGRESSIVELY but only fall back to the raw
+// document when cleaning went *catastrophically* wrong — not on mere rewording
+// or moderate token loss. Because cleaning is now deletion + reformatting only
+// (no paraphrase, no translation), a low preserved-token ratio genuinely means
+// real content was dropped, so the two catastrophe signals are:
+//   1. The output is a tiny fraction of the input (>50% of *length* gone), OR
+//   2. More than half of the source's significant tokens vanished.
+// Anything between "perfect" and "catastrophic" is accepted but flagged in the
+// audit log for review, rather than discarded.
+const CATASTROPHIC_LENGTH_RATIO = 0.5;   // reject if cleaned < 50% of original length
+const CATASTROPHIC_TOKEN_LOSS = 0.5;     // reject if < 50% of significant tokens survive
+const FLAG_TOKEN_LOSS = 0.9;             // flag (but keep) if < 90% survive
+
+const KNOWN_NOISE_CATEGORIES = new Set([
+    'page_number', 'header_footer', 'navigation', 'table_of_contents', 'toc',
+    'boilerplate', 'disclaimer', 'metadata', 'pdf_artifact', 'formatting_artifact',
+    'placeholder', 'empty_section', 'template_instruction', 'duplicate', 'watermark',
+    'line_break_fix', 'whitespace', 'other'
+]);
+
+/**
+ * Cleans a document by REMOVING non-informational noise and REFORMATTING —
+ * never by paraphrasing, summarizing, reordering, or translating. This is a
+ * deliberate, conservative contract: everything downstream (chunking,
+ * extraction, embeddings, and the text shown to users) depends on this output,
+ * so the cleaner is only allowed to *delete* junk and fix *formatting*, using
+ * the document's own words verbatim for everything it keeps.
+ *
+ * Returns a structured result including an audit log of what was removed and a
+ * verification verdict. The caller (addDocument) persists this so aggressive
+ * removal stays inspectable. Falls back to the original text only when cleaning
+ * was catastrophic (see thresholds above), not on ordinary editing.
+ */
+export async function cleanDocument(text: string): Promise<CleanResult> {
+    // Very short documents don't need cleaning
+    if (text.length < 200) {
+        return { text, removals: [], verdict: 'cleaned', preservedRatio: 1 };
+    }
 
     const buildPrompt = (chunk: string, isPartial: boolean, prevTailContext?: string) => `
-        You are an expert document editor and preprocessor. Transform the following ${isPartial ? 'section of a ' : ''}document into a clean, well-structured, professional version:
+        You are a meticulous document cleaner. Your ONLY job is to strip non-informational noise and fix formatting in the following ${isPartial ? 'section of a ' : ''}document. You are NOT an editor or a writer.
 
-        1. **Remove noise**: Strip boilerplate headers/footers, navigation elements, page numbers, repetitive disclaimers, auto-generated metadata, table of contents entries, and formatting artifacts.
-        2. **Remove valueless content**: Remove empty sections, placeholder text, "TODO" markers, template instructions, and content that carries no informational value.
-        3. **Restructure for clarity**: Organize content into logical sections with clear markdown headers (##, ###). Group related information together. Ensure a coherent logical flow from general concepts to specific details.
-        4. **Improve formatting**: Use proper markdown throughout — headers for sections, bullet lists for enumerations, numbered lists for sequential steps/procedures, tables for structured data, bold for key terms and definitions. Fix broken line breaks, garbled unicode, and normalize whitespace.
-        5. **Enhance readability**: Write clear topic sentences for sections. Ensure paragraphs flow logically. Break up walls of text into digestible chunks.
-        6. **Preserve ALL substantive content**: Every meaningful fact, procedure, policy, requirement, technical detail, and piece of knowledge must be preserved. Do NOT omit, summarize, or condense any information. Numbers, dates, thresholds, names, and acronyms must be carried over EXACTLY as written.
-        7. **Standardize to English**: If the document is in any language other than English, translate all content to English while preserving the original meaning, terminology, and technical accuracy. If the document is already in English, keep it as-is.
+        STRICT RULES — follow exactly:
+        1. **DELETE noise only**: Remove page numbers, running headers/footers, navigation elements, table-of-contents entries, repeated boilerplate/disclaimers, auto-generated metadata, watermarks, PDF-conversion artifacts, empty/placeholder sections, "TODO"/template instructions, and other content that carries NO informational value.
+        2. **FIX formatting**: Repair broken line breaks, de-hyphenate words split across lines, fix garbled unicode, normalize whitespace, and re-apply clean markdown structure (headers, bullet/numbered lists, tables) to content that is already there.
+        3. **PRESERVE everything informational VERBATIM**: Every sentence, fact, procedure, policy, requirement, number, date, threshold, name, code snippet, command, parameter, and technical term that carries meaning MUST be kept using the document's OWN WORDS. Do NOT paraphrase, do NOT summarize, do NOT condense, do NOT reword, do NOT reorder content, and do NOT "improve" phrasing.
+        4. **DO NOT translate**: Keep the document in its ORIGINAL LANGUAGE. Never translate any content.
+        5. **DO NOT invent**: Never add sentences, transitions, topic sentences, or commentary that were not in the source.
 
-        The output must be a polished, well-organized markdown document written entirely in English with the same informational content but significantly improved structure and readability.
-        ${isPartial ? '\nNote: This is a section of a larger document. Maintain coherent structure within this section and do not add an overall title.' : ''}
-        ${prevTailContext ? `\nEND OF THE PREVIOUS SECTION (already cleaned; shown ONLY so headings, terminology, and tone stay consistent — do NOT repeat, re-output, or continue this text, just pick up coherently after it):\n"""\n${prevTailContext}\n"""\n` : ''}
+        In short: if a line is noise, delete it; if it carries information, keep its exact wording (fixing only formatting). When in doubt whether something is informational, KEEP it.
+        ${isPartial ? '\nNote: This is a section of a larger document. Do not add an overall title.' : ''}
+        ${prevTailContext ? `\nEND OF THE PREVIOUS SECTION (already cleaned; shown ONLY so heading levels stay consistent — do NOT repeat or continue it):\n"""\n${prevTailContext}\n"""\n` : ''}
+
+        Return ONLY a JSON object of this exact shape:
+        {
+          "cleaned": "the full cleaned ${isPartial ? 'section' : 'document'} text, preserving all informational content verbatim",
+          "removals": [
+            {"text": "<the removed span, truncated to ~120 chars>", "reason": "<why it was removed>", "category": "<one of: page_number, header_footer, navigation, table_of_contents, boilerplate, disclaimer, metadata, pdf_artifact, formatting_artifact, placeholder, empty_section, template_instruction, duplicate, watermark, other>"}
+          ]
+        }
+        List every meaningful removal in "removals" (you may omit pure whitespace/line-break fixes). Do not include markdown fences.
 
         Document${isPartial ? ' section' : ''}:
         ${chunk}
     `;
 
+    interface CleanChunkResponse { cleaned?: string; removals?: CleanRemoval[]; }
+
+    // Runs the cleaning prompt for one chunk and parses the structured response.
+    // Returns null on hard failure (LLM error / unparseable) so the caller can
+    // retry once before deciding to fall back.
+    const cleanOneChunk = async (
+        chunk: string,
+        isPartial: boolean,
+        prevTailContext?: string
+    ): Promise<{ cleaned: string; removals: CleanRemoval[] } | null> => {
+        try {
+            const result = await withRetry(() => providers.generateContent(buildPrompt(chunk, isPartial, prevTailContext), { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
+            const parsed = tryParseJSON<CleanChunkResponse>(result.response.text());
+            if (parsed === undefined || typeof parsed.cleaned !== 'string') return null;
+            const removals = Array.isArray(parsed.removals)
+                ? parsed.removals
+                    .filter((r): r is CleanRemoval => !!r && typeof r.text === 'string')
+                    .map(r => ({
+                        text: r.text.slice(0, 200),
+                        reason: typeof r.reason === 'string' ? r.reason : undefined,
+                        category: typeof r.category === 'string' && KNOWN_NOISE_CATEGORIES.has(r.category.toLowerCase())
+                            ? r.category.toLowerCase()
+                            : 'other'
+                    }))
+                : [];
+            return { cleaned: parsed.cleaned.trim(), removals };
+        } catch (e) {
+            console.error('[CleanDocument] Cleaning call failed:', e);
+            return null;
+        }
+    };
+
+    // Verifies one cleaned chunk against its source. Returns the accepted text
+    // (cleaned or original), a verdict, and the preserved ratio. Only falls back
+    // when catastrophic; otherwise accepts (flagging moderate loss).
+    const verifyChunk = (
+        source: string,
+        cleaned: string,
+        label: string
+    ): { text: string; verdict: 'cleaned' | 'cleaned_flagged' | 'fell_back'; preservedRatio: number } => {
+        if (cleaned.length < source.length * CATASTROPHIC_LENGTH_RATIO) {
+            console.warn(`[CleanDocument] ${label}: cleaning removed ${Math.round((1 - cleaned.length / source.length) * 100)}% of length (catastrophic) — keeping original.`);
+            return { text: source, verdict: 'fell_back', preservedRatio: 0 };
+        }
+        const { preservedRatio, missing } = checkContentPreservation(source, cleaned);
+        if (preservedRatio < CATASTROPHIC_TOKEN_LOSS) {
+            console.warn(`[CleanDocument] ${label}: only ${Math.round(preservedRatio * 100)}% of significant tokens survived (catastrophic) — keeping original. Sample missing: ${missing.slice(0, 10).join(', ')}`);
+            return { text: source, verdict: 'fell_back', preservedRatio };
+        }
+        if (preservedRatio < FLAG_TOKEN_LOSS) {
+            console.warn(`[CleanDocument] ${label}: ${Math.round(preservedRatio * 100)}% of significant tokens survived (accepted, flagged for review). Sample missing: ${missing.slice(0, 10).join(', ')}`);
+            return { text: cleaned, verdict: 'cleaned_flagged', preservedRatio };
+        }
+        return { text: cleaned, verdict: 'cleaned', preservedRatio };
+    };
+
+    // Cleans a chunk with one retry on hard failure, then verifies (with a high
+    // fallback bar). Aggregates removals from whichever attempt succeeded.
+    const cleanAndVerifyChunk = async (
+        chunk: string,
+        isPartial: boolean,
+        label: string,
+        prevTailContext?: string
+    ): Promise<{ text: string; verdict: 'cleaned' | 'cleaned_flagged' | 'fell_back'; preservedRatio: number; removals: CleanRemoval[] }> => {
+        let attempt = await cleanOneChunk(chunk, isPartial, prevTailContext);
+        if (attempt === null) {
+            console.warn(`[CleanDocument] ${label}: cleaning failed, retrying once...`);
+            attempt = await cleanOneChunk(chunk, isPartial, prevTailContext);
+        }
+        if (attempt === null) {
+            console.error(`[CleanDocument] ${label}: cleaning failed after retry — keeping original chunk.`);
+            return { text: chunk, verdict: 'fell_back', preservedRatio: 0, removals: [] };
+        }
+        const verified = verifyChunk(chunk, attempt.cleaned, label);
+        // If we fell back, the removals didn't actually take effect on stored text.
+        return {
+            ...verified,
+            removals: verified.verdict === 'fell_back' ? [] : attempt.removals
+        };
+    };
+
     const CHUNK_SIZE = 80000; // ~80K chars per chunk, well within 1M token context
 
     if (text.length <= CHUNK_SIZE) {
-        // Single pass for normal-sized documents
-        try {
-            const result = await withRetry(() => model.generateContent(buildPrompt(text, false)));
-            const cleaned = result.response.text().trim();
-            // Safety 1: if cleaning removed more than 90% of content, something went wrong
-            if (cleaned.length < text.length * 0.1) {
-                console.warn(`[CleanDocument] Cleaning removed ${Math.round((1 - cleaned.length / text.length) * 100)}% of content — using original`);
-                return text;
-            }
-            // Safety 2: verify numbers/dates/names/acronyms survived the rewrite
-            const { preservedRatio, missing } = checkContentPreservation(text, cleaned);
-            if (preservedRatio < 0.7) {
-                console.warn(`[CleanDocument] Only ${Math.round(preservedRatio * 100)}% of significant tokens preserved after cleaning — using original. Sample missing: ${missing.slice(0, 10).join(', ')}`);
-                return text;
-            } else if (preservedRatio < 0.9) {
-                console.warn(`[CleanDocument] ${Math.round(preservedRatio * 100)}% of significant tokens preserved after cleaning (some loss detected). Sample missing: ${missing.slice(0, 10).join(', ')}`);
-            }
-            return cleaned;
-        } catch (e) {
-            console.error('Document cleaning failed:', e);
-            return text;
-        }
+        const r = await cleanAndVerifyChunk(text, false, 'document');
+        return { text: r.text, removals: r.removals, verdict: r.verdict, preservedRatio: r.preservedRatio };
     }
 
     // For large documents: split by section headers, clean each chunk, reassemble
@@ -229,39 +452,39 @@ export async function cleanDocument(text: string): Promise<string> {
     console.log(`[CleanDocument] Large document (${text.length} chars), split into ${chunks.length} chunks for cleaning`);
 
     // Cross-section context: previously each 80K-char section was cleaned in
-    // total isolation, which could produce inconsistent heading structure/tone
-    // across the reassembled document (the same class of problem cross-chunk
-    // context already fixed for knowledge extraction, applied here to the
-    // stage that runs before — and everything downstream depends on).
+    // total isolation, which could produce inconsistent heading structure across
+    // the reassembled document.
     const PREV_TAIL_CONTEXT_CHARS = 600;
     const cleanedChunks: string[] = [];
-    for (const chunk of chunks) {
+    const allRemovals: CleanRemoval[] = [];
+    let anyFlagged = false;
+    let anyFellBack = false;
+    let ratioSum = 0;
+    for (let ci = 0; ci < chunks.length; ci++) {
+        const chunk = chunks[ci];
         const prevTailContext = cleanedChunks.length > 0
             ? cleanedChunks[cleanedChunks.length - 1].slice(-PREV_TAIL_CONTEXT_CHARS)
             : undefined;
-        try {
-            const result = await withRetry(() => model.generateContent(buildPrompt(chunk, chunks.length > 1, prevTailContext)));
-            const cleaned = result.response.text().trim();
-
-            if (!cleaned || cleaned.length < chunk.length * 0.1) {
-                console.warn(`[CleanDocument] Chunk cleaning removed too much content — using original chunk.`);
-                cleanedChunks.push(chunk);
-                continue;
-            }
-            const { preservedRatio, missing } = checkContentPreservation(chunk, cleaned);
-            if (preservedRatio < 0.7) {
-                console.warn(`[CleanDocument] Chunk cleaning preserved only ${Math.round(preservedRatio * 100)}% of significant tokens — using original chunk. Sample missing: ${missing.slice(0, 10).join(', ')}`);
-                cleanedChunks.push(chunk);
-                continue;
-            }
-            cleanedChunks.push(cleaned);
-        } catch (e) {
-            console.error(`[CleanDocument] Chunk cleaning failed, using original chunk:`, e);
-            cleanedChunks.push(chunk);
-        }
+        const r = await cleanAndVerifyChunk(chunk, chunks.length > 1, `section ${ci + 1}/${chunks.length}`, prevTailContext);
+        cleanedChunks.push(r.text);
+        allRemovals.push(...r.removals);
+        ratioSum += r.preservedRatio;
+        if (r.verdict === 'cleaned_flagged') anyFlagged = true;
+        if (r.verdict === 'fell_back') anyFellBack = true;
     }
 
-    return cleanedChunks.join('\n\n');
+    const verdict: CleanResult['verdict'] = anyFellBack
+        ? 'cleaned_flagged' // some section kept raw — treat whole doc as needing review, not a full failure
+        : anyFlagged
+            ? 'cleaned_flagged'
+            : 'cleaned';
+
+    return {
+        text: cleanedChunks.join('\n\n'),
+        removals: allRemovals,
+        verdict,
+        preservedRatio: chunks.length > 0 ? ratioSum / chunks.length : 1
+    };
 }
 
 const SUMMARY_SECTION_MAX_CHARS = 80000;
@@ -279,8 +502,6 @@ const SUMMARY_SECTION_MAX_CHARS = 80000;
  */
 export async function summarizeDocument(text: string, filename: string): Promise<string> {
     if (text.length < 100) return text; // Too short to summarize
-
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: SUMMARY_CONFIG });
 
     const buildSectionPrompt = (chunk: string, isPartial: boolean) => `
         You are an expert document analyst. Create a comprehensive summary of the following ${isPartial ? 'section of a ' : ''}document that captures its complete meaning and purpose.
@@ -305,7 +526,7 @@ export async function summarizeDocument(text: string, filename: string): Promise
 
     if (text.length <= SUMMARY_SECTION_MAX_CHARS) {
         try {
-            const result = await withRetry(() => model.generateContent(buildSectionPrompt(text, false)));
+            const result = await withRetry(() => providers.generateContent(buildSectionPrompt(text, false), { model: TEXT_MODEL }, SUMMARY_CONFIG));
             return result.response.text().trim();
         } catch (e) {
             console.error('Document summarization failed:', e);
@@ -321,7 +542,7 @@ export async function summarizeDocument(text: string, filename: string): Promise
     const sectionSummaries: string[] = [];
     for (const section of sections) {
         try {
-            const result = await withRetry(() => model.generateContent(buildSectionPrompt(section, sections.length > 1)));
+            const result = await withRetry(() => providers.generateContent(buildSectionPrompt(section, sections.length > 1), { model: TEXT_MODEL }, SUMMARY_CONFIG));
             const summary = result.response.text().trim();
             if (summary) sectionSummaries.push(summary);
         } catch (e) {
@@ -353,7 +574,7 @@ export async function summarizeDocument(text: string, filename: string): Promise
     `;
 
     try {
-        const result = await withRetry(() => model.generateContent(mergePrompt));
+        const result = await withRetry(() => providers.generateContent(mergePrompt, { model: TEXT_MODEL }, SUMMARY_CONFIG));
         const merged = result.response.text().trim();
         return merged || sectionSummaries.join('\n\n');
     } catch (e) {
@@ -363,16 +584,10 @@ export async function summarizeDocument(text: string, filename: string): Promise
 }
 
 export async function getEmbedding(text: string, taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_DOCUMENT", title?: string) {
-    // Use v1beta for embedding
-    const model = genAI.getGenerativeModel({ model: EMBEDDING_MODEL });
-    const req: any = {
-        content: { role: "user", parts: [{ text }] },
-        taskType: taskType,
-    };
-    if (title && taskType === "RETRIEVAL_DOCUMENT") {
-        req.title = title;
-    }
-    const result = await withRetry(() => model.embedContent(req));
+    // Primary: LiteLLM embeddings; fallback: Gemini EMBEDDING_MODEL. The
+    // taskType/title retrieval hints are Gemini-specific and only applied on the
+    // fallback path (see providers.embedContent).
+    const result = await withRetry(() => providers.embedContent(text, { model: EMBEDDING_MODEL }, taskType, title));
     return result.embedding.values;
 }
 
@@ -384,8 +599,6 @@ export interface QueryAnalysis {
 }
 
 export async function analyzeQuery(prompt: string, history: { role: string, content: string }[] = []): Promise<QueryAnalysis> {
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
-
     const historyContext = history.length > 0
         ? `Previous conversation:\n${history.slice(-3).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n`
         : '';
@@ -419,7 +632,7 @@ export async function analyzeQuery(prompt: string, history: { role: string, cont
     `;
 
     try {
-        const result = await withRetry(() => model.generateContent(analysisPrompt));
+        const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const text = result.response.text();
         return parseJSON<QueryAnalysis>(text, {
             needsClarification: false,
@@ -447,8 +660,6 @@ export async function analyzeQuery(prompt: string, history: { role: string, cont
  * retry path only needs condensing).
  */
 export async function analyzeAndCondenseQuery(prompt: string, history: { role: string, content: string }[] = []): Promise<QueryAnalysis> {
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
-
     const historyContext = history.length > 0
         ? `Previous conversation:\n${history.slice(-5).map(m => `${m.role}: ${m.content}`).join('\n')}\n\n`
         : '';
@@ -480,7 +691,7 @@ export async function analyzeAndCondenseQuery(prompt: string, history: { role: s
     `;
 
     try {
-        const result = await withRetry(() => model.generateContent(analysisPrompt));
+        const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const text = result.response.text();
         return parseJSON<QueryAnalysis>(text, {
             needsClarification: false,
@@ -501,7 +712,6 @@ export async function condenseQuery(history: { role: string, content: string }[]
     if (history.length === 0) return prompt;
 
     try {
-        const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: { temperature: 0.1 } });
         const condensePrompt = `
             Given the following conversation history and a follow-up question, rephrase the follow-up question to be a standalone search query that captures the user's intent, including any necessary context from the history.
             If the follow-up question is already a standalone question or doesn't depend on history, return it as is.
@@ -515,7 +725,7 @@ export async function condenseQuery(history: { role: string, content: string }[]
             Standalone Search Query:
         `;
 
-        const result = await withRetry(() => model.generateContent(condensePrompt));
+        const result = await withRetry(() => providers.generateContent(condensePrompt, { model: TEXT_MODEL }, { temperature: 0.1 }));
         const text = result.response.text().trim();
         return text || prompt;
     } catch (e) {
@@ -570,8 +780,6 @@ export async function synthesizeContext(
     verbatimExcerpts: string,
     conversationSummary?: string
 ): Promise<string> {
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: SYNTHESIS_CONFIG });
-
     const prompt = `You are preparing a knowledge briefing for an AI assistant who will answer a user's question. Your job is to transform raw retrieved data into a clear, organized briefing.
 
 USER QUESTION: "${query}"
@@ -598,7 +806,7 @@ OUTPUT FORMAT:
 Write the briefing as a knowledge document. Use ## headers for major sub-topics only if the briefing covers multiple distinct areas. Otherwise, write flowing prose paragraphs.`;
 
     try {
-        const result = await withRetry(() => model.generateContent(prompt));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, SYNTHESIS_CONFIG));
         const synthesized = result.response.text().trim();
         // Safety: if synthesis is suspiciously short vs. input, fall back
         if (synthesized.length < 50 && knowledgeContext.length > 500) {
@@ -617,7 +825,6 @@ export async function buildConversationBriefing(
 ): Promise<string> {
     if (history.length < 2) return ''; // No prior context to summarize
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: { temperature: 0.2 } });
     const recentHistory = history.slice(-8); // Last 4 exchanges
 
     const prompt = `Summarize the key facts, topics, and conclusions established in this conversation so far. Focus on:
@@ -632,7 +839,7 @@ ${recentHistory.map(m => `${m.role}: ${m.content}`).join('\n\n')}
 Write a concise summary (100-200 words) in factual prose. Do not include pleasantries or meta-commentary.`;
 
     try {
-        const result = await withRetry(() => model.generateContent(prompt));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, { temperature: 0.2 }));
         return result.response.text().trim();
     } catch (e) {
         console.error('[ConversationBriefing] Failed:', e);
@@ -641,44 +848,26 @@ Write a concise summary (100-200 words) in factual prose. Do not include pleasan
 }
 
 export async function chatStream(prompt: string, context: string, history: { role: string, content: string }[] = []) {
-    const model = genAI.getGenerativeModel({
-        model: TEXT_MODEL,
-        systemInstruction: buildSystemPrompt(context),
-        generationConfig: CHAT_CONFIG
-    });
-
-    const chatSession = model.startChat({
-        history: history.map(msg => ({
-            role: msg.role === 'user' ? 'user' : 'model',
-            parts: [{ text: msg.content }]
-        }))
-    });
-
-    const result = await withRetry(() => chatSession.sendMessageStream(prompt));
-    return result.stream;
+    // Returns an async iterable of chunks with a .text() method (LiteLLM primary,
+    // Gemini fallback) — matching what the chat endpoint's `for await` loop and
+    // its `chunk.text()` call already expect.
+    return withRetry(() =>
+        providers.startChatStream(prompt, buildSystemPrompt(context), history, { model: TEXT_MODEL }, CHAT_CONFIG)
+    );
 }
 
 export async function chat(prompt: string, context: string, history: { role: string, content: string }[] = []) {
-    const model = genAI.getGenerativeModel({
-        model: TEXT_MODEL,
-        systemInstruction: buildSystemPrompt(context),
-        generationConfig: CHAT_CONFIG
-    });
-
-    const chatSession = model.startChat({
-        history: history.map(msg => ({
-            role: msg.role === 'user' ? 'user' : 'model',
-            parts: [{ text: msg.content }]
-        }))
-    });
-
-    const result = await withRetry(() => chatSession.sendMessage(prompt));
-    const response = await result.response;
-    return response.text();
+    const stream = await withRetry(() =>
+        providers.startChatStream(prompt, buildSystemPrompt(context), history, { model: TEXT_MODEL }, CHAT_CONFIG)
+    );
+    let response = '';
+    for await (const chunk of stream) {
+        response += chunk.text();
+    }
+    return response;
 }
 
 export async function semanticChunk(text: string): Promise<string[]> {
-    const model = genAI.getGenerativeModel({ model: CHUNK_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
     const prompt = `
         You are an expert document processor. Your task is to split the following text into semantically meaningful chunks.
         Each chunk should represent a distinct topic, concept, or logical section.
@@ -690,7 +879,7 @@ export async function semanticChunk(text: string): Promise<string[]> {
         ${text}
     `;
     try {
-        const result = await withRetry(() => model.generateContent(prompt));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: CHUNK_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const responseText = result.response.text();
         return parseJSON<string[]>(responseText, []);
     } catch (e) {
@@ -714,8 +903,6 @@ export async function assessRelevance(query: string, documents: { content: strin
             suggestedRefinements: ['Try rephrasing your question', 'Add more specific terms', 'Mention the system or component you\'re asking about']
         };
     }
-
-    const model = genAI.getGenerativeModel({ model: RERANK_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
 
     const prompt = `
         You are a relevance assessor. Determine if the retrieved documents can actually answer the user's query.
@@ -741,7 +928,7 @@ export async function assessRelevance(query: string, documents: { content: strin
     `;
 
     try {
-        const result = await withRetry(() => model.generateContent(prompt));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: RERANK_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const text = result.response.text();
         return parseJSON<RelevanceAssessment>(text, {
             isRelevant: true,
@@ -770,7 +957,6 @@ export async function evaluateContext(
         };
     }
 
-    const model = genAI.getGenerativeModel({ model: RERANK_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
     const prompt = `
         You are evaluating whether retrieved context is sufficient to answer a user's question.
 
@@ -799,7 +985,7 @@ export async function evaluateContext(
     `;
 
     try {
-        const result = await withRetry(() => model.generateContent(prompt));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: RERANK_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const text = result.response.text();
         return parseJSON(text, { sufficient: true, missingAspects: [], refinedQueries: [] });
     } catch (e) {
@@ -820,8 +1006,20 @@ const RERANK_CONTENT_PREVIEW_CHARS = 500;
 export async function rerank(query: string, documents: { content: string }[]): Promise<number[]> {
     if (documents.length === 0) return [];
 
-    const model = genAI.getGenerativeModel({ model: RERANK_MODEL, generationConfig: RERANK_CONFIG });
+    // Primary: LiteLLM's native /rerank endpoint (a real cross-encoder reranker),
+    // which returns document indices ordered most→least relevant. Returns null
+    // when the gateway/rerank model is unconfigured or errors, in which case we
+    // fall back to the LLM-as-reranker prompt below.
+    try {
+        const nativeRanked = await withRetry(() =>
+            providers.rerankDocuments(query, documents.map(d => d.content.substring(0, RERANK_CONTENT_PREVIEW_CHARS)))
+        );
+        if (nativeRanked) return nativeRanked;
+    } catch (e) {
+        console.warn('Native rerank failed, falling back to LLM reranker:', (e as Error).message);
+    }
 
+    // Fallback: prompt the text model to return ranked indices.
     const prompt = `
         You are an expert reranker. Given a query and a list of document chunks, rank the chunks based on their relevance to the query.
         Return ONLY a JSON array of indices (0-based) in order of relevance, from most relevant to least relevant.
@@ -834,16 +1032,51 @@ export async function rerank(query: string, documents: { content: string }[]): P
 
         Indices:`;
 
+    const identity = documents.map((_, i) => i);
     try {
-        const result = await withRetry(() => model.generateContent(prompt));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: RERANK_MODEL }, RERANK_CONFIG));
         const text = result.response.text();
-        return parseJSON<number[]>(text, documents.map((_, i) => i));
+        const parsed = parseJSON<unknown>(text, identity);
+        // Coerce to an array of indices. OpenAI-compatible gateways in JSON mode
+        // (response_format=json_object) cannot return a bare array, so they wrap
+        // it in an object like {"indices":[...]} / {"ranking":[...]} / {"result":[...]}.
+        // Accept a bare array or the first array-valued property of such an object;
+        // otherwise fall back to the original order so callers always get an array.
+        const indices = coerceIndexArray(parsed);
+        if (indices) return indices;
+        console.warn('Reranking returned non-array/unusable shape, using original order.');
     } catch (e) {
         console.error('Reranking failed:', e);
     }
 
     // Fallback to original order if reranking fails
-    return documents.map((_, i) => i);
+    return identity;
+}
+
+/**
+ * Best-effort extraction of a numeric index array from an LLM rerank response.
+ * Handles a bare `[...]` array, an object wrapping one (e.g. `{"indices":[...]}`
+ * emitted by OpenAI-style JSON mode), and arrays of numeric strings. Returns
+ * `null` when no usable array of finite numbers can be found.
+ */
+function coerceIndexArray(value: unknown): number[] | null {
+    const toIndexArray = (arr: unknown[]): number[] | null => {
+        const nums = arr
+            .map((v) => (typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN))
+            .filter((n) => Number.isFinite(n)) as number[];
+        return nums.length > 0 ? nums : null;
+    };
+
+    if (Array.isArray(value)) return toIndexArray(value);
+    if (value && typeof value === 'object') {
+        for (const v of Object.values(value as Record<string, unknown>)) {
+            if (Array.isArray(v)) {
+                const nums = toIndexArray(v);
+                if (nums) return nums;
+            }
+        }
+    }
+    return null;
 }
 
 
@@ -894,8 +1127,6 @@ const ALLOWED_CATEGORIES = [
  * base with nothing but a console.error to show for it.
  */
 export async function extractKnowledge(text: string, existingTopicNames: string[] = [], documentSummary?: string): Promise<ExtractedKnowledge | null> {
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: EXTRACTION_CONFIG });
-
     const vocabularyHint = existingTopicNames.length > 0
         ? `
         EXISTING CANONICAL TOPICS (reuse these names verbatim whenever the same concept appears; only create a new topic if genuinely absent from this list):
@@ -966,7 +1197,7 @@ export async function extractKnowledge(text: string, existingTopicNames: string[
     `;
 
     try {
-        const result = await withRetry(() => model.generateContent(prompt));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, EXTRACTION_CONFIG));
         const responseText = result.response.text();
         const parsed = tryParseJSON<ExtractedKnowledge>(responseText);
         if (parsed === undefined) {
@@ -998,8 +1229,6 @@ export async function deriveTaxonomyPlacements(
 ): Promise<{ topicId: number; parentId: number | null }[]> {
     if (orphanTopics.length === 0) return [];
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
-
     const taxonomyDesc = existingTaxonomy.length > 0
         ? existingTaxonomy.map(t => `  - id:${t.id} "${t.name}" [${t.category}]${t.parent_topic_id ? ` (child of id:${t.parent_topic_id})` : ' (root)'}`).join('\n')
         : '  (no existing taxonomy — all topics are roots)';
@@ -1021,14 +1250,14 @@ For each new topic, decide:
 - Do NOT create circular dependencies.
 - Prefer shallow hierarchies (max 3-4 levels deep).
 
-Return ONLY a JSON array:
-[{"topicId": <number>, "parentId": <number|null>}, ...]
+Return ONLY a JSON object with an "assignments" array:
+{"assignments": [{"topicId": <number>, "parentId": <number|null>}, ...]}
 
 Include an entry for every new topic. Do not include markdown formatting.
     `;
 
     try {
-        const result = await withRetry(() => model.generateContent(prompt));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const responseText = result.response.text();
         return parseJSON<{ topicId: number; parentId: number | null }[]>(responseText, []);
     } catch (e) {
@@ -1046,7 +1275,6 @@ export async function deriveTaxonomyFull(
 ): Promise<{ topicId: number; parentId: number | null }[]> {
     if (allTopics.length === 0) return [];
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
     const results: { topicId: number; parentId: number | null }[] = [];
 
     // Batch topics to avoid context window limits (~40 per batch)
@@ -1085,17 +1313,30 @@ Rules:
 6. Preserve reasonable groupings — topics of the same category often (but not always) share a parent.
 7. Be stable: if a topic is clearly a root/top-level concept, keep it as root.
 
-Return ONLY a JSON array:
-[{"topicId": <number>, "parentId": <number|null>}, ...]
+Return ONLY a JSON object with an "assignments" array:
+{"assignments": [{"topicId": <number>, "parentId": <number|null>}, ...]}
 
 Include an entry for EVERY topic in this batch. Do not include markdown formatting.
         `;
 
         try {
-            const result = await withRetry(() => model.generateContent(prompt));
+            const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
             const responseText = result.response.text();
             const batchResults = parseJSON<{ topicId: number; parentId: number | null }[]>(responseText, []);
             results.push(...batchResults);
+
+            // Guard against malformed/collapsed responses (e.g. a gateway that
+            // returned a single object instead of the full array). Any topic in
+            // this batch that got no assignment is defaulted to a root so it is
+            // never silently dropped from the taxonomy.
+            const assigned = new Set(batchResults.map(r => r.topicId));
+            const missing = batch.filter(t => !assigned.has(t.id));
+            if (missing.length > 0) {
+                console.warn(`[Taxonomy] Batch starting at ${i}: ${missing.length}/${batch.length} topics missing from response, defaulting to roots.`);
+                for (const t of missing) {
+                    results.push({ topicId: t.id, parentId: null });
+                }
+            }
         } catch (e) {
             console.error(`Taxonomy rebuild failed for batch starting at ${i}:`, e);
             // Fallback: mark these as roots
@@ -1111,7 +1352,6 @@ Include an entry for EVERY topic in this batch. Do not include markdown formatti
 export async function checkConsistency(newClaim: string, existingClaims: string[]): Promise<{ status: 'unique' | 'duplicate' | 'conflict' | 'update', reason?: string }> {
     if (existingClaims.length === 0) return { status: 'unique' };
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
     const prompt = `
         You are a consistency checker for a knowledge base.
         Compare the following "New Claim" against a list of "Existing Claims" in the same topic.
@@ -1134,7 +1374,7 @@ export async function checkConsistency(newClaim: string, existingClaims: string[
     `;
 
     try {
-        const result = await withRetry(() => model.generateContent(prompt));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const responseText = result.response.text();
         return parseJSON<{ status: 'unique' | 'duplicate' | 'conflict' | 'update', reason?: string }>(responseText, { status: 'unique' });
     } catch (e) {
@@ -1156,7 +1396,6 @@ export async function checkConsistencyBatch(
         return newClaims.map((_, index) => ({ status: 'unique', claimIndex: index }));
     }
 
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL, generationConfig: DETERMINISTIC_JSON_CONFIG });
     const prompt = `
         You are a consistency checker for a knowledge base.
         Compare multiple "New Claims" against a list of "Existing Claims" in the same topic.
@@ -1184,7 +1423,7 @@ export async function checkConsistencyBatch(
     `;
 
     try {
-        const result = await withRetry(() => model.generateContent(prompt));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const responseText = result.response.text();
         const parsed = parseJSON<{ status: 'unique' | 'duplicate' | 'conflict' | 'update'; reason?: string; claimIndex: number }[]>(
             responseText,
@@ -1272,5 +1511,27 @@ function tryParseJSON<T>(text: string): T | undefined {
 
 function parseJSON<T>(text: string, fallback: T): T {
     const parsed = tryParseJSON<T>(text);
-    return parsed === undefined ? fallback : parsed;
+    if (parsed === undefined) return fallback;
+
+    // OpenAI-compatible gateways (LiteLLM primary) in JSON mode
+    // (response_format=json_object) CANNOT return a top-level JSON array — they
+    // wrap it in an object, e.g. a prompt asking for `["a","b"]` comes back as
+    // `{"chunks":["a","b"]}` and one asking for `[{...}]` as a single `{...}` or
+    // `{"results":[{...}]}`. When the CALLER expects an array (its fallback is an
+    // array) but we parsed an object, transparently unwrap the object's single
+    // array-valued property so array-returning callers (semanticChunk,
+    // checkConsistencyBatch, deriveTaxonomy*, rerank fallback, …) keep working
+    // regardless of provider. Gemini returns bare arrays and is unaffected.
+    if (Array.isArray(fallback) && !Array.isArray(parsed) && parsed && typeof parsed === 'object') {
+        const arrayProps = Object.values(parsed as Record<string, unknown>).filter(Array.isArray);
+        if (arrayProps.length === 1) {
+            return arrayProps[0] as T;
+        }
+        // A lone wrapped object that should have been a single-element array
+        // (e.g. batch consistency returning one `{claimIndex,status}` object).
+        console.warn('[parseJSON] Expected array but got object; wrapping single object into a one-element array.');
+        return [parsed] as unknown as T;
+    }
+
+    return parsed;
 }

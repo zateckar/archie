@@ -52,9 +52,24 @@ export async function renderMermaidBlocksIn(container: HTMLElement): Promise<voi
             if (svgEl) {
                 svgEl.setAttribute('role', 'img');
                 svgEl.setAttribute('aria-label', 'Mermaid diagram');
-                // Let the SVG be responsive within its container.
+                // Cap the SVG to its natural size so small diagrams aren't upscaled
+                // to fill the chat width. The stylesheet caps it further so it stays
+                // responsive and never dominates the window; "Expand" shows it full-size.
+                const naturalWidth = svgEl.getAttribute('width');
+                svgEl.removeAttribute('width');
                 svgEl.removeAttribute('height');
-                svgEl.style.maxWidth = '100%';
+                if (naturalWidth) {
+                    // Allow upscaling small diagrams so they aren't tiny, while
+                    // never exceeding the container width.
+                    const px = parseFloat(naturalWidth);
+                    if (Number.isFinite(px) && px > 0) {
+                        svgEl.style.maxWidth = `min(100%, ${Math.round(px * 2.5)}px)`;
+                    } else {
+                        svgEl.style.maxWidth = '100%';
+                    }
+                } else {
+                    svgEl.style.maxWidth = '100%';
+                }
                 svgEl.style.height = 'auto';
             }
             wrapper.appendChild(scroll);
@@ -104,6 +119,7 @@ function wireToolbar(wrapper: HTMLElement, source: string, svg: string) {
         } else if (action === 'source') {
             const showing = wrapper.classList.toggle('mermaid-showing-source');
             let sourcePre = wrapper.querySelector<HTMLElement>('.mermaid-inline-source');
+            const diagram = wrapper.querySelector<HTMLElement>('.mermaid-diagram-scroll');
             if (showing) {
                 if (!sourcePre) {
                     sourcePre = document.createElement('pre');
@@ -111,8 +127,12 @@ function wireToolbar(wrapper: HTMLElement, source: string, svg: string) {
                     sourcePre.textContent = source;
                     wrapper.appendChild(sourcePre);
                 }
+                sourcePre.style.display = '';
+                if (diagram) diagram.style.display = 'none';
                 btn.textContent = 'Diagram';
             } else {
+                if (sourcePre) sourcePre.style.display = 'none';
+                if (diagram) diagram.style.display = '';
                 btn.textContent = 'Source';
             }
         } else if (action === 'expand') {

@@ -7,7 +7,7 @@ export async function GET({ locals }) {
         return json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const users = db.prepare('SELECT id, username, role, provider, created_at FROM users').all();
+    const users = db.prepare('SELECT id, username, display_name, email, role, provider, created_at FROM users').all();
     return json(users);
 }
 

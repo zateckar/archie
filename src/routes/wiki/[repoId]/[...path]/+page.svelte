@@ -8,6 +8,7 @@
     import TurndownService from 'turndown';
     import { marked } from 'marked';
     import { renderMermaidBlocksIn } from '$lib/utils/mermaidRender';
+    import { highlightText } from '$lib/utils/highlight';
     import MermaidEditorModal from '$lib/components/MermaidEditorModal.svelte';
     import Edit3 from 'lucide-svelte/icons/edit-3';
 import Eye from 'lucide-svelte/icons/eye';
@@ -63,7 +64,14 @@ import Workflow from 'lucide-svelte/icons/workflow';
     let saveMessage = $state('');
 
     let editorEl = $state<HTMLDivElement>();
-    let editorState = $state<{ editor: Editor | null }>({ editor: null });
+    // IMPORTANT: the TipTap Editor must NOT be stored in a deep `$state`.
+    // Svelte 5 wraps `$state` values in a reactive Proxy, and proxying the
+    // Editor breaks ProseMirror's internal view/state so live edits never reach
+    // the instance — `getHTML()` then returns the original content and every
+    // save commits the OLD document. Keep the instance in a plain (non-reactive)
+    // variable and drive toolbar reactivity via a separate `editorTick` counter.
+    let editor: Editor | null = null;
+    let editorTick = $state(0);
     let viewContainerEl = $state<HTMLDivElement>();
     let mermaidModalOpen = $state(false);
 
@@ -121,14 +129,17 @@ import Workflow from 'lucide-svelte/icons/workflow';
 
     // Clean up editor on unmount
     onDestroy(() => {
-        editorState.editor?.destroy();
+        editor?.destroy();
+        editor = null;
     });
 
-    // Initialize editor when editing starts
+    // Initialize editor when editing starts. We intentionally read only
+    // `isEditing` and `editorEl` reactively (not `editor`, which is a plain
+    // variable) so this effect does not re-run on every keystroke.
     $effect(() => {
-        if (isEditing && editorEl && !editorState.editor) {
+        if (isEditing && editorEl && !editor) {
             const html = marked.parse(content, { async: false }) as string;
-            editorState.editor = new Editor({
+            editor = new Editor({
                 element: editorEl,
                 extensions: [
                     StarterKit.configure({
@@ -144,9 +155,13 @@ import Workflow from 'lucide-svelte/icons/workflow';
                 ],
                 content: html,
                 onTransaction: () => {
-                    editorState = { editor: editorState.editor };
+                    // Bump a reactive counter so toolbar active-states refresh,
+                    // without making the Editor itself reactive.
+                    editorTick++;
                 },
             });
+            // Trigger initial toolbar state render.
+            editorTick++;
         }
     });
 
@@ -160,17 +175,17 @@ import Workflow from 'lucide-svelte/icons/workflow';
     function cancelEditing() {
         isEditing = false;
         showSource = false;
-        editorState.editor?.destroy();
-        editorState = { editor: null };
+        editor?.destroy();
+        editor = null;
     }
 
     async function handleSave() {
-        if (!editorState.editor) return;
+        if (!editor) return;
         isSaving = true;
         saveMessage = '';
 
         // Convert HTML back to markdown
-        const html = editorState.editor.getHTML();
+        const html = editor.getHTML();
         const markdown = turndownService.turndown(html);
 
         try {
@@ -183,8 +198,8 @@ import Workflow from 'lucide-svelte/icons/workflow';
             if (res.ok) {
                 content = markdown;
                 isEditing = false;
-                editorState.editor?.destroy();
-                editorState = { editor: null };
+                editor?.destroy();
+                editor = null;
                 saveMessage = 'Saved successfully';
                 setTimeout(() => saveMessage = '', 3000);
                 // Notify layout to refresh the file tree (in case a new subdir was created)
@@ -268,8 +283,8 @@ import Workflow from 'lucide-svelte/icons/workflow';
 
     // ─── Toolbar actions ───
     function execCmd(cmd: string, attr?: any) {
-        if (!editorState.editor) return;
-        const chain = editorState.editor.chain().focus();
+        if (!editor) return;
+        const chain = editor.chain().focus();
         if (cmd === 'bold') chain.toggleBold().run();
         else if (cmd === 'italic') chain.toggleItalic().run();
         else if (cmd === 'h1') chain.toggleHeading({ level: 1 }).run();
@@ -297,6 +312,13 @@ import Workflow from 'lucide-svelte/icons/workflow';
 
     let filename = $derived(currentPath.split('/').pop() || 'document');
 
+    // Toolbar active-state helper. Reading `editorTick` makes callers re-evaluate
+    // on every editor transaction, even though `editor` itself is not reactive.
+    function isActive(name: string, attrs?: Record<string, any>): boolean {
+        void editorTick; // reactive dependency
+        return editor?.isActive(name, attrs as any) ?? false;
+    }
+
     // ─── Mermaid post-render ───
     // After the view-mode markdown is injected via {@html}, replace fenced
     // mermaid code blocks with rendered SVGs.
@@ -315,15 +337,35 @@ import Workflow from 'lucide-svelte/icons/workflow';
         });
     });
 
+    // ─── Highlight sentences matching ?highlight= (from chat "Find sources") ───
+    let highlightQuery = $derived(page.url.searchParams.get('highlight') || '');
+    $effect(() => {
+        const _content = renderedContent;
+        const _editing = isEditing;
+        const _q = highlightQuery;
+        if (_editing) return;
+        if (!viewContainerEl) return;
+        if (!_content) return;
+        if (!_q) return;
+        // Defer so {@html} (and mermaid) have painted first.
+        queueMicrotask(() => {
+            if (!viewContainerEl || isEditing) return;
+            const firstMark = highlightText(viewContainerEl, _q);
+            if (firstMark) {
+                firstMark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        });
+    });
+
     // ─── Mermaid editor modal ───
     function openMermaidModal() {
         mermaidModalOpen = true;
     }
 
     function insertMermaidDiagram(code: string) {
-        if (!editorState.editor) return;
+        if (!editor) return;
         // Insert a fenced code block with language=mermaid.
-        editorState.editor
+        editor
             .chain()
             .focus()
             .insertContent({
@@ -387,19 +429,19 @@ import Workflow from 'lucide-svelte/icons/workflow';
     <!-- Editor toolbar (when editing) -->
     {#if isEditing && !showSource}
         <div class="flex items-center gap-1 px-4 py-2 border-b border-[var(--border-primary)] bg-[var(--bg-slate-900)]/30 overflow-x-auto">
-            <button onclick={() => execCmd('bold')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('bold')} title="Bold"><Bold class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('italic')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('italic')} title="Italic"><Italic class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('bold')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={isActive('bold')} title="Bold"><Bold class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('italic')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={isActive('italic')} title="Italic"><Italic class="w-4 h-4" /></button>
             <span class="w-px h-5 bg-[var(--border-hover)] mx-1"></span>
-            <button onclick={() => execCmd('h1')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-xs font-bold" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('heading', { level: 1 })} title="Heading 1"><Heading1 class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('h2')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-xs font-bold" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('heading', { level: 2 })} title="Heading 2"><Heading2 class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('h3')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-xs font-bold" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('heading', { level: 3 })} title="Heading 3"><Heading3 class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('h1')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-xs font-bold" class:bg-[var(--hover-surface)]={isActive('heading', { level: 1 })} title="Heading 1"><Heading1 class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('h2')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-xs font-bold" class:bg-[var(--hover-surface)]={isActive('heading', { level: 2 })} title="Heading 2"><Heading2 class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('h3')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-xs font-bold" class:bg-[var(--hover-surface)]={isActive('heading', { level: 3 })} title="Heading 3"><Heading3 class="w-4 h-4" /></button>
             <span class="w-px h-5 bg-[var(--border-hover)] mx-1"></span>
-            <button onclick={() => execCmd('bulletList')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('bulletList')} title="Bullet List"><List class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('orderedList')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('orderedList')} title="Numbered List"><ListOrdered class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('bulletList')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={isActive('bulletList')} title="Bullet List"><List class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('orderedList')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={isActive('orderedList')} title="Numbered List"><ListOrdered class="w-4 h-4" /></button>
             <span class="w-px h-5 bg-[var(--border-hover)] mx-1"></span>
-            <button onclick={() => execCmd('codeBlock')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('codeBlock')} title="Code Block"><Code class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('blockquote')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('blockquote')} title="Blockquote"><Quote class="w-4 h-4" /></button>
-            <button onclick={() => execCmd('link')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={editorState.editor?.isActive('link')} title="Link"><LinkIcon class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('codeBlock')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={isActive('codeBlock')} title="Code Block"><Code class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('blockquote')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={isActive('blockquote')} title="Blockquote"><Quote class="w-4 h-4" /></button>
+            <button onclick={() => execCmd('link')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={isActive('link')} title="Link"><LinkIcon class="w-4 h-4" /></button>
             <span class="w-px h-5 bg-[var(--border-hover)] mx-1"></span>
             <button onclick={openMermaidModal} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-[#78FAAE]" title="Insert Mermaid diagram"><Workflow class="w-4 h-4" /></button>
         </div>
@@ -432,16 +474,17 @@ import Workflow from 'lucide-svelte/icons/workflow';
                     <textarea 
                         class="w-full h-full bg-transparent border-none outline-none text-sm font-mono text-[var(--text-secondary)] resize-none"
                         value={(() => {
-                            if (editorState.editor) {
-                                return turndownService.turndown(editorState.editor.getHTML());
+                            void editorTick; // re-read when the editor changes
+                            if (editor) {
+                                return turndownService.turndown(editor.getHTML());
                             }
                             return content;
                         })()}
                         oninput={(e) => {
-                            if (editorState.editor) {
+                            if (editor) {
                                 const md = (e.target as HTMLTextAreaElement).value;
                                 const html = marked.parse(md, { async: false }) as string;
-                                editorState.editor.commands.setContent(html);
+                                editor.commands.setContent(html);
                             }
                         }}
                     ></textarea>
@@ -554,4 +597,18 @@ import Workflow from 'lucide-svelte/icons/workflow';
     :global(.tiptap code) { font-size: 0.875rem; }
     :global(.tiptap blockquote) { border-left: 3px solid #78FAAE; padding-left: 1rem; color: var(--text-muted); margin-bottom: 0.5rem; }
     :global(.tiptap a) { color: #78FAAE; text-decoration: underline; }
+
+    /* Bright highlight for sentences matching the chat "Find sources" selection */
+    :global(mark.doc-highlight) {
+        background: #FFE600;
+        color: #1a1a00;
+        border-radius: 3px;
+        padding: 0.05em 0.15em;
+        box-shadow: 0 0 0 2px rgba(255, 230, 0, 0.35);
+        animation: doc-hl-pulse 1.2s ease-in-out 2;
+    }
+    @keyframes doc-hl-pulse {
+        0%, 100% { box-shadow: 0 0 0 2px rgba(255, 230, 0, 0.35); }
+        50% { box-shadow: 0 0 0 5px rgba(255, 230, 0, 0.6); }
+    }
 </style>

@@ -5,62 +5,68 @@
 
 :root,
 [data-theme="dark"] {
-  --bg-page: #16171f;
-  --bg-surface: #1c1d27;
-  --bg-raised: #22232f;
-  --bg-muted: #2a2b38;
-  --bg-slate-950: #13141c;
-  --bg-slate-900: #1a1b26;
-  --bg-slate-800: #242536;
-  --bg-slate-800-50: rgba(36, 37, 54, 0.5);
-  --bg-slate-800-30: rgba(36, 37, 54, 0.3);
-  --bg-slate-800-20: rgba(36, 37, 54, 0.2);
-  --border-primary: #313244;
-  --border-secondary: rgba(49, 50, 68, 0.5);
-  --border-hover: #45475a;
-  --text-page: #e2e8f0;
-  --text-primary: #cbd5e1;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --text-faint: #475569;
-  --text-faintest: #334155;
-  --hover-surface: rgba(34, 35, 47, 0.5);
-  --hover-surface-solid: #22232f;
-  --scrollbar-thumb: #313244;
-  --scrollbar-hover: #45475a;
-  --code-bg: #0f1017;
-  --code-border: #242536;
-  --code-text: #78FAAE;
+  /* Lifted dark palette on the shadcn slate scale.
+     Page sits around slate-925/900 (not near-black) with clearly
+     separated raised surfaces. */
+  --bg-page: #1e293b;        /* slate-800-ish base, lighter than before */
+  --bg-surface: #263449;     /* raised card surface */
+  --bg-raised: #2e3d54;      /* higher elevation */
+  --bg-muted: #384860;       /* muted fills / inputs */
+  --bg-slate-950: #172033;   /* deepest well (below page) */
+  --bg-slate-900: #1e293b;   /* matches page */
+  --bg-slate-800: #334155;   /* interactive chip / hover base */
+  --bg-slate-800-50: rgba(51, 65, 85, 0.5);
+  --bg-slate-800-30: rgba(51, 65, 85, 0.3);
+  --bg-slate-800-20: rgba(51, 65, 85, 0.2);
+  --border-primary: #3f5069;   /* visible against page & surfaces */
+  --border-secondary: rgba(63, 80, 105, 0.6);
+  --border-hover: #55698a;
+  --text-page: #f8fafc;      /* slate-50  — max contrast headings/body */
+  --text-primary: #e2e8f0;   /* slate-200 — primary body */
+  --text-secondary: #cbd5e1; /* slate-300 — secondary */
+  --text-muted: #94a3b8;     /* slate-400 — muted (AA on page) */
+  --text-faint: #8b99af;     /* large/secondary UI text */
+  --text-faintest: #74839b;  /* placeholders/disabled — kept legible */
+  --hover-surface: rgba(51, 65, 85, 0.55);
+  --hover-surface-solid: #2e3d54;
+  --scrollbar-thumb: #3f5069;
+  --scrollbar-hover: #55698a;
+  --code-bg: #172033;
+  --code-border: #334155;
+  --code-text: #78FAAE;      /* brand mint accent (AA on code-bg) */
   --shadow-color: 0 0 0;
 }
 
 [data-theme="light"] {
-  --bg-page: #f8fafc;
-  --bg-surface: #ffffff;
-  --bg-raised: #f1f5f9;
-  --bg-muted: #e2e8f0;
-  --bg-slate-950: #f8fafc;
-  --bg-slate-900: #f1f5f9;
-  --bg-slate-800: #e2e8f0;
-  --bg-slate-800-50: rgba(226, 232, 240, 0.5);
-  --bg-slate-800-30: rgba(226, 232, 240, 0.3);
-  --bg-slate-800-20: rgba(226, 232, 240, 0.2);
-  --border-primary: #e2e8f0;
-  --border-secondary: rgba(226, 232, 240, 0.5);
-  --border-hover: #cbd5e1;
-  --text-page: #0f172a;
-  --text-primary: #1e293b;
-  --text-secondary: #334155;
-  --text-muted: #64748b;
-  --text-faint: #94a3b8;
-  --text-faintest: #cbd5e1;
-  --hover-surface: rgba(226, 232, 240, 0.5);
-  --hover-surface-solid: #f1f5f9;
-  --scrollbar-thumb: #cbd5e1;
+  /* Darkened light palette — subtly tinted page with stronger surface
+     and border separation so every component reads clearly. Mirrors the
+     dark scale structurally. */
+  --bg-page: #eef2f7;        /* tinted, darker than pure white */
+  --bg-surface: #ffffff;     /* cards pop above the page */
+  --bg-raised: #f8fafc;      /* subtle raise */
+  --bg-muted: #e2e8f0;       /* muted fills / inputs */
+  --bg-slate-950: #e2e8f0;   /* deepest well (below page) */
+  --bg-slate-900: #eef2f7;   /* matches page */
+  --bg-slate-800: #dbe3ec;   /* interactive chip / hover base */
+  --bg-slate-800-50: rgba(219, 227, 236, 0.6);
+  --bg-slate-800-30: rgba(219, 227, 236, 0.4);
+  --bg-slate-800-20: rgba(219, 227, 236, 0.25);
+  --border-primary: #cbd5e1;   /* clearly visible border */
+  --border-secondary: rgba(148, 163, 184, 0.4);
+  --border-hover: #94a3b8;
+  --text-page: #0f172a;      /* slate-900 — headings */
+  --text-primary: #1e293b;   /* slate-800 — primary body */
+  --text-secondary: #334155; /* slate-700 — secondary */
+  --text-muted: #52627a;     /* AA muted on tinted page */
+  --text-faint: #5b6b82;     /* large/secondary UI text */
+  --text-faintest: #6b7a91;  /* placeholders/disabled — kept legible */
+  --hover-surface: rgba(203, 213, 225, 0.5);
+  --hover-surface-solid: #e2e8f0;
+  --scrollbar-thumb: #b6c2d1;
   --scrollbar-hover: #94a3b8;
   --code-bg: #f1f5f9;
-  --code-border: #e2e8f0;
-  --code-text: #059669;
+  --code-border: #cbd5e1;
+  --code-text: #047857;      /* emerald-700 — AA on light code-bg */
   --shadow-color: 0 0 0;
 }
 
@@ -118,7 +124,7 @@ html[data-theme="dark"] {
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  max-height: 26rem;
+  max-height: 36rem;
   overflow: auto;
 }
 
@@ -141,7 +147,12 @@ html[data-theme="dark"] {
 }
 
 .mermaid-diagram-wrapper svg {
+  /* Don't upscale beyond the diagram's natural size, and never exceed the
+     container width. Cap height so a single diagram can't dominate the chat;
+     the "Expand" button opens the full zoom/pan fullscreen viewer. */
   max-width: 100%;
+  max-height: 34rem;
+  width: auto;
   height: auto;
   flex-shrink: 0;
 }
@@ -193,8 +204,8 @@ html[data-theme="dark"] {
 }
 
 .mermaid-btn:hover {
-  color: #78FAAE;
-  border-color: rgba(120, 250, 174, 0.4);
+  color: var(--code-text);
+  border-color: var(--border-hover);
 }
 
 .mermaid-diagram-loading {

@@ -1,0 +1,413 @@
+import 'dotenv/config';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+/**
+ * Model provider abstraction.
+ *
+ * This module exposes three primitive operations used across the app — text
+ * generation, chat streaming, and embeddings — plus a native document reranker.
+ * Each primitive is served by a PRIMARY provider (a custom OpenAI-compatible
+ * LiteLLM gateway configured via LLM_* env vars) and transparently FALLS BACK
+ * to Gemini (GEMINI_* env vars) when the primary is unconfigured or errors.
+ *
+ * Callers in gemini.ts keep their existing shapes:
+ *   - generateContent(...) returns { response: { text() } }
+ *   - startChatStream(...) yields chunks with a .text() method
+ *   - embedContent(...) returns { embedding: { values } }
+ * so the rest of the codebase does not need to change.
+ */
+
+// ── Environment resolution ─────────────────────────────────────────────────
+let geminiApiKey = process.env.GEMINI_API_KEY || '';
+
+let litellmBaseUrl = process.env.LLM_BASE_URL || '';
+let litellmApiKey = process.env.LLM_API_KEY || '';
+let litellmTextModel = process.env.LLM_TEXT_MODEL || '';
+let litellmEmbeddingModel = process.env.LLM_EMBEDDING_MODEL || '';
+let litellmRerankModel = process.env.LLM_RERANK_MODEL || '';
+// The native LiteLLM /rerank endpoint is OPT-IN. It is disabled by default
+// because the configured gateway reranker was observed returning inverted /
+// nonsensical relevance scores (ranking unrelated documents above relevant
+// ones), which degrades retrieval. When off, rerank() uses the LLM-as-reranker
+// path (text model, Gemini fallback) instead. Set LLM_RERANK_ENABLED=true only
+// once the gateway reranker is verified to produce correct ordering.
+let litellmRerankEnabled = /^(1|true|yes|on)$/i.test(process.env.LLM_RERANK_ENABLED || '');
+
+// If we are in SvelteKit, prefer values from $env/dynamic/private.
+try {
+    // @ts-ignore - resolved only inside the SvelteKit runtime
+    const { env } = await import('$env/dynamic/private');
+    if (env.GEMINI_API_KEY) geminiApiKey = env.GEMINI_API_KEY;
+    if (env.LLM_BASE_URL) litellmBaseUrl = env.LLM_BASE_URL;
+    if (env.LLM_API_KEY) litellmApiKey = env.LLM_API_KEY;
+    if (env.LLM_TEXT_MODEL) litellmTextModel = env.LLM_TEXT_MODEL;
+    if (env.LLM_EMBEDDING_MODEL) litellmEmbeddingModel = env.LLM_EMBEDDING_MODEL;
+    if (env.LLM_RERANK_MODEL) litellmRerankModel = env.LLM_RERANK_MODEL;
+    if (env.LLM_RERANK_ENABLED) litellmRerankEnabled = /^(1|true|yes|on)$/i.test(env.LLM_RERANK_ENABLED);
+} catch (e) {
+    // Not in SvelteKit environment
+}
+
+// Normalize the base URL (strip trailing slash) so path joins are predictable.
+litellmBaseUrl = litellmBaseUrl.replace(/\/+$/, '');
+
+const genAI = new GoogleGenerativeAI(geminiApiKey);
+
+/** Whether the LiteLLM gateway has enough config to be used as the primary. */
+export const litellmConfigured = Boolean(litellmBaseUrl && litellmApiKey);
+
+// ── Shared types ────────────────────────────────────────────────────────────
+export interface GenerationConfig {
+    temperature?: number;
+    responseMimeType?: string;
+}
+
+export interface GenerateResult {
+    response: { text: () => string };
+}
+
+/** A single streamed chunk, mirroring the Gemini SDK's chunk.text() shape. */
+export interface StreamChunk {
+    text: () => string;
+}
+
+export interface ChatMessage {
+    role: string; // 'user' | 'model' | 'assistant' | 'system'
+    content: string;
+}
+
+export interface EmbedResult {
+    embedding: { values: number[] };
+}
+
+// ── LiteLLM (OpenAI-compatible) low-level calls ─────────────────────────────
+
+function litellmHeaders(): Record<string, string> {
+    return {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${litellmApiKey}`
+    };
+}
+
+/**
+ * Converts the app's generation config + optional system instruction + history
+ * into an OpenAI-style chat/completions message array.
+ */
+function buildChatMessages(
+    prompt: string,
+    systemInstruction: string | undefined,
+    history: ChatMessage[]
+): { role: string; content: string }[] {
+    const messages: { role: string; content: string }[] = [];
+    if (systemInstruction) {
+        messages.push({ role: 'system', content: systemInstruction });
+    }
+    for (const msg of history) {
+        // Gemini uses 'model' for the assistant; OpenAI-compatible APIs use 'assistant'.
+        const role = msg.role === 'model' || msg.role === 'assistant' ? 'assistant' : 'user';
+        messages.push({ role, content: msg.content });
+    }
+    messages.push({ role: 'user', content: prompt });
+    return messages;
+}
+
+function litellmBody(
+    messages: { role: string; content: string }[],
+    config: GenerationConfig | undefined,
+    stream: boolean
+): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+        model: litellmTextModel,
+        messages,
+        stream
+    };
+    if (config?.temperature !== undefined) body.temperature = config.temperature;
+    if (config?.responseMimeType === 'application/json') {
+        body.response_format = { type: 'json_object' };
+    }
+    return body;
+}
+
+async function litellmChatComplete(
+    messages: { role: string; content: string }[],
+    config?: GenerationConfig
+): Promise<string> {
+    const res = await fetch(`${litellmBaseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: litellmHeaders(),
+        body: JSON.stringify(litellmBody(messages, config, false))
+    });
+    if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        const err: any = new Error(`LiteLLM chat/completions failed: ${res.status} ${detail}`);
+        err.status = res.status;
+        throw err;
+    }
+    const data = await res.json();
+    const content = data?.choices?.[0]?.message?.content;
+    return typeof content === 'string' ? content : '';
+}
+
+/**
+ * Streams an OpenAI-style SSE chat/completions response, yielding StreamChunk
+ * objects whose .text() returns each delta — matching what the Gemini SDK's
+ * stream produces so consumers stay unchanged.
+ */
+async function* litellmChatStream(
+    messages: { role: string; content: string }[],
+    config?: GenerationConfig
+): AsyncGenerator<StreamChunk> {
+    const res = await fetch(`${litellmBaseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: litellmHeaders(),
+        body: JSON.stringify(litellmBody(messages, config, true))
+    });
+    if (!res.ok || !res.body) {
+        const detail = await res.text().catch(() => '');
+        const err: any = new Error(`LiteLLM streaming failed: ${res.status} ${detail}`);
+        err.status = res.status;
+        throw err;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE frames are separated by double newlines; process line by line.
+        let newlineIdx: number;
+        while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, newlineIdx).trim();
+            buffer = buffer.slice(newlineIdx + 1);
+            if (!line.startsWith('data:')) continue;
+            const payload = line.slice(5).trim();
+            if (payload === '[DONE]') return;
+            try {
+                const parsed = JSON.parse(payload);
+                const delta = parsed?.choices?.[0]?.delta?.content;
+                if (typeof delta === 'string' && delta.length > 0) {
+                    const text = delta;
+                    yield { text: () => text };
+                }
+            } catch {
+                // Ignore keep-alives / partial frames.
+            }
+        }
+    }
+}
+
+async function litellmEmbed(text: string): Promise<number[]> {
+    const res = await fetch(`${litellmBaseUrl}/embeddings`, {
+        method: 'POST',
+        headers: litellmHeaders(),
+        body: JSON.stringify({ model: litellmEmbeddingModel, input: text })
+    });
+    if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        const err: any = new Error(`LiteLLM embeddings failed: ${res.status} ${detail}`);
+        err.status = res.status;
+        throw err;
+    }
+    const data = await res.json();
+    const values = data?.data?.[0]?.embedding;
+    if (!Array.isArray(values)) {
+        throw new Error('LiteLLM embeddings returned no vector');
+    }
+    return values;
+}
+
+/**
+ * Calls the LiteLLM native /rerank endpoint. Returns document indices ordered
+ * most→least relevant. Throws if unconfigured or on error so the caller can
+ * fall back to the LLM-as-reranker path.
+ */
+async function litellmRerank(query: string, documents: string[]): Promise<number[]> {
+    if (!litellmRerankModel) throw new Error('LLM_RERANK_MODEL not configured');
+    const res = await fetch(`${litellmBaseUrl}/rerank`, {
+        method: 'POST',
+        headers: litellmHeaders(),
+        body: JSON.stringify({
+            model: litellmRerankModel,
+            query,
+            documents,
+            top_n: documents.length
+        })
+    });
+    if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        const err: any = new Error(`LiteLLM rerank failed: ${res.status} ${detail}`);
+        err.status = res.status;
+        throw err;
+    }
+    const data = await res.json();
+    const ranked = data?.results;
+    if (!Array.isArray(ranked)) {
+        throw new Error('LiteLLM rerank returned no results');
+    }
+    // Each result carries an `index` into the input `documents` array.
+    const indices = ranked
+        .map((r: any) => r?.index)
+        .filter((i: unknown): i is number => typeof i === 'number');
+    if (indices.length === 0) throw new Error('LiteLLM rerank returned no indices');
+    return indices;
+}
+
+// ── Gemini (fallback) low-level calls ───────────────────────────────────────
+
+async function geminiGenerate(
+    model: string,
+    prompt: string,
+    config?: GenerationConfig
+): Promise<string> {
+    const m = genAI.getGenerativeModel({ model, generationConfig: config });
+    const result = await m.generateContent(prompt);
+    return result.response.text();
+}
+
+async function* geminiChatStream(
+    model: string,
+    prompt: string,
+    systemInstruction: string | undefined,
+    history: ChatMessage[],
+    config?: GenerationConfig
+): AsyncGenerator<StreamChunk> {
+    const m = genAI.getGenerativeModel({
+        model,
+        systemInstruction,
+        generationConfig: config
+    });
+    const chatSession = m.startChat({
+        history: history.map((msg) => ({
+            role: msg.role === 'user' ? 'user' : 'model',
+            parts: [{ text: msg.content }]
+        }))
+    });
+    const result = await chatSession.sendMessageStream(prompt);
+    for await (const chunk of result.stream) {
+        yield { text: () => chunk.text() };
+    }
+}
+
+async function geminiEmbed(
+    model: string,
+    text: string,
+    taskType: 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY',
+    title?: string
+): Promise<number[]> {
+    const m = genAI.getGenerativeModel({ model });
+    const req: any = {
+        content: { role: 'user', parts: [{ text }] },
+        taskType
+    };
+    if (title && taskType === 'RETRIEVAL_DOCUMENT') req.title = title;
+    const result = await m.embedContent(req);
+    return result.embedding.values;
+}
+
+// ── Public provider API (primary → fallback) ────────────────────────────────
+
+export interface GeminiFallback {
+    /** Gemini model id to use if the primary provider is unavailable. */
+    model: string;
+}
+
+/**
+ * Text generation. Uses LiteLLM when configured, otherwise Gemini. On a LiteLLM
+ * error, transparently retries once against Gemini so a gateway outage degrades
+ * to the fallback instead of failing the request.
+ */
+export async function generateContent(
+    prompt: string,
+    fallback: GeminiFallback,
+    config?: GenerationConfig
+): Promise<GenerateResult> {
+    if (litellmConfigured) {
+        try {
+            const messages = buildChatMessages(prompt, undefined, []);
+            const text = await litellmChatComplete(messages, config);
+            return { response: { text: () => text } };
+        } catch (e) {
+            console.warn('[Providers] LiteLLM generateContent failed, falling back to Gemini:', (e as Error).message);
+        }
+    }
+    const text = await geminiGenerate(fallback.model, prompt, config);
+    return { response: { text: () => text } };
+}
+
+/**
+ * Chat streaming. Returns an async iterable of chunks whose .text() yields the
+ * incremental text, matching the Gemini SDK stream that the chat endpoint
+ * already consumes. Falls back to Gemini on primary failure.
+ */
+export async function startChatStream(
+    prompt: string,
+    systemInstruction: string,
+    history: ChatMessage[],
+    fallback: GeminiFallback,
+    config?: GenerationConfig
+): Promise<AsyncIterable<StreamChunk>> {
+    if (litellmConfigured) {
+        try {
+            const messages = buildChatMessages(prompt, systemInstruction, history);
+            const iterator = litellmChatStream(messages, config);
+            // Pull the first chunk eagerly so an immediate HTTP error surfaces
+            // here (and we can fall back) rather than mid-stream after the
+            // caller has already committed to the primary provider.
+            const first = await iterator.next();
+            return (async function* () {
+                if (!first.done) yield first.value;
+                yield* iterator;
+            })();
+        } catch (e) {
+            console.warn('[Providers] LiteLLM chat stream failed, falling back to Gemini:', (e as Error).message);
+        }
+    }
+    return geminiChatStream(fallback.model, prompt, systemInstruction, history, config);
+}
+
+/**
+ * Embeddings. Uses LiteLLM when configured, otherwise Gemini. Falls back to
+ * Gemini on primary failure.
+ *
+ * Note: `taskType`/`title` are Gemini-specific retrieval hints; the LiteLLM
+ * OpenAI-compatible embeddings endpoint takes plain text, so those are only
+ * applied on the Gemini path.
+ */
+export async function embedContent(
+    text: string,
+    fallback: GeminiFallback,
+    taskType: 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY' = 'RETRIEVAL_DOCUMENT',
+    title?: string
+): Promise<EmbedResult> {
+    if (litellmConfigured && litellmEmbeddingModel) {
+        try {
+            const values = await litellmEmbed(text);
+            return { embedding: { values } };
+        } catch (e) {
+            console.warn('[Providers] LiteLLM embedContent failed, falling back to Gemini:', (e as Error).message);
+        }
+    }
+    const values = await geminiEmbed(fallback.model, text, taskType, title);
+    return { embedding: { values } };
+}
+
+/**
+ * Native document reranking via the LiteLLM /rerank endpoint. Returns indices
+ * ordered most→least relevant, or `null` when the primary reranker is
+ * unavailable/errors so the caller can fall back to LLM-as-reranker.
+ */
+export async function rerankDocuments(query: string, documents: string[]): Promise<number[] | null> {
+    if (!litellmRerankEnabled) return null; // native reranker opt-in; off by default
+    if (!litellmConfigured || !litellmRerankModel) return null;
+    if (documents.length === 0) return [];
+    try {
+        return await litellmRerank(query, documents);
+    } catch (e) {
+        console.warn('[Providers] LiteLLM rerank failed, falling back to LLM reranker:', (e as Error).message);
+        return null;
+    }
+}

@@ -11,6 +11,8 @@
 		"bun:start": "bun build/index.js",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
+		"reembed": "tsx scripts/reembed.ts",
+		"test:providers": "tsx scripts/test-providers.ts",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"test": "playwright test",

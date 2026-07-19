@@ -94,6 +94,8 @@ db.exec(`
         role TEXT DEFAULT 'user',
         provider TEXT DEFAULT 'local',
         provider_id TEXT UNIQUE,
+        display_name TEXT,
+        email TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -452,6 +454,56 @@ try {
     `);
 } catch (e) {}
 
+// ── Migration: document cleaning audit log ──────────────────────────────────
+// cleanDocument() now removes noise aggressively but records every removed span
+// (and why) plus the verification verdict, so removals are inspectable rather
+// than a black box. One row per document ingest attempt. `removals` is a JSON
+// array of {text, reason, category}; `verdict` is 'cleaned' | 'cleaned_flagged'
+// | 'fell_back' so an admin can find documents where cleaning was rejected or
+// looked risky. Kept in a side table (not a documents column) so re-ingesting a
+// document appends a new audit record instead of clobbering history.
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS document_clean_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id INTEGER,
+            filename TEXT,
+            original_chars INTEGER,
+            cleaned_chars INTEGER,
+            removed_chars INTEGER,
+            verdict TEXT,
+            preserved_ratio REAL,
+            removals TEXT,
+            notes TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(doc_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+    `);
+} catch (e) {}
+try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_document_clean_log_doc_id ON document_clean_log(doc_id)');
+} catch (e) {}
+try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_document_clean_log_verdict ON document_clean_log(verdict)');
+} catch (e) {}
+
+// Migration: Store OIDC "display_name" (name) and "email" claims so the admin
+// users table can show more than just the preferred_username. Only populated
+// for OIDC users; local users leave these NULL.
+try {
+    db.exec('ALTER TABLE users ADD COLUMN display_name TEXT');
+} catch (e) {}
+try {
+    db.exec('ALTER TABLE users ADD COLUMN email TEXT');
+} catch (e) {}
+
+// Migration: persist the source documents used for each assistant answer, so
+// past conversations can trace an answer back to its sources (the "Find
+// sources" feature). Stored as a JSON array of { filename, path }.
+try {
+    db.exec('ALTER TABLE chat_history ADD COLUMN sources TEXT');
+} catch (e) {}
+
 
 export function getDocuments() {
     return db.prepare(`
@@ -466,4 +518,150 @@ export function deleteDocument(id: number) {
     // Delete from chunks first (cascading normally handled by FK, but let's be explicit)
     db.prepare('DELETE FROM chunks WHERE doc_id = ?').run(id);
     return db.prepare('DELETE FROM documents WHERE id = ?').run(id);
+}
+
+export interface SourceDocumentMatch {
+    doc_id: number;
+    filename: string;
+    path: string | null;
+    repo_id: number | null;
+    matches: number;
+    snippet: string;
+}
+
+/**
+ * Full-text search the `chunks` FTS5 index for the given free text (typically a
+ * user's selection from a chat answer) and return the source DOCUMENTS that
+ * contain it, most relevant first. Each result carries a `snippet` — the
+ * matching text with the hit wrapped in [[HL]]...[[/HL]] markers so the client
+ * can render sentence-level highlights, plus the identifiers needed to deep-link
+ * into the editable wiki (`repo_id` + `path`).
+ *
+ * When `restrictTo` is provided (the path/filename identifiers of the documents
+ * actually used in the chat answer), the search is scoped to only those
+ * documents — so a selection is traced back strictly to the answer's real
+ * sources, never to unrelated documents that merely share keywords.
+ */
+export function searchSourceDocuments(
+    rawText: string,
+    limit = 20,
+    restrictTo?: string[]
+): SourceDocumentMatch[] {
+    // Build a safe FTS5 MATCH query: keep alphanumeric words (>2 chars), OR them
+    // together. Mirrors the sanitizer used by searchChunks in rag.ts.
+    const words = (rawText || '')
+        .replace(/[^\w\s]/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .filter(w => w.length > 2 && /^[a-zA-Z0-9_]+$/.test(w));
+
+    if (words.length === 0) return [];
+
+    const ftsQuery = words.map(w => `"${w.replace(/"/g, '""')}"`).join(' OR ');
+
+    // Optional scoping to the documents actually used in the answer. Sources
+    // carry either a `path` or a `filename`, so match on both columns.
+    const identifiers = (restrictTo ?? [])
+        .map(s => (s ?? '').trim())
+        .filter(s => s.length > 0);
+    // An empty restriction list means "no documents to search" — the answer had
+    // no sources, so there is nothing to trace to.
+    if (restrictTo !== undefined && identifiers.length === 0) return [];
+
+    let restrictClause = '';
+    const restrictParams: string[] = [];
+    if (identifiers.length > 0) {
+        const placeholders = identifiers.map(() => '?').join(', ');
+        restrictClause = ` AND (d.path IN (${placeholders}) OR d.filename IN (${placeholders}))`;
+        restrictParams.push(...identifiers, ...identifiers);
+    }
+
+    try {
+        // FTS5's snippet()/bm25() cannot be combined with GROUP BY, so fetch the
+        // best-ranked matching chunk rows first (one row per chunk, with a
+        // highlighted snippet), then collapse to one entry per document in JS.
+        // snippet(table, colIndex, open, close, ellipsis, tokens); col 0 = content.
+        const rows = db.prepare(`
+            SELECT
+                d.id       AS doc_id,
+                d.filename AS filename,
+                d.path     AS path,
+                d.repo_id  AS repo_id,
+                snippet(chunks_fts, 0, '[[HL]]', '[[/HL]]', ' … ', 24) AS snippet,
+                bm25(chunks_fts) AS relevance
+            FROM chunks_fts
+            JOIN chunks c    ON c.id = chunks_fts.rowid
+            JOIN documents d ON d.id = c.doc_id
+            WHERE chunks_fts MATCH ?${restrictClause}
+            ORDER BY relevance ASC
+            LIMIT 200
+        `).all(ftsQuery, ...restrictParams) as Array<{
+            doc_id: number; filename: string; path: string | null;
+            repo_id: number | null; snippet: string; relevance: number;
+        }>;
+
+        const byDoc = new Map<number, SourceDocumentMatch>();
+        for (const r of rows) {
+            const existing = byDoc.get(r.doc_id);
+            if (existing) {
+                existing.matches += 1;
+            } else {
+                byDoc.set(r.doc_id, {
+                    doc_id: r.doc_id,
+                    filename: r.filename,
+                    path: r.path,
+                    repo_id: r.repo_id,
+                    matches: 1,
+                    // rows are pre-sorted by relevance, so the first snippet per
+                    // doc is the best-matching one.
+                    snippet: r.snippet
+                });
+            }
+        }
+
+        return Array.from(byDoc.values())
+            .sort((a, b) => b.matches - a.matches)
+            .slice(0, limit);
+    } catch (e) {
+        console.warn('searchSourceDocuments failed:', (e as Error).message);
+        return [];
+    }
+}
+
+export interface CleanLogEntry {
+    docId: number | bigint | null;
+    filename: string;
+    originalChars: number;
+    cleanedChars: number;
+    verdict: 'cleaned' | 'cleaned_flagged' | 'fell_back';
+    preservedRatio: number;
+    removals: { text: string; reason?: string; category?: string }[];
+    notes?: string;
+}
+
+/**
+ * Records the outcome of a cleanDocument() pass so aggressive noise removal
+ * stays auditable: what was removed, why, and whether the result was accepted,
+ * flagged, or rejected in favour of the original text.
+ */
+export function recordCleanLog(entry: CleanLogEntry) {
+    try {
+        db.prepare(
+            `INSERT INTO document_clean_log
+                (doc_id, filename, original_chars, cleaned_chars, removed_chars, verdict, preserved_ratio, removals, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+            entry.docId === null ? null : Number(entry.docId),
+            entry.filename,
+            entry.originalChars,
+            entry.cleanedChars,
+            Math.max(0, entry.originalChars - entry.cleanedChars),
+            entry.verdict,
+            entry.preservedRatio,
+            JSON.stringify(entry.removals ?? []),
+            entry.notes ?? null
+        );
+    } catch (e) {
+        console.error('[CleanLog] Failed to record cleaning audit entry:', e);
+    }
 }

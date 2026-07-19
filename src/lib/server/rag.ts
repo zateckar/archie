@@ -1,4 +1,4 @@
-import { db } from './db';
+import { db, recordCleanLog } from './db';
 import { processDocumentKnowledge } from './knowledge';
 import { recomputeCommunities, RELATIONSHIP_WEIGHTS, DEFAULT_EDGE_WEIGHT } from './communities';
 import crypto from 'crypto';
@@ -74,11 +74,14 @@ export async function addDocument(filename: string, content: string, metadata: {
 
     // ── Phase 0: Document preprocessing ──────────────────────────────────────
     // Clean the document to remove noise, then generate a comprehensive summary.
-    // Cleaning removes boilerplate, formatting artifacts, and valueless content.
+    // Cleaning is deletion + reformatting only (no paraphrase/translation) and
+    // returns a structured audit of what it removed plus a verification verdict,
+    // which we persist below so aggressive noise removal stays inspectable.
     // The summary captures the document's overall meaning and aids knowledge extraction.
-    const cleanedContent = await cleanDocument(content);
+    const cleanResult = await cleanDocument(content);
+    const cleanedContent = cleanResult.text;
     const summary = await summarizeDocument(cleanedContent, filename);
-    console.log(`[DocPreprocess] "${filename}": cleaned ${content.length} → ${cleanedContent.length} chars, summary: ${summary.length} chars`);
+    console.log(`[DocPreprocess] "${filename}": cleaned ${content.length} → ${cleanedContent.length} chars (verdict=${cleanResult.verdict}, preserved=${Math.round(cleanResult.preservedRatio * 100)}%, removals=${cleanResult.removals.length}), summary: ${summary.length} chars`);
 
     // ── Phase 1: async AI work (no transaction held) ──────────────────────────
     // All expensive async operations (LLM calls, embeddings) run here so that
@@ -118,9 +121,17 @@ export async function addDocument(filename: string, content: string, metadata: {
             db.prepare('DELETE FROM documents WHERE repo_id = ? AND path = ?').run(metadata.repoId, metadata.path);
         }
 
+        // Store the CLEANED content, not the raw original: every chunk, embedding,
+        // and knowledge claim below is derived from `cleanedContent`, so the
+        // persisted document must match it (otherwise the stored document text
+        // diverges from its own chunks, and reprocessing/re-chunking would work
+        // from text that never matched what was indexed). The raw source remains
+        // preserved separately (wiki_files table / git working tree). content_hash
+        // stays keyed on the raw input so change-detection still triggers on
+        // source edits even when cleaning output is stable.
         const result = db.prepare('INSERT INTO documents (filename, content, context, summary, repo_id, path, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
             filename,
-            content,
+            cleanedContent,
             `doc_${Date.now()}`,
             summary,
             metadata.repoId || null,
@@ -139,6 +150,20 @@ export async function addDocument(filename: string, content: string, metadata: {
         return { docId: newDocId, chunkRecords };
     })();
 
+    // Persist the cleaning audit log now that we have a docId. Aggressive noise
+    // removal is inspectable via the document_clean_log table: verdict tells you
+    // whether cleaning was accepted / flagged / fell back, and `removals` records
+    // every span the cleaner dropped and why.
+    recordCleanLog({
+        docId,
+        filename,
+        originalChars: content.length,
+        cleanedChars: cleanedContent.length,
+        verdict: cleanResult.verdict,
+        preservedRatio: cleanResult.preservedRatio,
+        removals: cleanResult.removals
+    });
+
     // ── Phase 3: async knowledge processing (outside any transaction) ─────────
     await processDocumentKnowledge(Number(docId), chunkRecords, summary);
 
@@ -155,6 +180,10 @@ export async function addDocument(filename: string, content: string, metadata: {
 }
 
 async function ensureVectorInit() {
+    // Block on any pending dimension migration so a search can't lock the index
+    // to a stale dimension while reembedAll() is mid-flight. After the first
+    // boot-time call this resolves immediately (shared guarded promise).
+    await ensureEmbeddingsMigrated();
     const dimension = detectStoredDimension('chunks') ?? EMBEDDING_DIMENSION;
     try {
         db.prepare("SELECT vector_init('chunks', 'embedding', ?)").get(`dimension=${dimension},distance=cosine`);
@@ -244,6 +273,205 @@ export async function backfillAllEmbeddings(): Promise<{ topicsEmbedded: number;
     return { topicsEmbedded, claimsEmbedded };
 }
 
+/**
+ * Re-embeds the ENTIRE corpus (chunks, topics, claims) from scratch.
+ *
+ * Required when switching the embedding provider/model to one that produces a
+ * DIFFERENT vector dimension than the stored vectors (e.g. moving from Gemini's
+ * 3072-dim embeddings to the LiteLLM gateway's 4096-dim embeddings). Query and
+ * stored vectors MUST share a model/dimension, so all previously stored vectors
+ * are stale and vector search silently returns nothing until they're rebuilt.
+ *
+ * Chunk *text* is preserved and re-embedded as-is (no re-chunking / re-cleaning);
+ * only the `embedding` blobs are regenerated with the currently-configured
+ * embedding provider (see getEmbedding → providers.embedContent).
+ *
+ * IMPORTANT: sqlite-vector locks a column's dimension for the life of the
+ * connection once `vector_init` runs against it. Run this in a FRESH process
+ * (e.g. the reembed script) so the index isn't already pinned to the old
+ * dimension. This function clears the stored blobs first (so dimension
+ * auto-detection can't re-lock the old size) and then re-initializes each index
+ * from the first new embedding's length.
+ */
+export async function reembedAll(): Promise<{ chunks: number; topics: number; claims: number; dimension: number | null }> {
+    console.log('[Reembed] Starting full corpus re-embedding...');
+
+    // 1. Clear all stored embeddings so nothing pins the old dimension.
+    db.exec(`
+        UPDATE chunks SET embedding = NULL;
+        UPDATE topics SET embedding = NULL;
+        UPDATE knowledge_claims SET embedding = NULL;
+    `);
+    console.log('[Reembed] Cleared existing embeddings on chunks, topics, knowledge_claims.');
+
+    let newDimension: number | null = null;
+    const initIndex = (table: string, dimension: number) => {
+        try {
+            db.prepare("SELECT vector_init(?, 'embedding', ?)").get(table, `dimension=${dimension},distance=cosine`);
+        } catch {
+            // already initialized this connection
+        }
+    };
+
+    // 2. Re-embed chunks (from their existing, already-cleaned content).
+    const chunkRows = db.prepare('SELECT c.id, c.content, d.filename FROM chunks c JOIN documents d ON c.doc_id = d.id').all() as
+        { id: number; content: string; filename: string }[];
+    console.log(`[Reembed] Re-embedding ${chunkRows.length} chunks...`);
+    const chunkEmbeddings = await mapWithConcurrency(
+        chunkRows,
+        EMBED_CONCURRENCY,
+        (row) => getEmbedding(row.content, 'RETRIEVAL_DOCUMENT', row.filename)
+    );
+    for (let i = 0; i < chunkRows.length; i++) {
+        const embedding = chunkEmbeddings[i];
+        if (newDimension === null) {
+            newDimension = embedding.length;
+            initIndex('chunks', newDimension);
+        }
+        db.prepare('UPDATE chunks SET embedding = vector_as_f32(?) WHERE id = ?')
+            .run(JSON.stringify(embedding), chunkRows[i].id);
+        if ((i + 1) % 25 === 0) console.log(`[Reembed]   chunks ${i + 1}/${chunkRows.length}`);
+    }
+
+    // 3. Re-embed topics.
+    const topicRows = db.prepare('SELECT id, name, description, category FROM topics').all() as
+        { id: number; name: string; description: string | null; category: string | null }[];
+    console.log(`[Reembed] Re-embedding ${topicRows.length} topics...`);
+    let topicsDone = 0;
+    for (const topic of topicRows) {
+        await embedTopic(topic.id, topic.name, topic.description, topic.category);
+        if (++topicsDone % 50 === 0) console.log(`[Reembed]   topics ${topicsDone}/${topicRows.length}`);
+    }
+
+    // 4. Re-embed claims.
+    const claimRows = db.prepare(`
+        SELECT kc.id, kc.claim_text, t.name AS topic_name
+        FROM knowledge_claims kc
+        JOIN topics t ON kc.topic_id = t.id
+    `).all() as { id: number; claim_text: string; topic_name: string }[];
+    console.log(`[Reembed] Re-embedding ${claimRows.length} claims...`);
+    let claimsDone = 0;
+    for (const claim of claimRows) {
+        await embedClaim(claim.id, claim.claim_text, claim.topic_name);
+        if (++claimsDone % 50 === 0) console.log(`[Reembed]   claims ${claimsDone}/${claimRows.length}`);
+    }
+
+    console.log(`[Reembed] Done. Re-embedded ${chunkRows.length} chunks, ${topicRows.length} topics, ${claimRows.length} claims at dimension ${newDimension}.`);
+    return { chunks: chunkRows.length, topics: topicRows.length, claims: claimRows.length, dimension: newDimension };
+}
+
+// ── Automatic embedding-dimension migration ─────────────────────────────────
+// When the configured embedding model changes to one with a different vector
+// size (e.g. Gemini 3072-dim → LiteLLM/Qwen 4096-dim), every stored vector is
+// stale: sqlite-vector locks the index to the stored dimension, so query
+// vectors of a different size make `vector_full_scan` throw and each search
+// silently returns [] (see the catch blocks in searchChunks/Topics/Claims).
+// The remedy is reembedAll(), which previously had to be run by hand. This
+// migration detects the mismatch at STARTUP — before any search has locked the
+// index to the stale dimension — and rebuilds the corpus automatically.
+//
+// It must run in a fresh process, before the first search, exactly once. It's
+// invoked from hooks.server.ts (server boot) and guarded so concurrent boots /
+// repeated calls await the same single run.
+
+let migrationPromise: Promise<void> | null = null;
+
+/** Truthy env values that opt OUT of automatic re-embedding. */
+function autoReembedDisabled(): boolean {
+    return /^(0|false|no|off)$/i.test(process.env.AUTO_REEMBED || '');
+}
+
+/**
+ * The stored corpus embedding dimension, if any table has embedded rows.
+ * Chunks are checked first, then topics, then claims, so a corpus that only
+ * has knowledge (topics/claims) but no chunks is still detected.
+ */
+function currentCorpusDimension(): number | null {
+    return (
+        detectStoredDimension('chunks') ??
+        detectStoredDimension('topics') ??
+        detectStoredDimension('knowledge_claims')
+    );
+}
+
+/** Whether ANY embeddings are stored (i.e. there is a corpus to migrate). */
+function hasStoredEmbeddings(): boolean {
+    return currentCorpusDimension() !== null;
+}
+
+/**
+ * Detects an embedding-dimension mismatch between the stored corpus and the
+ * currently-configured embedding model, and re-embeds the whole corpus if
+ * needed. Safe to call on every startup:
+ *   - No stored embeddings yet → nothing to migrate (first ingestion will set
+ *     the dimension correctly), returns immediately.
+ *   - Stored dimension already matches the live model → no-op.
+ *   - Mismatch → runs reembedAll() once, before any search locks the index.
+ *
+ * The live model dimension is probed with a single tiny embedding call so we
+ * never trigger a needless full re-embed. If that probe fails (e.g. both
+ * providers are down at boot) we skip migration rather than risk wiping a
+ * good corpus — search will keep working if the dimension actually matches,
+ * and a real mismatch will be retried on the next boot.
+ *
+ * Concurrent callers share one in-flight run via `migrationPromise`.
+ */
+export function ensureEmbeddingsMigrated(): Promise<void> {
+    if (migrationPromise) return migrationPromise;
+    migrationPromise = (async () => {
+        try {
+            if (autoReembedDisabled()) {
+                console.log('[Reembed] AUTO_REEMBED disabled; skipping automatic dimension check.');
+                return;
+            }
+
+            const storedDim = currentCorpusDimension();
+            if (storedDim === null) {
+                // Empty corpus: nothing stored yet. The first ingestion embeds
+                // and locks the index at the live model's dimension, so no
+                // migration is needed or possible.
+                return;
+            }
+
+            // Probe the live embedding model's output dimension with a minimal
+            // call. This routes through the same provider stack (LiteLLM primary
+            // → Gemini fallback) as real queries, so the probed dimension is
+            // exactly what queries will produce.
+            let liveDim: number;
+            try {
+                const probe = await getEmbedding('dimension probe', 'RETRIEVAL_QUERY');
+                liveDim = probe.length;
+            } catch (e) {
+                console.warn('[Reembed] Could not probe live embedding dimension; skipping auto-migration this boot:', (e as Error).message);
+                return;
+            }
+
+            if (liveDim === storedDim) {
+                // Dimensions match — corpus is usable as-is.
+                return;
+            }
+
+            console.warn(
+                `[Reembed] Embedding dimension mismatch detected: stored corpus is ${storedDim}-dim ` +
+                `but the configured embedding model now returns ${liveDim}-dim vectors. ` +
+                `Vector search would silently return nothing. Re-embedding the entire corpus automatically...`
+            );
+            const result = await reembedAll();
+            console.log(
+                `[Reembed] Automatic migration complete: ${result.chunks} chunks, ${result.topics} topics, ` +
+                `${result.claims} claims re-embedded at dimension ${result.dimension}.`
+            );
+        } catch (e) {
+            // Never let a migration failure crash server boot. Log loudly; a
+            // persistent mismatch will surface as empty search results and can
+            // be fixed by `npm run reembed`. Reset the guard so a later trigger
+            // (or next boot) can retry.
+            console.error('[Reembed] Automatic embedding migration failed:', e);
+            migrationPromise = null;
+        }
+    })();
+    return migrationPromise;
+}
 
 export async function searchChunks(query: string, limit = 5) {
     await ensureVectorInit();
@@ -342,7 +570,11 @@ export async function reprocessKnowledge(
         let chunkRows: { id: number; content: string }[];
         if (options.rechunk) {
             db.prepare('DELETE FROM chunks WHERE doc_id = ?').run(doc.id);
-            // Re-embed via the regular pipeline
+            // Re-embed via the regular pipeline. `documents.content` holds the
+            // CLEANED text (see addDocument), so re-chunking it matches how the
+            // document was originally indexed — no separate cleaning pass needed
+            // here, and none is done so we don't re-translate/re-rewrite content
+            // that is already clean.
             await embedAndStoreChunks(doc.id, doc.filename, doc.content, undefined);
             chunkRows = db.prepare('SELECT id, content FROM chunks WHERE doc_id = ?').all(doc.id) as { id: number; content: string }[];
         } else {
@@ -368,6 +600,11 @@ export async function reprocessKnowledge(
  * Internal helper that performs the chunking + embedding portion of ingestion,
  * extracted so `reprocessKnowledge` can re-chunk on demand without duplicating
  * the LLM-with-fallback logic.
+ *
+ * NOTE: `content` is expected to be already-cleaned text (the initial ingestion
+ * chunks `cleanedContent`, and `documents.content` now stores the cleaned
+ * version). This function deliberately does NOT run `cleanDocument` again — the
+ * text it receives is the same text that was originally indexed.
  */
 async function embedAndStoreChunks(
     docId: number | bigint,
@@ -551,6 +788,7 @@ const MIN_CLAIM_RELEVANCE = 0.4;
  * pay for it; buildKnowledgeContext enables it for the query-facing search.
  */
 export async function searchTopics(query: string, limit = 10, minScore = MIN_TOPIC_RELEVANCE, useRerank = false): Promise<{ id: number; name: string; description: string | null; category: string | null; score: number }[]> {
+    await ensureEmbeddingsMigrated();
     const queryEmbedding = await getEmbedding(query, "RETRIEVAL_QUERY");
 
     try {
@@ -597,6 +835,7 @@ export async function searchClaims(
     minScore = MIN_CLAIM_RELEVANCE,
     useRerank = false
 ): Promise<{ id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number; claim_type: string; filename: string; path: string | null }[]> {
+    await ensureEmbeddingsMigrated();
     const queryEmbedding = await getEmbedding(query, "RETRIEVAL_QUERY");
 
     try {

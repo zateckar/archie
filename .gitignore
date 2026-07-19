@@ -45,3 +45,4 @@ docs/*
 e2e/*
 test-results/*
 .kilo/*
+playwright-report/*

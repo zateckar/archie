@@ -11,10 +11,28 @@ services:
       - PORT=3000
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      # Gemini fallback model ids
       - TEXT_MODEL=${TEXT_MODEL}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL}
       - RERANK_MODEL=${RERANK_MODEL}
       - CHUNK_MODEL=${CHUNK_MODEL}
+      # LiteLLM (primary) gateway — REQUIRED for the primary provider to activate.
+      # Without LLM_BASE_URL + LLM_API_KEY the app silently runs on Gemini only.
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_TEXT_MODEL=${LLM_TEXT_MODEL:-}
+      - LLM_EMBEDDING_MODEL=${LLM_EMBEDDING_MODEL:-}
+      - LLM_RERANK_MODEL=${LLM_RERANK_MODEL:-}
+      # Native gateway reranker is opt-in and OFF by default (mis-orders results).
+      - LLM_RERANK_ENABLED=${LLM_RERANK_ENABLED:-false}
+      # Only used to init an EMPTY vector index; set to the LiteLLM embedding
+      # model's real output dim (Qwen3-VL-Embedding-8B = 4096) to avoid a wrong
+      # 768 guess if a search ever runs before the first ingestion.
+      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-4096}
+      # On startup, auto-detect an embedding-dimension mismatch (e.g. after
+      # switching embedding models) and re-embed the corpus. Set to false to
+      # migrate manually via `npx tsx scripts/reembed.ts` instead.
+      - AUTO_REEMBED=${AUTO_REEMBED:-true}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
     volumes:
       - ./data:/app/data

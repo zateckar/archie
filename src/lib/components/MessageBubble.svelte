@@ -8,6 +8,8 @@ import ThumbsDown from 'lucide-svelte/icons/thumbs-down';
     import { sanitizeHtml } from '$lib/utils/sanitize';
     import { renderMermaidBlocksIn } from '$lib/utils/mermaidRender';
     import { theme } from '$lib/stores/theme';
+    import Search from 'lucide-svelte/icons/search';
+    import SourceResultsPanel from '$lib/components/SourceResultsPanel.svelte';
 
     type Message = { role: 'user' | 'assistant', content: string, sources?: any[] };
 
@@ -52,6 +54,101 @@ import ThumbsDown from 'lucide-svelte/icons/thumbs-down';
         };
     });
 
+    // ─── Text selection → find source documents ───
+    let selectionText = $state('');
+    let btnX = $state(0);
+    let btnY = $state(0);
+    let showFindBtn = $state(false);
+
+    let panelOpen = $state(false);
+    let panelLoading = $state(false);
+    let panelError = $state<string | null>(null);
+    let panelResults = $state<any[]>([]);
+
+    function handleSelectionEnd() {
+        // Only offer this on assistant messages.
+        if (msg.role !== 'assistant') return;
+        const sel = window.getSelection();
+        const text = sel?.toString().trim() ?? '';
+        // Require a meaningful selection that lives inside this message.
+        if (!sel || text.length < 4 || !proseEl) {
+            showFindBtn = false;
+            return;
+        }
+        const anchorOk = sel.anchorNode && proseEl.contains(sel.anchorNode);
+        const focusOk = sel.focusNode && proseEl.contains(sel.focusNode);
+        if (!anchorOk || !focusOk) {
+            showFindBtn = false;
+            return;
+        }
+        const rect = sel.getRangeAt(0).getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) {
+            showFindBtn = false;
+            return;
+        }
+        selectionText = text;
+        // Position the floating button just above the selection (viewport-fixed).
+        btnX = Math.min(Math.max(rect.left + rect.width / 2, 80), window.innerWidth - 80);
+        btnY = rect.top - 8;
+        showFindBtn = true;
+    }
+
+    async function findSources() {
+        showFindBtn = false;
+        const q = selectionText;
+        if (!q) return;
+        panelOpen = true;
+        panelLoading = true;
+        panelError = null;
+        panelResults = [];
+
+        // Restrict the search to the documents actually used in THIS answer.
+        const sourceIds = (msg.sources ?? [])
+            .map((s: any) => s?.path || s?.filename)
+            .filter((s: any): s is string => typeof s === 'string' && s.length > 0);
+
+        if (sourceIds.length === 0) {
+            panelLoading = false;
+            panelResults = [];
+            return;
+        }
+
+        try {
+            const res = await fetch('/api/search-sources', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ q, sources: sourceIds })
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                panelError = body.error || `Search failed (${res.status})`;
+            } else {
+                const data = await res.json();
+                panelResults = data.results ?? [];
+            }
+        } catch (e) {
+            panelError = 'Search request failed.';
+            console.error('findSources error:', e);
+        } finally {
+            panelLoading = false;
+        }
+    }
+
+    // Hide the floating button when the selection is cleared or the user scrolls.
+    $effect(() => {
+        function onDocMouseDown(e: MouseEvent) {
+            // Keep it open if clicking the button itself.
+            const target = e.target as HTMLElement;
+            if (target?.closest?.('[data-find-sources-btn]')) return;
+            showFindBtn = false;
+        }
+        document.addEventListener('mousedown', onDocMouseDown);
+        window.addEventListener('scroll', () => (showFindBtn = false), true);
+        return () => {
+            document.removeEventListener('mousedown', onDocMouseDown);
+        };
+    });
+
     async function submitFeedback(rating: number) {
         if (feedbackGiven !== null) return;
         feedbackGiven = rating;
@@ -88,7 +185,14 @@ import ThumbsDown from 'lucide-svelte/icons/thumbs-down';
             <div class="p-5 rounded-2xl leading-relaxed shadow-2xl
                 {msg.role === 'user' ? 'bg-[#0E3A2F] text-[#78FAAE] rounded-tr-none border border-[#78FAAE]/20' : 'bg-[var(--bg-raised)] border border-[var(--border-secondary)] text-[var(--text-secondary)] rounded-tl-none'}">
                 {#if msg.role === 'assistant'}
-                    <div bind:this={proseEl} class="prose prose-sm prose-slate max-w-none" class:prose-invert={isDark}>
+                    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                    <div
+                        bind:this={proseEl}
+                        class="prose prose-sm prose-slate max-w-none"
+                        class:prose-invert={isDark}
+                        onmouseup={handleSelectionEnd}
+                        role="article"
+                    >
                         {@html renderedContent}
                     </div>
                 {:else}
@@ -128,3 +232,26 @@ import ThumbsDown from 'lucide-svelte/icons/thumbs-down';
         </div>
     </div>
 </div>
+
+{#if showFindBtn}
+    <button
+        data-find-sources-btn
+        class="fixed z-[70] -translate-x-1/2 -translate-y-full flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0E3A2F] border border-[#78FAAE]/40 text-[#78FAAE] text-xs font-semibold shadow-xl shadow-black/40 hover:bg-[#134a3c] transition-colors"
+        style="left: {btnX}px; top: {btnY}px;"
+        onclick={findSources}
+        transition:fly={{ y: 6, duration: 120 }}
+    >
+        <Search class="w-3.5 h-3.5" />
+        Find sources
+    </button>
+{/if}
+
+<SourceResultsPanel
+    open={panelOpen}
+    query={selectionText}
+    loading={panelLoading}
+    results={panelResults}
+    error={panelError}
+    hasSources={(msg.sources ?? []).length > 0}
+    onClose={() => (panelOpen = false)}
+/>

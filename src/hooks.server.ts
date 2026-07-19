@@ -4,6 +4,7 @@ import { initAutoSync } from '$lib/server/git';
 
 import { db } from '$lib/server/db';
 import { hashPassword } from '$lib/server/auth';
+import { ensureEmbeddingsMigrated } from '$lib/server/rag';
 
 // ── Production safety: require explicit ADMIN_PASSWORD ──
 if (process.env.NODE_ENV === 'production') {
@@ -45,6 +46,14 @@ if (process.env.NODE_ENV === 'production') {
         }
     }
 })();
+
+// Auto-migrate embeddings if the configured embedding model's vector dimension
+// no longer matches the stored corpus (e.g. after switching to the LiteLLM /
+// Qwen 4096-dim embedder). Runs once at boot, BEFORE any search locks the
+// vector index to the stale dimension, and re-embeds the corpus if needed.
+// Fire-and-forget: it never throws, and searches trigger the same guarded run
+// via ensureVectorInit if a request somehow arrives before boot finishes.
+ensureEmbeddingsMigrated();
 
 // Initialize auto-sync on server start
 initAutoSync();

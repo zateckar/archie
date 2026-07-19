@@ -6,6 +6,7 @@ import path from 'path';
 import { db } from './db';
 import { decrypt } from './crypto-utils';
 import { diffLines } from 'diff';
+import { addDocument } from './rag';
 
 export interface FileTreeItem {
     name: string;
@@ -29,19 +30,20 @@ export function getRepo(repoId: number) {
     return db.prepare('SELECT * FROM git_repos WHERE id = ?').get(repoId) as { id: number; url: string; pat: string; local_path: string; last_commit: string | null } | undefined;
 }
 
-const treeCache = new Map<any[], any[]>();
+const treeCache = new Map<number, FileTreeItem[]>();
 
 export function clearWikiTreeCache(repoId?: number) {
     if (repoId !== undefined) {
-        treeCache.delete(repoId as any);
+        treeCache.delete(repoId);
     } else {
         treeCache.clear();
     }
 }
 
 export function getFileTree(repoId: number): FileTreeItem[] {
-    if (treeCache.has(repoId as any)) {
-        return treeCache.get(repoId as any) as FileTreeItem[];
+    const cached = treeCache.get(repoId);
+    if (cached) {
+        return cached;
     }
     const repo = getRepo(repoId);
     if (!repo) return [];
@@ -84,7 +86,7 @@ export function getFileTree(repoId: number): FileTreeItem[] {
         return a.name.localeCompare(b.name);
     });
 
-    treeCache.set(repoId as any, items as any);
+    treeCache.set(repoId, items);
     return items;
 }
 
@@ -283,13 +285,53 @@ async function buildModifiedTree(
 }
 
 /**
+ * Recursively count non-hidden `.md` files in the working tree on disk.
+ * Skips dot-directories and node_modules to mirror the tree view.
+ */
+function countDiskMdFiles(dir: string): number {
+    let count = 0;
+    let entries: fs.Dirent[];
+    try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+        return 0;
+    }
+    for (const entry of entries) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+        if (entry.isDirectory()) {
+            count += countDiskMdFiles(path.join(dir, entry.name));
+        } else if (entry.name.endsWith('.md')) {
+            count++;
+        }
+    }
+    return count;
+}
+
+/**
+ * Recursively count `.md` blobs in a git tree object.
+ */
+async function countTreeMdFiles(dir: string, treeOid: string): Promise<number> {
+    let count = 0;
+    const { tree } = await git.readTree({ fs, dir, oid: treeOid });
+    for (const entry of tree) {
+        if (entry.type === 'tree') {
+            count += await countTreeMdFiles(dir, entry.oid);
+        } else if (entry.type === 'blob' && entry.path.endsWith('.md')) {
+            count++;
+        }
+    }
+    return count;
+}
+
+/**
  * Core wiki push operation.
  *
  * 1. Fetches the current remote state.
  * 2. Determines the best "base tree":
- *    - If the remote tree looks intact (has roughly as many files as disk), use it.
- *    - If the remote tree looks corrupt/incomplete, fall back to the last known good
- *      tree stored in .git_disabled (the original clone snapshot).
+ *    - If the parent tree looks intact (has roughly as many .md files as disk,
+ *      counted recursively in comparable units), use it.
+ *    - If the parent tree looks corrupt/incomplete, fall back to the last known
+ *      good tree stored in .git_disabled (the original clone snapshot).
  * 3. Applies the change to ONLY the target file within that tree (no index used).
  * 4. Writes a new commit + updates the local ref + pushes.
  *
@@ -305,6 +347,7 @@ async function fetchModifyCommitPush(
     message: string
 ): Promise<void> {
     const onAuth = () => ({ username: 'token', password: pat });
+    const normalizedFilePath = filePath.replace(/\\/g, '/');
     const fullRef = `refs/heads/${currentBranch}`;
 
     // 1. Fetch to update the remote-tracking ref
@@ -314,48 +357,74 @@ async function fetchModifyCommitPush(
         console.warn('[Wiki] Fetch failed, will try push anyway:', fetchErr);
     }
 
-    // 2. Resolve the current remote tip (prefer tracking ref, fall back to local ref)
+    // 2. Resolve the current tip to build on.
+    //
+    // IMPORTANT: isomorphic-git's `git.push` does NOT advance the local
+    // remote-tracking ref (refs/remotes/origin/<branch>) after a successful
+    // push. If we always trusted the tracking ref we would keep building every
+    // new commit on top of the ORIGINAL clone commit, producing a
+    // non-fast-forward push (rejected) and committing stale content. To stay
+    // correct we take the most-advanced of the remote-tracking ref and the
+    // local branch ref (the latter reflects our own previous pushes).
+    const remoteTrackingRef = `refs/remotes/origin/${currentBranch}`;
+    let trackingOid: string | null = null;
+    let localOid: string | null = null;
+    try { trackingOid = await git.resolveRef({ fs, dir, ref: remoteTrackingRef }); } catch { /* no tracking ref yet */ }
+    try { localOid = await git.resolveRef({ fs, dir, ref: fullRef }); } catch { /* no local ref yet */ }
+
+    // Pick whichever ref is more advanced:
+    //  - If local is a descendant of tracking, local is ahead (our own pushes) -> use local.
+    //  - If tracking is a descendant of local, the remote moved ahead (a fresh
+    //    fetch pulled in someone else's commits) -> use tracking.
+    //  - If they diverge or share no history, prefer local (contains our edits).
     let parentOid: string;
-    try {
-        parentOid = await git.resolveRef({ fs, dir, ref: `refs/remotes/origin/${currentBranch}` });
-    } catch {
-        parentOid = await git.resolveRef({ fs, dir, ref: fullRef });
+    if (trackingOid && localOid && trackingOid !== localOid) {
+        let localIsAhead = false;
+        let trackingIsAhead = false;
+        try { localIsAhead = await git.isDescendent({ fs, dir, oid: localOid, ancestor: trackingOid }); } catch { /* unrelated */ }
+        try { trackingIsAhead = await git.isDescendent({ fs, dir, oid: trackingOid, ancestor: localOid }); } catch { /* unrelated */ }
+        parentOid = trackingIsAhead && !localIsAhead ? trackingOid : localOid;
+    } else {
+        parentOid = (localOid ?? trackingOid) as string;
+    }
+    if (!parentOid) {
+        throw new Error('[Wiki] Could not resolve a branch tip to commit onto');
     }
 
-    // 3. Determine the best base tree
+    // 3. Determine the best base tree (from the parent commit chosen above)
     let baseTreeOid: string;
     try {
-        const { commit: remoteCommit } = await git.readCommit({ fs, dir, oid: parentOid });
-        const remoteTree = await git.readTree({ fs, dir, oid: remoteCommit.tree });
-        // Count non-hidden .md files on disk to sanity-check the remote tree
-        const diskMdCount = fs.readdirSync(dir).filter(f => f.endsWith('.md') && !f.startsWith('.')).length;
-        const remoteFileCount = remoteTree.tree.filter(e => e.type === 'blob' || e.type === 'tree').length;
-        const remoteTreeLooksGood = remoteFileCount >= Math.max(1, diskMdCount / 2);
+        const { commit: parentCommit } = await git.readCommit({ fs, dir, oid: parentOid });
+        // Sanity-check the parent tree against disk using comparable units:
+        // count .md files RECURSIVELY on disk and RECURSIVELY in the tree.
+        const diskMdCount = countDiskMdFiles(dir);
+        const treeMdCount = await countTreeMdFiles(dir, parentCommit.tree);
+        const remoteTreeLooksGood = treeMdCount >= Math.max(1, diskMdCount / 2);
 
         if (remoteTreeLooksGood) {
-            baseTreeOid = remoteCommit.tree;
+            baseTreeOid = parentCommit.tree;
         } else {
             // Remote tree appears incomplete (e.g. after a bad push).
             // Fall back to the original clone's tree stored in .git_disabled.
-            console.warn(`[Wiki] Remote tree has ${remoteFileCount} entries vs ${diskMdCount} on disk — restoring from .git_disabled snapshot`);
+            console.warn(`[Wiki] Parent tree has ${treeMdCount} .md files vs ${diskMdCount} on disk — restoring from .git_disabled snapshot`);
             const disabledRef = path.join(dir, '.git_disabled', 'refs', 'heads', currentBranch);
             if (fs.existsSync(disabledRef)) {
                 const origOid = fs.readFileSync(disabledRef, 'utf8').trim();
                 const { commit: origCommit } = await git.readCommit({ fs, dir, oid: origOid });
                 baseTreeOid = origCommit.tree;
             } else {
-                baseTreeOid = remoteCommit.tree; // best we can do
+                baseTreeOid = parentCommit.tree; // best we can do
             }
         }
     } catch (err) {
-        throw new Error(`[Wiki] Could not read remote commit tree: ${err}`);
+        throw new Error(`[Wiki] Could not read parent commit tree: ${err}`);
     }
 
     // 4. Write blob for new content
     const blobOid = await git.writeBlob({ fs, dir, blob: Buffer.from(content, 'utf8') });
 
     // 5. Build modified tree (ONLY the target file changes)
-    const newTreeOid = await buildModifiedTree(dir, baseTreeOid, filePath.split('/'), blobOid);
+    const newTreeOid = await buildModifiedTree(dir, baseTreeOid, normalizedFilePath.split('/'), blobOid);
 
     // 6. Write commit object (index is NOT used — we build the tree directly)
     const now = Math.floor(Date.now() / 1000);
@@ -377,11 +446,35 @@ async function fetchModifyCommitPush(
     await git.writeRef({ fs, dir, ref: fullRef, value: newCommitOid, force: true });
 
     // 8. Push
-    const pushResult = await git.push({ fs, http, dir, url: repoUrl, ref: fullRef, onAuth, onProgress: () => {} });
-    if (pushResult?.ok) {
-        console.log(`[Wiki] Pushed ${filePath} successfully`);
-    } else if (pushResult?.error) {
-        console.warn(`[Wiki] Push returned error: ${pushResult.error}`);
+    try {
+        const pushResult = await git.push({ fs, http, dir, url: repoUrl, ref: fullRef, onAuth, onProgress: () => {} });
+        if (pushResult && pushResult.ok) {
+            console.log(`[Wiki] Pushed ${normalizedFilePath} successfully`);
+            // isomorphic-git does NOT advance the remote-tracking ref after a
+            // push. Do it manually so the NEXT save builds on this commit
+            // instead of the stale original clone tip (which caused
+            // non-fast-forward pushes and reverted edits).
+            try {
+                await git.writeRef({ fs, dir, ref: remoteTrackingRef, value: newCommitOid, force: true });
+            } catch (trackErr) {
+                console.warn('[Wiki] Failed to update remote-tracking ref after push:', trackErr);
+            }
+        } else {
+            const errMsg = pushResult?.error || 'Unknown push error';
+            console.warn(`[Wiki] Push returned error: ${errMsg}`);
+            // Roll back the local branch ref back to its pre-commit tip (parentOid)
+            await git.writeRef({ fs, dir, ref: fullRef, value: parentOid, force: true });
+            throw new Error(`[Wiki] Push failed: ${errMsg}`);
+        }
+    } catch (pushErr) {
+        console.warn(`[Wiki] Push threw error: ${pushErr}`);
+        // Roll back the local branch ref back to its pre-commit tip (parentOid)
+        try {
+            await git.writeRef({ fs, dir, ref: fullRef, value: parentOid, force: true });
+        } catch (rollbackErr) {
+            console.error('[Wiki] Failed to roll back local ref:', rollbackErr);
+        }
+        throw pushErr;
     }
 }
 
@@ -389,7 +482,8 @@ export async function saveWikiFile(repoId: number, filePath: string, content: st
     const repo = getRepo(repoId);
     if (!repo) throw new Error('Repo not found');
 
-    const fullPath = path.join(repo.local_path, filePath);
+    const normalizedFilePath = filePath.replace(/\\/g, '/');
+    const fullPath = path.join(repo.local_path, normalizedFilePath);
     const resolvedPath = path.resolve(fullPath);
     const repoDir = path.resolve(repo.local_path);
     if (!resolvedPath.startsWith(repoDir)) throw new Error('Invalid path');
@@ -398,6 +492,14 @@ export async function saveWikiFile(repoId: number, filePath: string, content: st
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
     }
+
+    // Cache the previous content of the file (or null if new) to roll back on failure
+    let previousContent: string | null = null;
+    try {
+        if (fs.existsSync(resolvedPath)) {
+            previousContent = fs.readFileSync(resolvedPath, 'utf8');
+        }
+    } catch (_) {}
 
     // Write the file to disk first
     fs.writeFileSync(resolvedPath, content, 'utf8');
@@ -409,6 +511,13 @@ export async function saveWikiFile(repoId: number, filePath: string, content: st
         // Ensure the .git structure is valid before any git operation
         repairGitIfNeeded(repo.local_path);
 
+        // Stage the file in the index so HEAD and index remain in sync
+        try {
+            await git.add({ fs, dir: repo.local_path, filepath: normalizedFilePath });
+        } catch (addErr) {
+            console.warn('[Wiki] Failed to stage file in index:', addErr);
+        }
+
         // Detect current branch (HEAD must exist after repair)
         let currentBranch = 'main';
         try {
@@ -419,11 +528,26 @@ export async function saveWikiFile(repoId: number, filePath: string, content: st
         // Push only the changed file — never touches other files
         await fetchModifyCommitPush(
             repo.local_path, repo.url, pat, currentBranch,
-            filePath, content,
-            `[Wiki] Updated ${filePath}`
+            normalizedFilePath, content,
+            `[Wiki] Updated ${normalizedFilePath}`
         );
     } catch (err) {
         console.warn('[Wiki] Push failed (remote may not be reachable):', err);
+        // Roll back the disk file and index to its previous content or delete it if it was a new file
+        try {
+            if (previousContent !== null) {
+                fs.writeFileSync(resolvedPath, previousContent, 'utf8');
+                await git.add({ fs, dir: repo.local_path, filepath: normalizedFilePath });
+            } else {
+                if (fs.existsSync(resolvedPath)) {
+                    fs.unlinkSync(resolvedPath);
+                }
+                await git.remove({ fs, dir: repo.local_path, filepath: normalizedFilePath });
+            }
+        } catch (rollbackErr) {
+            console.error('[Wiki] Failed to roll back file content and index:', rollbackErr);
+        }
+        throw err;
     }
 
     // Update last commit reference in DB
@@ -440,23 +564,39 @@ export async function saveWikiFile(repoId: number, filePath: string, content: st
             content = excluded.content,
             content_hash = excluded.content_hash,
             updated_at = CURRENT_TIMESTAMP
-    `).run(repoId, filePath, path.basename(filePath), content, contentHash);
+    `).run(repoId, normalizedFilePath, path.basename(normalizedFilePath), content, contentHash);
 
     // Invalidate memory tree cache
     clearWikiTreeCache(repoId);
+
+    // Asynchronously call addDocument to ingest the new/updated file content into the RAG database.
+    // Also stage the cleaned file version generated by addDocument in the 'Clean/' folder.
+    addDocument(path.basename(normalizedFilePath), content, { repoId, path: normalizedFilePath })
+        .then(({ cleanedContent }) => {
+            try {
+                const cleanRelPath = 'Clean/' + normalizedFilePath;
+                const cleanFullPath = path.join(repo.local_path, cleanRelPath);
+                const cleanDir = path.dirname(cleanFullPath);
+                if (!fs.existsSync(cleanDir)) {
+                    fs.mkdirSync(cleanDir, { recursive: true });
+                }
+                fs.writeFileSync(cleanFullPath, cleanedContent, 'utf8');
+                git.add({ fs, dir: repo.local_path, filepath: cleanRelPath })
+                    .catch(e => console.warn('[Wiki] Failed to stage cleaned file:', e));
+            } catch (err) {
+                console.warn('[Wiki] Failed to save cleaned file locally:', err);
+            }
+        })
+        .catch(err => {
+            console.warn('[Wiki] RAG ingestion failed for saved file:', err);
+        });
 }
 
 export async function createWikiFile(repoId: number, filePath: string, content: string): Promise<void> {
-    const repo = getRepo(repoId);
-    if (!repo) throw new Error('Repo not found');
-
-    const fullPath = path.join(repo.local_path, filePath);
-    const dir = path.dirname(fullPath);
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-    }
-
-    fs.writeFileSync(fullPath, content, 'utf8');
+    // saveWikiFile handles path validation, parent-directory creation, the disk
+    // write, staging, commit/push, DB upsert and RAG ingestion — so creating a
+    // file is just a save of new content. (Avoids a redundant, unvalidated
+    // pre-write and a duplicate commit.)
     await saveWikiFile(repoId, filePath, content);
 }
 
@@ -494,33 +634,65 @@ export async function getFileHistory(repoId: number, filePath: string, maxCount:
 }
 
 export async function revertToCommit(repoId: number, filePath: string, oid: string): Promise<void> {
-    const oldContent = await readWikiFileAtCommit(repoId, filePath, oid);
+    const normalizedFilePath = filePath.replace(/\\/g, '/');
+    const oldContent = await readWikiFileAtCommit(repoId, normalizedFilePath, oid);
     if (oldContent === null) throw new Error('Could not read file at specified commit');
 
     const repo = getRepo(repoId);
     if (!repo) throw new Error('Repo not found');
 
-    const fullPath = path.join(repo.local_path, filePath);
+    const fullPath = path.join(repo.local_path, normalizedFilePath);
+
+    // Cache the previous content of the file (or null if new) to roll back on failure
+    let previousContent: string | null = null;
+    try {
+        if (fs.existsSync(fullPath)) {
+            previousContent = fs.readFileSync(fullPath, 'utf8');
+        }
+    } catch (_) {}
+
     fs.writeFileSync(fullPath, oldContent, 'utf8');
 
     const pat = repo.pat.startsWith('enc:') ? decrypt(repo.pat.slice(4)) : repo.pat;
 
-    repairGitIfNeeded(repo.local_path);
-
-    let currentBranch = 'main';
     try {
-        const branch = await git.currentBranch({ fs, dir: repo.local_path });
-        if (branch) currentBranch = branch;
-    } catch (_) {}
+        repairGitIfNeeded(repo.local_path);
 
-    try {
+        // Stage the file in the index so HEAD and index remain in sync
+        try {
+            await git.add({ fs, dir: repo.local_path, filepath: normalizedFilePath });
+        } catch (addErr) {
+            console.warn('[Wiki] Failed to stage file in index on revert:', addErr);
+        }
+
+        let currentBranch = 'main';
+        try {
+            const branch = await git.currentBranch({ fs, dir: repo.local_path });
+            if (branch) currentBranch = branch;
+        } catch (_) {}
+
         await fetchModifyCommitPush(
             repo.local_path, repo.url, pat, currentBranch,
-            filePath, oldContent,
-            `[Wiki] Reverted ${filePath} to ${oid.slice(0, 7)}`
+            normalizedFilePath, oldContent,
+            `[Wiki] Reverted ${normalizedFilePath} to ${oid.slice(0, 7)}`
         );
     } catch (err) {
         console.warn('[Wiki] Revert push failed:', err);
+        // Roll back the disk file and index to its pre-revert content or delete if it didn't exist
+        try {
+            if (previousContent !== null) {
+                fs.writeFileSync(fullPath, previousContent, 'utf8');
+                await git.add({ fs, dir: repo.local_path, filepath: normalizedFilePath });
+            } else {
+                if (fs.existsSync(fullPath)) {
+                    fs.unlinkSync(fullPath);
+                }
+                await git.remove({ fs, dir: repo.local_path, filepath: normalizedFilePath });
+            }
+        } catch (rollbackErr) {
+            console.error('[Wiki] Failed to roll back file and index content on revert:', rollbackErr);
+        }
+        throw err;
     }
 
     // Update last commit reference in DB
@@ -538,10 +710,32 @@ export async function revertToCommit(repoId: number, filePath: string, oid: stri
             content = excluded.content,
             content_hash = excluded.content_hash,
             updated_at = CURRENT_TIMESTAMP
-    `).run(repoId, filePath, path.basename(filePath), oldContent, contentHash);
+    `).run(repoId, normalizedFilePath, path.basename(normalizedFilePath), oldContent, contentHash);
 
     // Invalidate memory tree cache
     clearWikiTreeCache(repoId);
+
+    // Asynchronously call addDocument to ingest the reverted content into the RAG database,
+    // and stage the cleaned file version in the 'Clean/' folder.
+    addDocument(path.basename(normalizedFilePath), oldContent, { repoId, path: normalizedFilePath })
+        .then(({ cleanedContent }) => {
+            try {
+                const cleanRelPath = 'Clean/' + normalizedFilePath;
+                const cleanFullPath = path.join(repo.local_path, cleanRelPath);
+                const cleanDir = path.dirname(cleanFullPath);
+                if (!fs.existsSync(cleanDir)) {
+                    fs.mkdirSync(cleanDir, { recursive: true });
+                }
+                fs.writeFileSync(cleanFullPath, cleanedContent, 'utf8');
+                git.add({ fs, dir: repo.local_path, filepath: cleanRelPath })
+                    .catch(e => console.warn('[Wiki] Failed to stage cleaned file:', e));
+            } catch (err) {
+                console.warn('[Wiki] Failed to save cleaned file locally:', err);
+            }
+        })
+        .catch(err => {
+            console.warn('[Wiki] RAG ingestion failed for reverted file:', err);
+        });
 }
 
 export function getDiff(oldContent: string, newContent: string): string {

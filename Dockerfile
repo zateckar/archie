@@ -30,6 +30,14 @@ RUN mkdir -p data extensions
 COPY --from=builder /app/build ./build
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
+# Copy maintenance scripts (e.g. reembed) and source they import, so operators
+# can run `npx tsx scripts/reembed.ts` inside the container to rebuild the vector
+# corpus at the current embedding model's dimension (needed after switching
+# embedding models to a different vector size — otherwise search silently
+# returns nothing until the corpus is re-embedded).
+COPY --from=builder /app/scripts ./scripts
+COPY --from=builder /app/src ./src
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
 # Environment variables
 ENV NODE_ENV=production
