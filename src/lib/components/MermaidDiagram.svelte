@@ -1,10 +1,10 @@
 <script lang="ts">
     import { renderMermaid, hashId, registerReRenderCallback } from '$lib/utils/mermaid';
     import { openMermaidFullscreen } from '$lib/stores/mermaidFullscreen';
-    import Copy from 'lucide-svelte/icons/copy';
-import CodeIcon from 'lucide-svelte/icons/code';
-import Eye from 'lucide-svelte/icons/eye';
-import Maximize2 from 'lucide-svelte/icons/maximize-2';
+    import Copy from '@lucide/svelte/icons/copy';
+import CodeIcon from '@lucide/svelte/icons/code';
+import Eye from '@lucide/svelte/icons/eye';
+import Maximize2 from '@lucide/svelte/icons/maximize-2';
 
     let { code, id }: { code: string; id?: string } = $props();
 

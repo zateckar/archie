@@ -1,12 +1,12 @@
 <script lang="ts">
     import { page } from '$app/state';
-    import FileText from 'lucide-svelte/icons/file-text';
-import GitBranch from 'lucide-svelte/icons/git-branch';
-import Users from 'lucide-svelte/icons/users';
-import LayoutDashboard from 'lucide-svelte/icons/layout-dashboard';
-import ChevronLeft from 'lucide-svelte/icons/chevron-left';
-import LogOut from 'lucide-svelte/icons/log-out';
-import Network from 'lucide-svelte/icons/network';
+    import FileText from '@lucide/svelte/icons/file-text';
+import GitBranch from '@lucide/svelte/icons/git-branch';
+import Users from '@lucide/svelte/icons/users';
+import LayoutDashboard from '@lucide/svelte/icons/layout-dashboard';
+import ChevronLeft from '@lucide/svelte/icons/chevron-left';
+import LogOut from '@lucide/svelte/icons/log-out';
+import Network from '@lucide/svelte/icons/network';
 
     let { children } = $props();
 

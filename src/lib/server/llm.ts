@@ -1,10 +1,20 @@
 import 'dotenv/config';
 import * as providers from './providers';
 
-// Gemini model ids. These are used as the FALLBACK provider — every model call
-// below goes through ./providers, which prefers the custom LiteLLM gateway
-// (LLM_* env vars) when configured and transparently falls back to these
-// Gemini models otherwise (or on a LiteLLM error).
+/**
+ * High-level LLM task layer (provider-agnostic).
+ *
+ * This module implements the application's LLM-powered operations — chat
+ * streaming, RAG context synthesis, semantic chunking, document cleaning,
+ * knowledge extraction, reranking, embeddings, etc. It does NOT talk to any
+ * provider SDK directly: every model call goes through ./providers, which
+ * prefers the custom LiteLLM gateway (LLM_* env vars) when configured and
+ * transparently falls back to Gemini otherwise (or on a LiteLLM error).
+ *
+ * The Gemini model ids below are passed to ./providers only as the FALLBACK
+ * model identifiers; they are not used unless the LiteLLM primary is
+ * unconfigured or errors.
+ */
 let apiKey = process.env.GEMINI_API_KEY || '';
 const TEXT_MODEL = process.env.TEXT_MODEL || "gemini-3-flash-preview";
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "gemini-embedding-2";
@@ -439,7 +449,11 @@ export async function cleanDocument(text: string): Promise<CleanResult> {
         };
     };
 
-    const CHUNK_SIZE = 80000; // ~80K chars per chunk, well within 1M token context
+    // 80K chars per section on Gemini (well within its 1M token context). When
+    // the LiteLLM gateway is primary, sectionMaxChars() returns a much smaller
+    // value so each near-verbatim generation finishes under the gateway's time
+    // cap instead of timing out (which forced a full Gemini fallback).
+    const CHUNK_SIZE = providers.sectionMaxChars(80000);
 
     if (text.length <= CHUNK_SIZE) {
         const r = await cleanAndVerifyChunk(text, false, 'document');
@@ -524,9 +538,14 @@ export async function summarizeDocument(text: string, filename: string): Promise
         ${chunk}
     `;
 
+    // Summaries benefit from whole-document context and require large, slow
+    // generation that exceeds the LiteLLM gateway's time cap; route them to
+    // Gemini directly (whole-doc, 80K sections) for best quality.
+    const SUMMARY_GEN_OPTS = { preferGemini: true } as const;
+
     if (text.length <= SUMMARY_SECTION_MAX_CHARS) {
         try {
-            const result = await withRetry(() => providers.generateContent(buildSectionPrompt(text, false), { model: TEXT_MODEL }, SUMMARY_CONFIG));
+            const result = await withRetry(() => providers.generateContent(buildSectionPrompt(text, false), { model: TEXT_MODEL }, SUMMARY_CONFIG, SUMMARY_GEN_OPTS));
             return result.response.text().trim();
         } catch (e) {
             console.error('Document summarization failed:', e);
@@ -542,7 +561,7 @@ export async function summarizeDocument(text: string, filename: string): Promise
     const sectionSummaries: string[] = [];
     for (const section of sections) {
         try {
-            const result = await withRetry(() => providers.generateContent(buildSectionPrompt(section, sections.length > 1), { model: TEXT_MODEL }, SUMMARY_CONFIG));
+            const result = await withRetry(() => providers.generateContent(buildSectionPrompt(section, sections.length > 1), { model: TEXT_MODEL }, SUMMARY_CONFIG, SUMMARY_GEN_OPTS));
             const summary = result.response.text().trim();
             if (summary) sectionSummaries.push(summary);
         } catch (e) {
@@ -574,7 +593,7 @@ export async function summarizeDocument(text: string, filename: string): Promise
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(mergePrompt, { model: TEXT_MODEL }, SUMMARY_CONFIG));
+        const result = await withRetry(() => providers.generateContent(mergePrompt, { model: TEXT_MODEL }, SUMMARY_CONFIG, SUMMARY_GEN_OPTS));
         const merged = result.response.text().trim();
         return merged || sectionSummaries.join('\n\n');
     } catch (e) {
@@ -770,8 +789,45 @@ flowchart TD
 \`\`\`
 
 - Supported diagram types: flowchart, sequenceDiagram, classDiagram, stateDiagram-v2, erDiagram, gantt, mindmap.
-- Prefer \`flowchart\` over the legacy \`graph\` syntax. Keep diagrams focused (5–15 nodes). Avoid double-quotes inside node labels — escape with single quotes or omit them. Do not use reserved words (end, default) as node IDs.
-- Diagrams enhance text explanations; do not replace prose with diagrams alone.`;
+- Prefer \`flowchart\` over the legacy \`graph\` syntax. Keep diagrams focused (5–15 nodes).
+- Diagrams enhance text explanations; do not replace prose with diagrams alone.
+
+STRICT MERMAID SYNTAX RULES (follow exactly to avoid parse errors):
+- Node IDs must be simple ASCII tokens with no spaces or accents (e.g. \`AppA\`, \`db1\`). Put all human-readable text — including spaces, slashes, accented/Unicode characters (á, č, ž, ü, …) — INSIDE the label brackets, always wrapped in double quotes:
+  - Correct:   \`AppA["Žádající aplikace"]\`
+  - Correct:   \`APIM["SKODA EAI / API Management"]\`
+  - Incorrect: \`AppA[Žádající aplikace]\`  (unquoted label with spaces/accents)
+- Subgraph titles use quotes, NOT node-shape brackets, and need a separate ID:
+  - Correct:   \`subgraph forbidden["Zakázáno"]\`
+  - Incorrect: \`subgraph Forbidden[Zakázáno]\`
+- Use only full, two-dash link operators. Never a single dash:
+  - Arrow: \`-->\`   Dotted: \`-.->\`   Thick: \`==>\`   Cross: \`--x\`   Circle: \`--o\`
+  - Incorrect: \`A -x B\`  →  Correct: \`A --x B\`
+- One edge per line. Do NOT chain multiple links on a single line:
+  - Incorrect: \`AppA --x Direct --x AppB\`
+  - Correct:
+    \`\`\`
+    AppA --x Direct
+    Direct --x AppB
+    \`\`\`
+- Edge labels go between pipes right after the arrow: \`B -->|Yes| C\`.
+- Never use reserved words as node IDs: \`end\`, \`default\`, \`class\`, \`style\`, \`click\`, \`graph\`, \`subgraph\`. If you need such a concept, use a different ID (e.g. \`endNode\`) and put the word in the label.
+- Do not put double-quotes INSIDE a quoted label; rephrase or use single quotes there instead.
+
+Worked example combining these rules:
+
+\`\`\`mermaid
+flowchart TD
+    AppA["Žádající aplikace"] --> APIM["SKODA EAI / API Management"]
+    APIM --> AppB["Cílová aplikace"]
+    AppA -.-> AEH["Azure Event Hubs"]
+    AEH -.-> AppB
+    subgraph forbidden["Zakázáno"]
+        Direct["Přímé propojení / DB access"]
+    end
+    AppA --x Direct
+    Direct --x AppB
+\`\`\``;
 }
 
 export async function synthesizeContext(
@@ -867,21 +923,110 @@ export async function chat(prompt: string, context: string, history: { role: str
     return response;
 }
 
+/**
+ * Slices `text` into chunks at the given anchor snippets. Each anchor is a
+ * short verbatim string marking where a new chunk begins; we locate it in the
+ * text (searching only forward from the previous cut so anchors stay ordered
+ * and duplicated phrases don't cause backward jumps) and cut there. Anchors
+ * that can't be found are skipped, and cuts that would produce an empty/tiny
+ * chunk are ignored. The result always reconstructs the original text exactly
+ * (100% coverage) because we only ever slice — never transform — the source.
+ */
+function sliceAtAnchors(text: string, anchors: string[]): string[] {
+    const cutPoints: number[] = [];
+    let searchFrom = 0;
+
+    for (const anchor of anchors) {
+        const trimmed = anchor.trim();
+        if (trimmed.length < 4) continue; // too short to locate reliably
+        let idx = text.indexOf(trimmed, searchFrom);
+        if (idx === -1) {
+            // Whitespace in the source (newlines, doubled spaces) often differs
+            // from the model's snippet; retry with a whitespace-tolerant match
+            // on a distinctive leading portion of the anchor.
+            idx = fuzzyFindAnchor(text, trimmed, searchFrom);
+        }
+        if (idx === -1 || idx <= searchFrom) continue;
+        cutPoints.push(idx);
+        searchFrom = idx;
+    }
+
+    if (cutPoints.length === 0) {
+        return text.trim().length > 0 ? [text.trim()] : [];
+    }
+
+    const chunks: string[] = [];
+    let start = 0;
+    for (const cut of cutPoints) {
+        const piece = text.slice(start, cut).trim();
+        if (piece.length > 0) chunks.push(piece);
+        start = cut;
+    }
+    const last = text.slice(start).trim();
+    if (last.length > 0) chunks.push(last);
+    return chunks;
+}
+
+/**
+ * Whitespace-tolerant search for an anchor's leading words. Builds a regex from
+ * the first several words of the anchor, allowing any whitespace run between
+ * them, and returns the index of the first match at/after `from` (or -1).
+ */
+function fuzzyFindAnchor(text: string, anchor: string, from: number): number {
+    const words = anchor.split(/\s+/).filter(Boolean).slice(0, 6);
+    if (words.length === 0) return -1;
+    const escaped = words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    try {
+        const re = new RegExp(escaped.join('\\s+'));
+        const sub = text.slice(from);
+        const m = re.exec(sub);
+        return m ? from + m.index : -1;
+    } catch {
+        return -1;
+    }
+}
+
 export async function semanticChunk(text: string): Promise<string[]> {
+    // Rather than having the LLM ECHO each chunk's full text back (the old
+    // approach), we ask only for the *break points* — a short verbatim snippet
+    // marking where each new chunk begins — and slice the original text at those
+    // boundaries ourselves. This is strictly better on three axes:
+    //   1. Coverage is 100% by construction (we slice the source, so no chars
+    //      are ever lost/paraphrased — the old approach routinely came back at
+    //      ~50% because the model summarized instead of copying, tripping the
+    //      caller's coverage bar and forcing a regex fallback).
+    //   2. Content is verbatim (embeddings match the real document text).
+    //   3. Output is tiny (a handful of short anchors vs. re-emitting the whole
+    //      section), so it doesn't hit output-token limits / truncation.
     const prompt = `
-        You are an expert document processor. Your task is to split the following text into semantically meaningful chunks.
-        Each chunk should represent a distinct topic, concept, or logical section.
-        Aim for chunks between 100 and 500 words.
-        Return ONLY a valid JSON array of strings, where each string is a chunk.
-        Do not include any markdown formatting like \`\`\`json, just the raw array.
-        
+        You are an expert document processor. Split the following text into semantically meaningful chunks, where each chunk represents a distinct topic, concept, or logical section (aim for roughly 100-500 words each).
+
+        Do NOT return the chunk text. Instead, identify the BREAK POINTS: for each chunk AFTER the first, return a short snippet (5-12 words) copied EXACTLY and VERBATIM from the start of that chunk, marking where it begins in the original text. The snippets must appear in the text in the same order you return them.
+
+        Return ONLY a valid JSON object: {"breaks": ["verbatim start of chunk 2", "verbatim start of chunk 3", ...]}
+        If the text is a single cohesive chunk, return {"breaks": []}.
+        Do not include any markdown formatting.
+
         Text:
         ${text}
     `;
     try {
         const result = await withRetry(() => providers.generateContent(prompt, { model: CHUNK_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const responseText = result.response.text();
-        return parseJSON<string[]>(responseText, []);
+        const parsed = parseJSON<unknown>(responseText, {});
+        const rawBreaks: unknown = Array.isArray(parsed)
+            ? parsed
+            : (parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>).breaks : undefined);
+        const breaks = Array.isArray(rawBreaks)
+            ? rawBreaks.filter((b): b is string => typeof b === 'string' && b.trim().length > 0)
+            : [];
+
+        const chunks = sliceAtAnchors(text, breaks);
+        // If anchor-based slicing produced nothing usable (e.g. the model
+        // returned no/unfindable anchors for a large section), signal failure by
+        // returning empty so the caller falls back to the regex chunker.
+        if (chunks.length === 0) return [];
+        return chunks;
     } catch (e) {
         console.error('Semantic chunking failed:', e);
     }
@@ -1233,9 +1378,20 @@ export async function deriveTaxonomyPlacements(
         ? existingTaxonomy.map(t => `  - id:${t.id} "${t.name}" [${t.category}]${t.parent_topic_id ? ` (child of id:${t.parent_topic_id})` : ' (root)'}`).join('\n')
         : '  (no existing taxonomy — all topics are roots)';
 
-    const orphanDesc = orphanTopics.map(t => `  - id:${t.id} "${t.name}" [${t.category}]: ${t.description || 'no description'}`).join('\n');
+    // Batch the orphans. Asking for one assignment object per orphan in a single
+    // request means the response grows linearly with the orphan count; at ~1400+
+    // orphans the JSON blew past the model/gateway output-token limit and came
+    // back truncated mid-array (unparseable → zero placements). Batching keeps
+    // every response small enough to complete, and a truncated/failed batch now
+    // only loses that batch instead of the entire run. Mirrors deriveTaxonomyFull.
+    const BATCH_SIZE = 40;
+    const results: { topicId: number; parentId: number | null }[] = [];
 
-    const prompt = `
+    for (let i = 0; i < orphanTopics.length; i += BATCH_SIZE) {
+        const batch = orphanTopics.slice(i, i + BATCH_SIZE);
+        const orphanDesc = batch.map(t => `  - id:${t.id} "${t.name}" [${t.category}]: ${t.description || 'no description'}`).join('\n');
+
+        const prompt = `
 You are a taxonomy expert organizing IT knowledge topics into a meaningful hierarchy.
 
 EXISTING TAXONOMY (already organized):
@@ -1253,17 +1409,21 @@ For each new topic, decide:
 Return ONLY a JSON object with an "assignments" array:
 {"assignments": [{"topicId": <number>, "parentId": <number|null>}, ...]}
 
-Include an entry for every new topic. Do not include markdown formatting.
-    `;
+Include an entry for every new topic listed above (and ONLY those). Do not include markdown formatting.
+        `;
 
-    try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
-        const responseText = result.response.text();
-        return parseJSON<{ topicId: number; parentId: number | null }[]>(responseText, []);
-    } catch (e) {
-        console.error('Taxonomy placement failed:', e);
-        return [];
+        try {
+            const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
+            const responseText = result.response.text();
+            const batchPlacements = parseJSON<{ topicId: number; parentId: number | null }[]>(responseText, []);
+            results.push(...batchPlacements);
+        } catch (e) {
+            console.error(`Taxonomy placement failed for batch ${Math.floor(i / BATCH_SIZE) + 1}:`, e);
+            // Continue with remaining batches rather than aborting the whole run.
+        }
     }
+
+    return results;
 }
 
 /**
@@ -1463,6 +1623,80 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Pr
 }
 
 /**
+ * Attempts to recover a truncated JSON array/object (e.g. when the LLM or
+ * gateway hit its output-token limit mid-response, leaving an unterminated
+ * string or a dangling `,`). Walks the text tracking string/escape state and
+ * bracket depth, then rewinds to the last position where the structure was
+ * valid (the end of the last complete top-level element) and closes any still-
+ * open brackets. Returns the parsed complete prefix, or `undefined` if nothing
+ * salvageable was found. Only the elements that fully arrived are kept — a
+ * partial batch is far better than dropping the entire payload.
+ */
+function salvageTruncatedJSON<T>(raw: string): T | undefined {
+    // The payload is either a bare array (`[...]`) or an object wrapping a
+    // single array (`{"assignments":[...]}`, `{"results":[...]}`, …). The
+    // element that gets truncated is always an entry of that primary array, so
+    // we record safe truncation points at the array's element depth regardless
+    // of how deeply it's nested, then trim to the last complete element and
+    // close any still-open containers.
+    let inString = false;
+    let escaped = false;
+    let depth = 0;
+    let arrayDepth = -1; // depth just inside the first array we encounter
+    let lastGoodEnd = -1; // exclusive index after the last complete array element
+
+    for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
+
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (ch === '\\') escaped = true;
+            else if (ch === '"') inString = false;
+            continue;
+        }
+
+        if (ch === '"') {
+            inString = true;
+        } else if (ch === '{' || ch === '[') {
+            depth++;
+            if (ch === '[' && arrayDepth === -1) arrayDepth = depth; // first array
+        } else if (ch === '}' || ch === ']') {
+            // If an element of the primary array just closed, this is a safe point.
+            if (depth === arrayDepth + 1 && ch === '}') lastGoodEnd = i + 1;
+            depth--;
+        } else if (ch === ',' && depth === arrayDepth) {
+            // Comma between primary-array elements — clean boundary (also covers
+            // scalar elements like numbers/strings that have no closing bracket).
+            lastGoodEnd = i;
+        }
+    }
+
+    if (lastGoodEnd === -1) return undefined;
+
+    // Re-scan the salvaged prefix to find which containers remain open, then
+    // append the matching closers in reverse order.
+    let candidate = raw.substring(0, lastGoodEnd);
+    const openers: string[] = [];
+    let s = false, e = false;
+    for (let i = 0; i < candidate.length; i++) {
+        const ch = candidate[i];
+        if (s) { if (e) e = false; else if (ch === '\\') e = true; else if (ch === '"') s = false; continue; }
+        if (ch === '"') s = true;
+        else if (ch === '{' || ch === '[') openers.push(ch);
+        else if (ch === '}' || ch === ']') openers.pop();
+    }
+    for (let i = openers.length - 1; i >= 0; i--) {
+        candidate += openers[i] === '{' ? '}' : ']';
+    }
+
+    try {
+        return JSON.parse(candidate) as T;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
  * Core JSON extraction logic, returning `undefined` on failure instead of a
  * fallback value. Callers that need to distinguish "the LLM call/parse
  * genuinely failed" from "the LLM legitimately returned an empty-but-valid
@@ -1495,8 +1729,17 @@ function tryParseJSON<T>(text: string): T | undefined {
             try {
                 return JSON.parse(jsonStr);
             } catch (e) {
-                // If it's an unterminated string or similar, try to fix it?
-                // For now, just log and report failure.
+                // The response is likely truncated (LLM/gateway hit its output
+                // token limit mid-array), so the closing bracket is missing or
+                // the last element is incomplete. Try to salvage the complete
+                // prefix rather than losing the whole payload. `cleaned` (from
+                // `start`) is used instead of `jsonStr` because `end` may point
+                // at a `]`/`}` inside a truncated string literal.
+                const salvaged = salvageTruncatedJSON<T>(cleaned.substring(start));
+                if (salvaged !== undefined) {
+                    console.warn('[tryParseJSON] Response appeared truncated; recovered complete prefix.');
+                    return salvaged;
+                }
                 console.error('JSON parse error after extraction:', e, 'JSON string:', jsonStr.substring(0, 100) + '...');
             }
         } else {
@@ -1523,13 +1766,39 @@ function parseJSON<T>(text: string, fallback: T): T {
     // checkConsistencyBatch, deriveTaxonomy*, rerank fallback, …) keep working
     // regardless of provider. Gemini returns bare arrays and is unaffected.
     if (Array.isArray(fallback) && !Array.isArray(parsed) && parsed && typeof parsed === 'object') {
-        const arrayProps = Object.values(parsed as Record<string, unknown>).filter(Array.isArray);
-        if (arrayProps.length === 1) {
-            return arrayProps[0] as T;
+        const obj = parsed as Record<string, unknown>;
+        const arrayEntries = Object.entries(obj).filter(([, v]) => Array.isArray(v));
+
+        // Common exactly-one-array-valued-property case: {"chunks":[...]},
+        // {"results":[...]}, etc. Unwrap the single array transparently.
+        if (arrayEntries.length === 1) {
+            return arrayEntries[0][1] as T;
         }
-        // A lone wrapped object that should have been a single-element array
-        // (e.g. batch consistency returning one `{claimIndex,status}` object).
-        console.warn('[parseJSON] Expected array but got object; wrapping single object into a one-element array.');
+
+        // Multiple array-valued properties: prefer a conventional wrapper key,
+        // otherwise take the longest array (the payload the caller wanted rather
+        // than incidental metadata arrays). Falling through to `[parsed]` here
+        // would have wrapped the whole envelope object as a bogus 1-element
+        // array, which is what produced malformed downstream data (e.g. a
+        // 1-chunk / 0%-coverage semantic chunk, or 1 consistency result for N
+        // claims).
+        if (arrayEntries.length > 1) {
+            const WRAPPER_KEYS = ['results', 'chunks', 'items', 'data', 'claims', 'topics', 'relationships', 'output'];
+            const byKey = arrayEntries.find(([k]) => WRAPPER_KEYS.includes(k.toLowerCase()));
+            const chosen = byKey ?? arrayEntries.reduce((a, b) => ((b[1] as unknown[]).length > (a[1] as unknown[]).length ? b : a));
+            return chosen[1] as T;
+        }
+
+        // Zero array-valued properties: the gateway returned a single result
+        // object where the caller asked for an array of objects (JSON mode
+        // cannot emit a bare array). Only treat it as a one-element array when
+        // it plausibly IS one element (a non-empty object). An empty object
+        // ({}) carries no element data, so return the (empty-array) fallback
+        // instead of fabricating a `[{}]` element that corrupts callers.
+        if (Object.keys(obj).length === 0) {
+            return fallback;
+        }
+        console.warn('[parseJSON] Expected array but got a single object; treating it as a one-element array.');
         return [parsed] as unknown as T;
     }
 

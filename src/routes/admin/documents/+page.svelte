@@ -1,13 +1,13 @@
 <script lang="ts">
     import { onMount } from 'svelte';
-    import FileText from 'lucide-svelte/icons/file-text';
-import Trash2 from 'lucide-svelte/icons/trash-2';
-import Upload from 'lucide-svelte/icons/upload';
-import Loader2 from 'lucide-svelte/icons/loader-2';
-import Search from 'lucide-svelte/icons/search';
-import ArrowUpDown from 'lucide-svelte/icons/arrow-up-down';
-import ChevronLeft from 'lucide-svelte/icons/chevron-left';
-import ChevronRight from 'lucide-svelte/icons/chevron-right';
+    import FileText from '@lucide/svelte/icons/file-text';
+import Trash2 from '@lucide/svelte/icons/trash-2';
+import Upload from '@lucide/svelte/icons/upload';
+import Loader2 from '@lucide/svelte/icons/loader-2';
+import Search from '@lucide/svelte/icons/search';
+import ArrowUpDown from '@lucide/svelte/icons/arrow-up-down';
+import ChevronLeft from '@lucide/svelte/icons/chevron-left';
+import ChevronRight from '@lucide/svelte/icons/chevron-right';
 
     let documents: any[] = $state([]);
     let loading = $state(true);

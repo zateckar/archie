@@ -1,11 +1,11 @@
 <script lang="ts">
     import { tick } from 'svelte';
     import { fade, scale as scaleTransition } from 'svelte/transition';
-    import ZoomIn from 'lucide-svelte/icons/zoom-in';
-    import ZoomOut from 'lucide-svelte/icons/zoom-out';
-    import RotateCcw from 'lucide-svelte/icons/rotate-ccw';
-    import Copy from 'lucide-svelte/icons/copy';
-    import X from 'lucide-svelte/icons/x';
+    import ZoomIn from '@lucide/svelte/icons/zoom-in';
+    import ZoomOut from '@lucide/svelte/icons/zoom-out';
+    import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+    import Copy from '@lucide/svelte/icons/copy';
+    import X from '@lucide/svelte/icons/x';
     import { mermaidFullscreenState, closeMermaidFullscreen } from '$lib/stores/mermaidFullscreen';
 
     const MIN_ZOOM = 0.1;

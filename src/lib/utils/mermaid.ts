@@ -9,6 +9,7 @@
  */
 
 import { browser } from '$app/environment';
+import { sanitizeMermaid } from './mermaidSanitize';
 
 type MermaidModule = typeof import('mermaid').default;
 type MermaidTheme = 'dark' | 'default' | 'neutral' | 'forest' | 'base';
@@ -61,16 +62,50 @@ export type MermaidRenderResult =
 /**
  * Render a single mermaid diagram. Returns SVG markup or a friendly error.
  * The `id` must be a unique, valid HTML id within the document.
+ *
+ * Robustness: LLM-generated source frequently contains small syntax mistakes.
+ * We first attempt to render the source as-is; on failure we run a conservative
+ * repair pass (see `sanitizeMermaid`) and retry once. Valid diagrams are never
+ * altered — only broken ones trigger the repair path.
  */
 export async function renderMermaid(code: string, id: string): Promise<MermaidRenderResult> {
+    const mermaid = await getMermaid().catch(() => null);
+    if (!mermaid) return { ok: false, error: 'Mermaid failed to load' };
+
+    // Attempt 1: render the source verbatim.
+    const first = await tryRender(mermaid, code, id);
+    if (first.ok) return first;
+
+    // Attempt 2: repair common mistakes and retry (only if repair changed anything).
+    let repaired: string;
     try {
-        const mermaid = await getMermaid();
-        // mermaid leaves a temp <div id="d{id}"> in the DOM on error if not cleaned up;
-        // we render into a detached container to avoid polluting the page.
+        repaired = sanitizeMermaid(code);
+    } catch {
+        repaired = code;
+    }
+    if (repaired && repaired.trim() !== code.trim()) {
+        const second = await tryRender(mermaid, repaired, id + '-fixed');
+        if (second.ok) return second;
+    }
+
+    // Both attempts failed — surface the original error, which is most relevant
+    // to the source the user/LLM actually produced.
+    return first;
+}
+
+/**
+ * Single render attempt with DOM cleanup of the temp nodes mermaid leaves behind
+ * on parse errors.
+ */
+async function tryRender(
+    mermaid: MermaidModule,
+    code: string,
+    id: string
+): Promise<MermaidRenderResult> {
+    try {
         const { svg } = await mermaid.render(id, code);
         return { ok: true, svg };
     } catch (err: any) {
-        // Mermaid leaves temp nodes on error; clean them up.
         if (browser) {
             const stray = document.getElementById(id);
             if (stray) stray.remove();

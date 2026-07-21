@@ -1,20 +1,20 @@
 <script lang="ts">
     import { onMount, tick } from 'svelte';
-    import Database from 'lucide-svelte/icons/database';
-import Network from 'lucide-svelte/icons/network';
-import FileCheck from 'lucide-svelte/icons/file-check';
-import AlertTriangle from 'lucide-svelte/icons/alert-triangle';
-import Search from 'lucide-svelte/icons/search';
-import Filter from 'lucide-svelte/icons/filter';
-import ArrowRight from 'lucide-svelte/icons/arrow-right';
-import Tag from 'lucide-svelte/icons/tag';
-import BookOpen from 'lucide-svelte/icons/book-open';
-import Activity from 'lucide-svelte/icons/activity';
-import ChevronRight from 'lucide-svelte/icons/chevron-right';
-import ChevronLeft from 'lucide-svelte/icons/chevron-left';
-import RefreshCw from 'lucide-svelte/icons/refresh-cw';
-import GitBranch from 'lucide-svelte/icons/git-branch';
-import Layers from 'lucide-svelte/icons/layers';
+    import Database from '@lucide/svelte/icons/database';
+import Network from '@lucide/svelte/icons/network';
+import FileCheck from '@lucide/svelte/icons/file-check';
+import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
+import Search from '@lucide/svelte/icons/search';
+import Filter from '@lucide/svelte/icons/filter';
+import ArrowRight from '@lucide/svelte/icons/arrow-right';
+import Tag from '@lucide/svelte/icons/tag';
+import BookOpen from '@lucide/svelte/icons/book-open';
+import Activity from '@lucide/svelte/icons/activity';
+import ChevronRight from '@lucide/svelte/icons/chevron-right';
+import ChevronLeft from '@lucide/svelte/icons/chevron-left';
+import RefreshCw from '@lucide/svelte/icons/refresh-cw';
+import GitBranch from '@lucide/svelte/icons/git-branch';
+import Layers from '@lucide/svelte/icons/layers';
     import { fade, slide, fly } from 'svelte/transition';
 
     interface Topic { id: number; name: string; description: string; category: string; }
@@ -28,7 +28,7 @@ import Layers from 'lucide-svelte/icons/layers';
     let activeTab = $state('topics'); // 'topics', 'claims', 'graph'
 
     // Derived from actual topic data rather than a hardcoded list — the
-    // extractor's category vocabulary (see ALLOWED_CATEGORIES in gemini.ts)
+    // extractor's category vocabulary (see ALLOWED_CATEGORIES in llm.ts)
     // has grown over time and a fixed list here previously fell out of sync,
     // silently hiding the filter button for any category not in that list
     // (e.g. "Process", "Role", "Tool", "Compliance" had no way to be

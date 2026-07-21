@@ -1,23 +1,23 @@
 <script lang="ts">
     import { onMount, tick } from 'svelte';
-    import Network from 'lucide-svelte/icons/network';
-import AlertTriangle from 'lucide-svelte/icons/alert-triangle';
-import CheckCircle from 'lucide-svelte/icons/check-circle';
-import XCircle from 'lucide-svelte/icons/x-circle';
-import ChevronDown from 'lucide-svelte/icons/chevron-down';
-import ChevronRight from 'lucide-svelte/icons/chevron-right';
-import Trash2 from 'lucide-svelte/icons/trash-2';
-import Eye from 'lucide-svelte/icons/eye';
-import Tag from 'lucide-svelte/icons/tag';
-import FileCheck from 'lucide-svelte/icons/file-check';
-import Activity from 'lucide-svelte/icons/activity';
-import Layers from 'lucide-svelte/icons/layers';
-import GitBranch from 'lucide-svelte/icons/git-branch';
-import Search from 'lucide-svelte/icons/search';
-import Filter from 'lucide-svelte/icons/filter';
-import RefreshCw from 'lucide-svelte/icons/refresh-cw';
-import Wand2 from 'lucide-svelte/icons/wand-2';
-import Loader2 from 'lucide-svelte/icons/loader-2';
+    import Network from '@lucide/svelte/icons/network';
+import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
+import CheckCircle from '@lucide/svelte/icons/check-circle';
+import XCircle from '@lucide/svelte/icons/x-circle';
+import ChevronDown from '@lucide/svelte/icons/chevron-down';
+import ChevronRight from '@lucide/svelte/icons/chevron-right';
+import Trash2 from '@lucide/svelte/icons/trash-2';
+import Eye from '@lucide/svelte/icons/eye';
+import Tag from '@lucide/svelte/icons/tag';
+import FileCheck from '@lucide/svelte/icons/file-check';
+import Activity from '@lucide/svelte/icons/activity';
+import Layers from '@lucide/svelte/icons/layers';
+import GitBranch from '@lucide/svelte/icons/git-branch';
+import Search from '@lucide/svelte/icons/search';
+import Filter from '@lucide/svelte/icons/filter';
+import RefreshCw from '@lucide/svelte/icons/refresh-cw';
+import Wand2 from '@lucide/svelte/icons/wand-2';
+import Loader2 from '@lucide/svelte/icons/loader-2';
     import { fade, slide } from 'svelte/transition';
 
     // ── State ──

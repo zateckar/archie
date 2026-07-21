@@ -1,10 +1,10 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { page } from '$app/state';
-    import BookOpen from 'lucide-svelte/icons/book-open';
-import FileText from 'lucide-svelte/icons/file-text';
-import Plus from 'lucide-svelte/icons/plus';
-import Loader2 from 'lucide-svelte/icons/loader-2';
+    import BookOpen from '@lucide/svelte/icons/book-open';
+import FileText from '@lucide/svelte/icons/file-text';
+import Plus from '@lucide/svelte/icons/plus';
+import Loader2 from '@lucide/svelte/icons/loader-2';
 
     let { params }: {
         params: { repoId: string };

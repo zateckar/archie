@@ -1,9 +1,9 @@
 <script lang="ts">
     import { setContext } from 'svelte';
     import { page } from '$app/state';
-    import MessageSquare from 'lucide-svelte/icons/message-square';
-import BookOpen from 'lucide-svelte/icons/book-open';
-import Plus from 'lucide-svelte/icons/plus';
+    import MessageSquare from '@lucide/svelte/icons/message-square';
+import BookOpen from '@lucide/svelte/icons/book-open';
+import Plus from '@lucide/svelte/icons/plus';
     import WikiTreeItem from '$lib/components/WikiTreeItem.svelte';
 
     let { children, data } = $props();

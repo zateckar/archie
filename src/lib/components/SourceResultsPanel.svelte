@@ -1,9 +1,9 @@
 <script lang="ts">
     import { fly, fade } from 'svelte/transition';
-    import X from 'lucide-svelte/icons/x';
-    import FileText from 'lucide-svelte/icons/file-text';
-    import Search from 'lucide-svelte/icons/search';
-    import ExternalLink from 'lucide-svelte/icons/external-link';
+    import X from '@lucide/svelte/icons/x';
+    import FileText from '@lucide/svelte/icons/file-text';
+    import Search from '@lucide/svelte/icons/search';
+    import ExternalLink from '@lucide/svelte/icons/external-link';
 
     type SourceMatch = {
         doc_id: number;

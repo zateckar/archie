@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { searchChunks, buildKnowledgeContext } from '$lib/server/rag';
-import { chatStream, condenseQuery, analyzeAndCondenseQuery, evaluateContext, synthesizeContext, buildConversationBriefing } from '$lib/server/gemini';
+import { chatStream, condenseQuery, analyzeAndCondenseQuery, evaluateContext, synthesizeContext, buildConversationBriefing } from '$lib/server/llm';
 import { db } from '$lib/server/db';
 
 export async function POST({ request, locals }) {

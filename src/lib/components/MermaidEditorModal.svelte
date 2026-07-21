@@ -1,8 +1,8 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte';
-    import X from 'lucide-svelte/icons/x';
-import Workflow from 'lucide-svelte/icons/workflow';
-import AlertCircle from 'lucide-svelte/icons/alert-circle';
+    import X from '@lucide/svelte/icons/x';
+import Workflow from '@lucide/svelte/icons/workflow';
+import AlertCircle from '@lucide/svelte/icons/alert-circle';
     import { fade, scale } from 'svelte/transition';
     import MermaidDiagram from './MermaidDiagram.svelte';
 

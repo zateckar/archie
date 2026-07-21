@@ -2,7 +2,8 @@ import { db, recordCleanLog } from './db';
 import { processDocumentKnowledge } from './knowledge';
 import { recomputeCommunities, RELATIONSHIP_WEIGHTS, DEFAULT_EDGE_WEIGHT } from './communities';
 import crypto from 'crypto';
-import { getEmbedding, rerank, semanticChunk, cleanDocument, summarizeDocument, splitIntoSections } from './gemini';
+import { getEmbedding, rerank, semanticChunk, cleanDocument, summarizeDocument, splitIntoSections } from './llm';
+import * as providers from './providers';
 
 /**
  * Runs `fn` over `items` with at most `concurrency` calls in flight at once.
@@ -651,7 +652,10 @@ async function embedAndStoreChunks(
 // and each section is semantically chunked independently, so every part of
 // a large document still gets a chance at LLM-quality chunking; only
 // sections that individually fail the coverage bar fall back to regex.
-const SEMANTIC_CHUNK_SECTION_SIZE = 45000;
+// 45K chars per section on Gemini. Semantic chunking echoes the section back as
+// a JSON array, so on the slow LiteLLM gateway a 45K section times out; when the
+// gateway is primary, sectionMaxChars() returns a much smaller value.
+const SEMANTIC_CHUNK_SECTION_SIZE = providers.sectionMaxChars(45000);
 const CHUNK_COVERAGE_THRESHOLD = 0.8;
 
 /**
@@ -663,13 +667,25 @@ const CHUNK_COVERAGE_THRESHOLD = 0.8;
  */
 async function semanticChunkSection(section: string, label: string): Promise<string[]> {
     const semantic = await semanticChunk(section);
-    const coveredChars = semantic.reduce((n: number, c: string) => n + (c?.length ?? 0), 0);
-    if (semantic.length > 0 && coveredChars >= section.length * CHUNK_COVERAGE_THRESHOLD) {
-        return semantic;
+    // Compare non-whitespace character counts. semanticChunk now slices the
+    // original text at LLM-chosen boundaries (rather than having the LLM echo
+    // chunk text), so chunks are verbatim and coverage is ~100% by design; the
+    // only losses are trimmed inter-chunk whitespace. Measuring against
+    // non-whitespace chars makes the coverage guard immune to that trimming
+    // while still catching a genuine failure (e.g. semanticChunk returned []).
+    const sectionSignificant = section.replace(/\s/g, '').length;
+    const coveredSignificant = semantic.reduce((n: number, c: string) => n + (c?.replace(/\s/g, '').length ?? 0), 0);
+    if (semantic.length > 0 && coveredSignificant >= sectionSignificant * CHUNK_COVERAGE_THRESHOLD) {
+        // Guard against an over-large semantic chunk (e.g. the LLM judged a big
+        // span cohesive and returned few/no break points): sub-split any chunk
+        // that exceeds the embedding-friendly size using the markdown-aware
+        // chunker, so no single chunk is too large to embed/retrieve well.
+        const MAX_CHUNK_CHARS = 4000;
+        return semantic.flatMap(c => (c.length > MAX_CHUNK_CHARS ? chunkText(c, 1500, 200) : [c]));
     }
     if (semantic.length > 0) {
         console.warn(
-            `Semantic chunking covered only ${Math.round((100 * coveredChars) / section.length)}% of "${label}" (${semantic.length} chunks); falling back to markdown-aware chunker for this section.`
+            `Semantic chunking covered only ${Math.round((100 * coveredSignificant) / Math.max(1, sectionSignificant))}% of "${label}" (${semantic.length} chunks); falling back to markdown-aware chunker for this section.`
         );
     }
     return chunkText(section, 1500, 200);

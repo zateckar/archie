@@ -1,14 +1,14 @@
 <script lang="ts">
     import { marked } from 'marked';
-    import Bot from 'lucide-svelte/icons/bot';
-import UserIcon from 'lucide-svelte/icons/user';
-import ThumbsUp from 'lucide-svelte/icons/thumbs-up';
-import ThumbsDown from 'lucide-svelte/icons/thumbs-down';
+    import Bot from '@lucide/svelte/icons/bot';
+import UserIcon from '@lucide/svelte/icons/user';
+import ThumbsUp from '@lucide/svelte/icons/thumbs-up';
+import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
     import { fly } from 'svelte/transition';
     import { sanitizeHtml } from '$lib/utils/sanitize';
     import { renderMermaidBlocksIn } from '$lib/utils/mermaidRender';
     import { theme } from '$lib/stores/theme';
-    import Search from 'lucide-svelte/icons/search';
+    import Search from '@lucide/svelte/icons/search';
     import SourceResultsPanel from '$lib/components/SourceResultsPanel.svelte';
 
     type Message = { role: 'user' | 'assistant', content: string, sources?: any[] };

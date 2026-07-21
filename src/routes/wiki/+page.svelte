@@ -1,8 +1,8 @@
 <script lang="ts">
-    import BookOpen from 'lucide-svelte/icons/book-open';
-import ChevronRight from 'lucide-svelte/icons/chevron-right';
-import GitBranch from 'lucide-svelte/icons/git-branch';
-import ExternalLink from 'lucide-svelte/icons/external-link';
+    import BookOpen from '@lucide/svelte/icons/book-open';
+import ChevronRight from '@lucide/svelte/icons/chevron-right';
+import GitBranch from '@lucide/svelte/icons/git-branch';
+import ExternalLink from '@lucide/svelte/icons/external-link';
 
     let repos = $state<any[]>([]);
     let loading = $state(true);

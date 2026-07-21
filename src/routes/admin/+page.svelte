@@ -1,9 +1,9 @@
 <script lang="ts">
     import { onMount } from 'svelte';
-    import FileText from 'lucide-svelte/icons/file-text';
-import GitBranch from 'lucide-svelte/icons/git-branch';
-import Users from 'lucide-svelte/icons/users';
-import Activity from 'lucide-svelte/icons/activity';
+    import FileText from '@lucide/svelte/icons/file-text';
+import GitBranch from '@lucide/svelte/icons/git-branch';
+import Users from '@lucide/svelte/icons/users';
+import Activity from '@lucide/svelte/icons/activity';
 
     let stats = $state({
         documents: 0,

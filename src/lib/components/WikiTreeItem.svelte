@@ -1,10 +1,10 @@
 <script lang="ts">
     import { getContext } from 'svelte';
-    import FileText from 'lucide-svelte/icons/file-text';
-import Folder from 'lucide-svelte/icons/folder';
-import FolderOpen from 'lucide-svelte/icons/folder-open';
-import ChevronDown from 'lucide-svelte/icons/chevron-down';
-import ChevronRight from 'lucide-svelte/icons/chevron-right';
+    import FileText from '@lucide/svelte/icons/file-text';
+import Folder from '@lucide/svelte/icons/folder';
+import FolderOpen from '@lucide/svelte/icons/folder-open';
+import ChevronDown from '@lucide/svelte/icons/chevron-down';
+import ChevronRight from '@lucide/svelte/icons/chevron-right';
     import TreeItem from './WikiTreeItem.svelte';
 
     interface FileTreeItem {

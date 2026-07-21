@@ -1,5 +1,6 @@
 import 'dotenv/config';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
+import type { Content } from '@google/genai';
 
 /**
  * Model provider abstraction.
@@ -10,7 +11,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
  * LiteLLM gateway configured via LLM_* env vars) and transparently FALLS BACK
  * to Gemini (GEMINI_* env vars) when the primary is unconfigured or errors.
  *
- * Callers in gemini.ts keep their existing shapes:
+ * Callers in llm.ts keep their existing shapes:
  *   - generateContent(...) returns { response: { text() } }
  *   - startChatStream(...) yields chunks with a .text() method
  *   - embedContent(...) returns { embedding: { values } }
@@ -51,10 +52,24 @@ try {
 // Normalize the base URL (strip trailing slash) so path joins are predictable.
 litellmBaseUrl = litellmBaseUrl.replace(/\/+$/, '');
 
-const genAI = new GoogleGenerativeAI(geminiApiKey);
+const genAI = new GoogleGenAI({ apiKey: geminiApiKey });
 
 /** Whether the LiteLLM gateway has enough config to be used as the primary. */
 export const litellmConfigured = Boolean(litellmBaseUrl && litellmApiKey);
+
+/**
+ * Max characters per section for whole-text tasks (document cleaning, semantic
+ * chunking) that must generate large, near-verbatim output. The LiteLLM gateway
+ * generates slowly (~40 tok/s) with a hard ~120s cap, so 80K-char sections
+ * always time out there; a small section finishes comfortably. Gemini is fast
+ * with a 1M context, so it keeps the large section size for better cross-section
+ * consistency. Override the gateway value via LLM_SECTION_MAX_CHARS.
+ */
+export function sectionMaxChars(geminiSectionMaxChars: number): number {
+    if (!litellmConfigured) return geminiSectionMaxChars;
+    const override = Number(process.env.LLM_SECTION_MAX_CHARS);
+    return Number.isFinite(override) && override > 0 ? override : 6000;
+}
 
 // ── Shared types ────────────────────────────────────────────────────────────
 export interface GenerationConfig {
@@ -87,6 +102,48 @@ function litellmHeaders(): Record<string, string> {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${litellmApiKey}`
     };
+}
+
+/**
+ * Per-request timeout (ms) for LiteLLM gateway calls. Override via LLM_TIMEOUT_MS.
+ * Default is 125000 (just above the gateway's observed ~120s hard cap) so the
+ * gateway's own error (and response body) surfaces for diagnostics instead of a
+ * premature client-side abort.
+ */
+const litellmTimeoutMs = Number(process.env.LLM_TIMEOUT_MS) || 125000;
+
+/**
+ * fetch wrapper that aborts after `litellmTimeoutMs` so a hung gateway surfaces
+ * as a catchable error (and thus a clean Gemini fallback) instead of stalling.
+ */
+async function litellmFetch(url: string, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), litellmTimeoutMs);
+    try {
+        return await fetch(url, { ...init, signal: controller.signal });
+    } catch (e) {
+        if ((e as Error).name === 'AbortError') {
+            throw new Error(`request timed out after ${litellmTimeoutMs}ms`);
+        }
+        throw e;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * Builds a rich Error for a non-OK LiteLLM response, capturing the endpoint,
+ * status, and full response body so failures are diagnosable in logs.
+ */
+async function litellmError(op: string, url: string, res: Response): Promise<Error> {
+    const detail = await res.text().catch(() => '<no body>');
+    const err: any = new Error(
+        `LiteLLM ${op} failed: ${res.status} ${res.statusText} @ ${url} | body: ${detail || '<empty>'}`
+    );
+    err.status = res.status;
+    err.endpoint = url;
+    err.body = detail;
+    return err;
 }
 
 /**
@@ -132,16 +189,14 @@ async function litellmChatComplete(
     messages: { role: string; content: string }[],
     config?: GenerationConfig
 ): Promise<string> {
-    const res = await fetch(`${litellmBaseUrl}/chat/completions`, {
+    const url = `${litellmBaseUrl}/chat/completions`;
+    const res = await litellmFetch(url, {
         method: 'POST',
         headers: litellmHeaders(),
         body: JSON.stringify(litellmBody(messages, config, false))
     });
     if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        const err: any = new Error(`LiteLLM chat/completions failed: ${res.status} ${detail}`);
-        err.status = res.status;
-        throw err;
+        throw await litellmError('chat/completions', url, res);
     }
     const data = await res.json();
     const content = data?.choices?.[0]?.message?.content;
@@ -157,16 +212,14 @@ async function* litellmChatStream(
     messages: { role: string; content: string }[],
     config?: GenerationConfig
 ): AsyncGenerator<StreamChunk> {
-    const res = await fetch(`${litellmBaseUrl}/chat/completions`, {
+    const url = `${litellmBaseUrl}/chat/completions`;
+    const res = await litellmFetch(url, {
         method: 'POST',
         headers: litellmHeaders(),
         body: JSON.stringify(litellmBody(messages, config, true))
     });
     if (!res.ok || !res.body) {
-        const detail = await res.text().catch(() => '');
-        const err: any = new Error(`LiteLLM streaming failed: ${res.status} ${detail}`);
-        err.status = res.status;
-        throw err;
+        throw await litellmError('streaming', url, res);
     }
 
     const reader = res.body.getReader();
@@ -201,16 +254,14 @@ async function* litellmChatStream(
 }
 
 async function litellmEmbed(text: string): Promise<number[]> {
-    const res = await fetch(`${litellmBaseUrl}/embeddings`, {
+    const url = `${litellmBaseUrl}/embeddings`;
+    const res = await litellmFetch(url, {
         method: 'POST',
         headers: litellmHeaders(),
         body: JSON.stringify({ model: litellmEmbeddingModel, input: text })
     });
     if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        const err: any = new Error(`LiteLLM embeddings failed: ${res.status} ${detail}`);
-        err.status = res.status;
-        throw err;
+        throw await litellmError('embeddings', url, res);
     }
     const data = await res.json();
     const values = data?.data?.[0]?.embedding;
@@ -227,7 +278,8 @@ async function litellmEmbed(text: string): Promise<number[]> {
  */
 async function litellmRerank(query: string, documents: string[]): Promise<number[]> {
     if (!litellmRerankModel) throw new Error('LLM_RERANK_MODEL not configured');
-    const res = await fetch(`${litellmBaseUrl}/rerank`, {
+    const url = `${litellmBaseUrl}/rerank`;
+    const res = await litellmFetch(url, {
         method: 'POST',
         headers: litellmHeaders(),
         body: JSON.stringify({
@@ -238,10 +290,7 @@ async function litellmRerank(query: string, documents: string[]): Promise<number
         })
     });
     if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        const err: any = new Error(`LiteLLM rerank failed: ${res.status} ${detail}`);
-        err.status = res.status;
-        throw err;
+        throw await litellmError('rerank', url, res);
     }
     const data = await res.json();
     const ranked = data?.results;
@@ -263,9 +312,12 @@ async function geminiGenerate(
     prompt: string,
     config?: GenerationConfig
 ): Promise<string> {
-    const m = genAI.getGenerativeModel({ model, generationConfig: config });
-    const result = await m.generateContent(prompt);
-    return result.response.text();
+    const result = await genAI.models.generateContent({
+        model,
+        contents: prompt,
+        config
+    });
+    return result.text ?? '';
 }
 
 async function* geminiChatStream(
@@ -275,20 +327,18 @@ async function* geminiChatStream(
     history: ChatMessage[],
     config?: GenerationConfig
 ): AsyncGenerator<StreamChunk> {
-    const m = genAI.getGenerativeModel({
+    const chat = genAI.chats.create({
         model,
-        systemInstruction,
-        generationConfig: config
-    });
-    const chatSession = m.startChat({
-        history: history.map((msg) => ({
+        config: { ...config, systemInstruction },
+        history: history.map((msg): Content => ({
             role: msg.role === 'user' ? 'user' : 'model',
             parts: [{ text: msg.content }]
         }))
     });
-    const result = await chatSession.sendMessageStream(prompt);
-    for await (const chunk of result.stream) {
-        yield { text: () => chunk.text() };
+    const stream = await chat.sendMessageStream({ message: prompt });
+    for await (const chunk of stream) {
+        const text = chunk.text ?? '';
+        yield { text: () => text };
     }
 }
 
@@ -298,14 +348,18 @@ async function geminiEmbed(
     taskType: 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY',
     title?: string
 ): Promise<number[]> {
-    const m = genAI.getGenerativeModel({ model });
-    const req: any = {
-        content: { role: 'user', parts: [{ text }] },
-        taskType
-    };
-    if (title && taskType === 'RETRIEVAL_DOCUMENT') req.title = title;
-    const result = await m.embedContent(req);
-    return result.embedding.values;
+    const config: Record<string, unknown> = { taskType };
+    if (title && taskType === 'RETRIEVAL_DOCUMENT') config.title = title;
+    const result = await genAI.models.embedContent({
+        model,
+        contents: text,
+        config
+    });
+    const values = result.embeddings?.[0]?.values;
+    if (!Array.isArray(values)) {
+        throw new Error('Gemini embedContent returned no vector');
+    }
+    return values;
 }
 
 // ── Public provider API (primary → fallback) ────────────────────────────────
@@ -315,23 +369,36 @@ export interface GeminiFallback {
     model: string;
 }
 
+/** Options controlling provider routing for a single generateContent call. */
+export interface GenerateOptions {
+    /**
+     * When true, skip the LiteLLM primary and use Gemini directly. Used for
+     * whole-document tasks (e.g. summarization) that exceed the LiteLLM
+     * gateway's generation time cap and are better served by Gemini's large
+     * context + throughput.
+     */
+    preferGemini?: boolean;
+}
+
 /**
  * Text generation. Uses LiteLLM when configured, otherwise Gemini. On a LiteLLM
  * error, transparently retries once against Gemini so a gateway outage degrades
- * to the fallback instead of failing the request.
+ * to the fallback instead of failing the request. Pass { preferGemini: true }
+ * to bypass LiteLLM entirely for this call.
  */
 export async function generateContent(
     prompt: string,
     fallback: GeminiFallback,
-    config?: GenerationConfig
+    config?: GenerationConfig,
+    options?: GenerateOptions
 ): Promise<GenerateResult> {
-    if (litellmConfigured) {
+    if (litellmConfigured && !options?.preferGemini) {
         try {
             const messages = buildChatMessages(prompt, undefined, []);
             const text = await litellmChatComplete(messages, config);
             return { response: { text: () => text } };
         } catch (e) {
-            console.warn('[Providers] LiteLLM generateContent failed, falling back to Gemini:', (e as Error).message);
+            console.error('[Providers] LiteLLM generateContent failed, falling back to Gemini | status=%s endpoint=%s | %s', (e as any).status ?? 'n/a', (e as any).endpoint ?? 'n/a', (e as Error).message);
         }
     }
     const text = await geminiGenerate(fallback.model, prompt, config);
@@ -363,7 +430,7 @@ export async function startChatStream(
                 yield* iterator;
             })();
         } catch (e) {
-            console.warn('[Providers] LiteLLM chat stream failed, falling back to Gemini:', (e as Error).message);
+            console.error('[Providers] LiteLLM chat stream failed, falling back to Gemini | status=%s endpoint=%s | %s', (e as any).status ?? 'n/a', (e as any).endpoint ?? 'n/a', (e as Error).message);
         }
     }
     return geminiChatStream(fallback.model, prompt, systemInstruction, history, config);
@@ -388,7 +455,7 @@ export async function embedContent(
             const values = await litellmEmbed(text);
             return { embedding: { values } };
         } catch (e) {
-            console.warn('[Providers] LiteLLM embedContent failed, falling back to Gemini:', (e as Error).message);
+            console.error('[Providers] LiteLLM embedContent failed, falling back to Gemini | status=%s endpoint=%s | %s', (e as any).status ?? 'n/a', (e as any).endpoint ?? 'n/a', (e as Error).message);
         }
     }
     const values = await geminiEmbed(fallback.model, text, taskType, title);
@@ -407,7 +474,7 @@ export async function rerankDocuments(query: string, documents: string[]): Promi
     try {
         return await litellmRerank(query, documents);
     } catch (e) {
-        console.warn('[Providers] LiteLLM rerank failed, falling back to LLM reranker:', (e as Error).message);
+        console.error('[Providers] LiteLLM rerank failed, falling back to LLM reranker | status=%s endpoint=%s | %s', (e as any).status ?? 'n/a', (e as any).endpoint ?? 'n/a', (e as Error).message);
         return null;
     }
 }

@@ -1,5 +1,5 @@
 import { db } from './db';
-import { extractKnowledge, checkConsistencyBatch, deriveTaxonomyPlacements, deriveTaxonomyFull, getEmbedding } from './gemini';
+import { extractKnowledge, checkConsistencyBatch, deriveTaxonomyPlacements, deriveTaxonomyFull, getEmbedding } from './llm';
 import { embedTopic, embedClaim, searchTopics } from './rag';
 import { normalizeTopicName } from './topic-normalize';
 import crypto from 'crypto';

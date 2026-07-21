@@ -1,13 +1,13 @@
 <script lang="ts">
     import { onMount } from 'svelte';
-    import GitBranch from 'lucide-svelte/icons/git-branch';
-import Trash2 from 'lucide-svelte/icons/trash-2';
-import Plus from 'lucide-svelte/icons/plus';
-import Loader2 from 'lucide-svelte/icons/loader-2';
-import RefreshCw from 'lucide-svelte/icons/refresh-cw';
-import ExternalLink from 'lucide-svelte/icons/external-link';
-import Key from 'lucide-svelte/icons/key';
-import Clock from 'lucide-svelte/icons/clock';
+    import GitBranch from '@lucide/svelte/icons/git-branch';
+import Trash2 from '@lucide/svelte/icons/trash-2';
+import Plus from '@lucide/svelte/icons/plus';
+import Loader2 from '@lucide/svelte/icons/loader-2';
+import RefreshCw from '@lucide/svelte/icons/refresh-cw';
+import ExternalLink from '@lucide/svelte/icons/external-link';
+import Key from '@lucide/svelte/icons/key';
+import Clock from '@lucide/svelte/icons/clock';
 
     let gitRepos: any[] = $state([]);
     let loading = $state(true);

@@ -1,15 +1,15 @@
 <script lang="ts">
     import { onMount } from 'svelte';
-    import User from 'lucide-svelte/icons/user';
-import Shield from 'lucide-svelte/icons/shield';
-import Trash2 from 'lucide-svelte/icons/trash-2';
-import Plus from 'lucide-svelte/icons/plus';
-import Loader2 from 'lucide-svelte/icons/loader-2';
-import Key from 'lucide-svelte/icons/key';
-import Search from 'lucide-svelte/icons/search';
-import ArrowUpDown from 'lucide-svelte/icons/arrow-up-down';
-import ChevronLeft from 'lucide-svelte/icons/chevron-left';
-import ChevronRight from 'lucide-svelte/icons/chevron-right';
+    import User from '@lucide/svelte/icons/user';
+import Shield from '@lucide/svelte/icons/shield';
+import Trash2 from '@lucide/svelte/icons/trash-2';
+import Plus from '@lucide/svelte/icons/plus';
+import Loader2 from '@lucide/svelte/icons/loader-2';
+import Key from '@lucide/svelte/icons/key';
+import Search from '@lucide/svelte/icons/search';
+import ArrowUpDown from '@lucide/svelte/icons/arrow-up-down';
+import ChevronLeft from '@lucide/svelte/icons/chevron-left';
+import ChevronRight from '@lucide/svelte/icons/chevron-right';
 
     let users: any[] = $state([]);
     let loading = $state(true);

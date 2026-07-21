@@ -1,6 +1,6 @@
 <script lang="ts">
     import { enhance } from '$app/forms';
-    import Loader2 from 'lucide-svelte/icons/loader-2';
+    import Loader2 from '@lucide/svelte/icons/loader-2';
 
     let { data, form } = $props();
     let loading = $state(false);
