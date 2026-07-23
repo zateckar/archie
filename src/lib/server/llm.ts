@@ -44,6 +44,14 @@ try {
 // removing an entire class of parse failures (parseJSON's fence-stripping
 // remains as a defensive fallback, not the primary mechanism).
 const DETERMINISTIC_JSON_CONFIG = { temperature: 0.1, responseMimeType: 'application/json' };
+// Document cleaning echoes the whole section back inside a JSON string, so it
+// needs a far larger output budget than the model's ~8192-token default (which
+// truncated the echoed text mid-string and produced unparseable JSON). 65536 is
+// Gemini's hard output-token ceiling and is accepted by the LiteLLM gateway too;
+// it leaves comfortable headroom above the 40K-char sections cleanDocument feeds
+// it. Override via LLM_CLEAN_MAX_OUTPUT_TOKENS for a model with a smaller cap.
+const CLEAN_MAX_OUTPUT_TOKENS = Number(process.env.LLM_CLEAN_MAX_OUTPUT_TOKENS) || 65536;
+const CLEAN_JSON_CONFIG = { temperature: 0.1, responseMimeType: 'application/json', maxOutputTokens: CLEAN_MAX_OUTPUT_TOKENS };
 const RERANK_CONFIG = { temperature: 0, responseMimeType: 'application/json' };
 const EXTRACTION_CONFIG = { temperature: 0.15, responseMimeType: 'application/json' };
 const REWRITE_CONFIG = { temperature: 0.2 }; // faithful rewriting (cleaning) — free text
@@ -379,7 +387,7 @@ export async function cleanDocument(text: string): Promise<CleanResult> {
         prevTailContext?: string
     ): Promise<{ cleaned: string; removals: CleanRemoval[] } | null> => {
         try {
-            const result = await withRetry(() => providers.generateContent(buildPrompt(chunk, isPartial, prevTailContext), { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
+            const result = await withRetry(() => providers.generateContent(buildPrompt(chunk, isPartial, prevTailContext), { model: TEXT_MODEL }, CLEAN_JSON_CONFIG));
             const parsed = tryParseJSON<CleanChunkResponse>(result.response.text());
             if (parsed === undefined || typeof parsed.cleaned !== 'string') return null;
             const removals = Array.isArray(parsed.removals)
@@ -449,11 +457,17 @@ export async function cleanDocument(text: string): Promise<CleanResult> {
         };
     };
 
-    // 80K chars per section on Gemini (well within its 1M token context). When
-    // the LiteLLM gateway is primary, sectionMaxChars() returns a much smaller
-    // value so each near-verbatim generation finishes under the gateway's time
-    // cap instead of timing out (which forced a full Gemini fallback).
-    const CHUNK_SIZE = providers.sectionMaxChars(80000);
+    // Cleaning echoes the section back VERBATIM, so the binding limit is the
+    // model's OUTPUT budget, not its input context. Gemini's 1M token context is
+    // irrelevant here — its default output cap (~8192 tokens) silently truncated
+    // the echoed document mid-string, producing the unparseable JSON that forced
+    // a full fallback. So we size the section to what the model can actually EMIT:
+    // Gemini's ceiling is 64K output tokens, so 40K chars (≈ ~38K output tokens for
+    // dense/multilingual markdown) leaves comfortable headroom under
+    // CLEAN_JSON_CONFIG.maxOutputTokens. When the LiteLLM gateway is primary,
+    // sectionMaxChars() returns a much smaller value so each generation also
+    // finishes under the gateway's ~120s cap.
+    const CHUNK_SIZE = providers.sectionMaxChars(40000);
 
     if (text.length <= CHUNK_SIZE) {
         const r = await cleanAndVerifyChunk(text, false, 'document');

@@ -75,6 +75,14 @@ export function sectionMaxChars(geminiSectionMaxChars: number): number {
 export interface GenerationConfig {
     temperature?: number;
     responseMimeType?: string;
+    /**
+     * Maximum tokens the model may emit. Gemini defaults to a modest cap
+     * (~8192 tokens) which silently TRUNCATES tasks that echo large text back
+     * (document cleaning, semantic chunking) mid-string, producing unparseable
+     * JSON. Callers that expect large output must set this explicitly. Mapped to
+     * Gemini's `maxOutputTokens` and the LiteLLM/OpenAI `max_tokens`.
+     */
+    maxOutputTokens?: number;
 }
 
 export interface GenerateResult {
@@ -179,6 +187,7 @@ function litellmBody(
         stream
     };
     if (config?.temperature !== undefined) body.temperature = config.temperature;
+    if (config?.maxOutputTokens !== undefined) body.max_tokens = config.maxOutputTokens;
     if (config?.responseMimeType === 'application/json') {
         body.response_format = { type: 'json_object' };
     }

@@ -325,17 +325,43 @@ try {
 } catch (e) {}
 
 try {
-    const rows = db.prepare('SELECT id, name FROM topics WHERE canonical_key IS NULL').all() as { id: number; name: string }[];
+    const rows = db
+        // Oldest row per key wins (matches the dedup step below and the app's
+        // ON CONFLICT upsert, which keep the earliest-inserted topic).
+        .prepare('SELECT id, name FROM topics WHERE canonical_key IS NULL ORDER BY id ASC')
+        .all() as { id: number; name: string }[];
     if (rows.length > 0) {
+        // Seed with keys already present so we never re-assign a key that a prior
+        // (possibly partial) migration run or the app's own inserts already own.
+        const seen = new Set<string>(
+            (db.prepare("SELECT canonical_key FROM topics WHERE canonical_key IS NOT NULL AND canonical_key != ''").all() as { canonical_key: string }[])
+                .map((r) => r.canonical_key)
+        );
         const update = db.prepare('UPDATE topics SET canonical_key = ? WHERE id = ?');
+        let assigned = 0;
+        let skipped = 0;
         const backfillTx = db.transaction(() => {
             for (const row of rows) {
                 const { key } = normalizeTopicName(row.name);
-                update.run(key || null, row.id);
+                // Only the first row for a given key gets it; duplicates stay NULL
+                // (they'll be surfaced for manual merge below). This keeps the
+                // backfill collision-free whether or not the UNIQUE index already
+                // exists, so it can no longer roll back and leave every topic
+                // un-backfilled on each restart.
+                if (!key || seen.has(key)) {
+                    skipped++;
+                    continue;
+                }
+                seen.add(key);
+                update.run(key, row.id);
+                assigned++;
             }
         });
         backfillTx();
-        console.log(`[Migration] Backfilled canonical_key for ${rows.length} existing topics.`);
+        console.log(
+            `[Migration] Backfilled canonical_key for ${assigned} topic(s)` +
+            (skipped > 0 ? `; left ${skipped} near-duplicate/empty-key topic(s) unset for manual merge.` : '.')
+        );
     }
 } catch (e) {
     console.error('[Migration] Failed to backfill topics.canonical_key:', e);
