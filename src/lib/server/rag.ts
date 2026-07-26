@@ -1,20 +1,81 @@
 import { db, recordCleanLog } from './db';
 import { processDocumentKnowledge } from './knowledge';
-import { recomputeCommunities, RELATIONSHIP_WEIGHTS, DEFAULT_EDGE_WEIGHT } from './communities';
+import {
+    recomputeCommunities,
+    getCommunityReportTopics,
+    RELATIONSHIP_WEIGHTS,
+    DEFAULT_EDGE_WEIGHT
+} from './communities';
 import crypto from 'crypto';
-import { getEmbedding, rerank, semanticChunk, cleanDocument, summarizeDocument, splitIntoSections } from './llm';
+import { getEmbedding, rerank, semanticChunk, cleanDocument, summarizeDocument, splitIntoSections, clearEmbeddingCache } from './llm';
+import { buildKeywordProbe, mergeByIdKeepingBestScore } from './retrieval-probe';
+import { buildFtsMatchQuery, tokenizeForFts } from './fts-query';
+import { foldDiacritics } from './topic-normalize';
+import {
+    storedDimension,
+    distinctDimensions,
+    assertStorableEmbedding,
+    assertUniformEmbeddings,
+    type EmbeddedTable
+} from './embedding-dimension';
+import {
+    runVectorScan,
+    markVectorIndexDirty,
+    markAllVectorIndexesDirty,
+    warmVectorIndexes
+} from './vector-index';
+
+/**
+ * Escapes the LIKE metacharacters `%` and `_` (and the escape character itself)
+ * so a keyword is matched literally. Callers must pair this with `ESCAPE '\'`.
+ *
+ * Not paranoia: measured, `'Rizeni projektu' LIKE '%r_zeni%'` returns a row.
+ * This repo's own extracted vocabulary contains underscores — relationship types
+ * like `is_part_of`, and `TECHNICAL_TOKEN` identifiers like `max_connections` —
+ * so an unescaped `_` is a live false-positive source, not a theoretical one.
+ */
+function escapeLikePattern(value: string): string {
+    return value.replace(/[\\%_]/g, ch => `\\${ch}`);
+}
+
+/**
+ * SQLite's LOWER() and LIKE are ASCII-only, so no SQL expression can fold
+ * `Řízení` down to `rizeni` for comparison. `topics.canonical_key` solves that
+ * for topic names (it is stored pre-folded), but `topics.description` has no
+ * folded counterpart — so the fold has to be handed to SQLite as a function.
+ *
+ * Registered lazily from here rather than at the db.ts handle setup because the
+ * only consumer is `buildKnowledgeContext`'s fallback, and db.ts must not take a
+ * dependency on the diacritic-folding module for one caller's benefit. Guarded
+ * by a module-level flag: better-sqlite3 throws if the same function name is
+ * registered twice.
+ */
+let foldFunctionRegistered = false;
+function registerFoldFunction(): void {
+    if (foldFunctionRegistered) return;
+    try {
+        db.function('fold', { deterministic: true }, (value: unknown) =>
+            foldDiacritics(String(value ?? '').toLowerCase())
+        );
+        foldFunctionRegistered = true;
+    } catch (e) {
+        // Already registered by another module instance (Vite dev re-evaluation).
+        foldFunctionRegistered = true;
+    }
+}
 import * as providers from './providers';
 
 /**
  * Runs `fn` over `items` with at most `concurrency` calls in flight at once.
  * Used for embedding generation, which previously ran one chunk at a time —
  * for a 50-chunk document that meant 50 sequential network round trips before
- * ingestion could even start knowledge extraction. Embedding calls are
- * independent of each other (unlike per-chunk knowledge extraction, which
- * intentionally stays sequential — see the comment in processDocumentKnowledge
- * about why parallelizing that would degrade topic de-duplication quality).
+ * ingestion could even start knowledge extraction.
+ *
+ * Also used by `processDocumentKnowledge` for its per-chunk and per-claim work;
+ * exported for that reason. See the concurrency notes there for why chunk-level
+ * parallelism is bounded and batched rather than unlimited.
  */
-async function mapWithConcurrency<T, R>(
+export async function mapWithConcurrency<T, R>(
     items: T[],
     concurrency: number,
     fn: (item: T, index: number) => Promise<R>
@@ -61,16 +122,24 @@ const EMBEDDING_DIMENSION = Number(process.env.EMBEDDING_DIMENSION) || 768;
  * embedTopic / embedClaim, all of which derive dimension from the actual
  * embedding output) is what actually fixes the index's dimension in sqlite-vector.
  */
-function detectStoredDimension(table: 'chunks' | 'topics' | 'knowledge_claims'): number | null {
-    try {
-        const row = db.prepare(`SELECT LENGTH(embedding) AS len FROM ${table} WHERE embedding IS NOT NULL LIMIT 1`).get() as { len: number } | undefined;
-        return row ? row.len / 4 : null;
-    } catch {
-        return null;
-    }
-}
+// Dimension detection and the write-side guard live in ./embedding-dimension so
+// communities.ts can share them without importing this module (rag.ts already
+// imports communities.ts, so the reverse direction would be a cycle).
+const detectStoredDimension = storedDimension;
 
-export async function addDocument(filename: string, content: string, metadata: { repoId?: number, path?: string } = {}) {
+export async function addDocument(
+    filename: string,
+    content: string,
+    /**
+     * `batch: true` marks this as one document in a bulk ingestion (git sync).
+     * The community partition is still recomputed — leaving community_id stale
+     * would break the thematic retrieval path — but the expensive LLM-written
+     * community reports are suppressed. The batch caller MUST finish with an
+     * unsuppressed `recomputeCommunities()`, or the corpus ends up with reports
+     * describing a partition that has since been renumbered.
+     */
+    metadata: { repoId?: number, path?: string, batch?: boolean } = {}
+) {
     const contentHash = crypto.createHash('sha256').update(content).digest('hex');
 
     // ── Phase 0: Document preprocessing ──────────────────────────────────────
@@ -105,6 +174,12 @@ export async function addDocument(filename: string, content: string, metadata: {
         EMBED_CONCURRENCY,
         (text) => getEmbedding(text, "RETRIEVAL_DOCUMENT", filename)
     );
+
+    // Reject a mixed-dimension batch before the transaction opens — see
+    // assertUniformEmbeddings. A provider fallback partway through this
+    // document's chunks would otherwise write rows that vector search silently
+    // ignores for the rest of their existence.
+    assertUniformEmbeddings('chunks', embeddings, `document "${filename}"`);
 
     // Ensure vector index is initialised before the transaction
     if (embeddings.length > 0) {
@@ -151,6 +226,11 @@ export async function addDocument(filename: string, content: string, metadata: {
         return { docId: newDocId, chunkRecords };
     })();
 
+    // New chunk embeddings invalidate the quantized index: until it is rebuilt,
+    // searches must not run against a structure that predates this document, or
+    // the document just ingested would be unfindable. See ./vector-index.
+    markVectorIndexDirty('chunks');
+
     // Persist the cleaning audit log now that we have a docId. Aggressive noise
     // removal is inspectable via the document_clean_log table: verdict tells you
     // whether cleaning was accepted / flagged / fell back, and `removals` records
@@ -170,9 +250,10 @@ export async function addDocument(filename: string, content: string, metadata: {
 
     // ── Phase 4: Community detection (outside any transaction) ─────────────────
     // Recompute communities after knowledge extraction. Full recompute is fast
-    // (<100ms for <5000 nodes) so no incremental heuristic is needed.
+    // (<100ms for <5000 nodes) so no incremental heuristic is needed. Community
+    // *reports* are not fast — see the `batch` flag above.
     try {
-        await recomputeCommunities();
+        await recomputeCommunities({ refreshReports: !metadata.batch });
     } catch (err) {
         console.error('[CommunityDetection] Recompute failed:', err);
     }
@@ -199,7 +280,9 @@ async function ensureVectorInit() {
 export async function embedTopic(topicId: number, name: string, description: string | null, category: string | null) {
     const embeddingText = `Topic: ${name}\nCategory: ${category || 'Uncategorized'}\nDescription: ${description || 'No description'}`;
     const embedding = await getEmbedding(embeddingText, "RETRIEVAL_DOCUMENT", name);
-    const dimension = embedding.length;
+    // Topics have no FTS fallback — searchTopics is pure vector — so a
+    // wrong-dimension row here is a topic that can never be retrieved again.
+    const dimension = assertStorableEmbedding('topics', embedding, `topic "${name}"`);
 
     try {
         db.prepare("SELECT vector_init('topics', 'embedding', ?)").get(`dimension=${dimension},distance=cosine`);
@@ -209,6 +292,10 @@ export async function embedTopic(topicId: number, name: string, description: str
 
     db.prepare('UPDATE topics SET embedding = vector_as_f32(?), embedding_updated_at = CURRENT_TIMESTAMP WHERE id = ?')
         .run(JSON.stringify(embedding), topicId);
+
+    // An in-place re-embed leaves the row count unchanged, so the count check in
+    // vector-index.ts cannot detect it — this signal is what makes it safe.
+    markVectorIndexDirty('topics');
 }
 
 /**
@@ -217,7 +304,9 @@ export async function embedTopic(topicId: number, name: string, description: str
 export async function embedClaim(claimId: number, claimText: string, topicName: string) {
     const embeddingText = `Topic: ${topicName}\nClaim: ${claimText}`;
     const embedding = await getEmbedding(embeddingText, "RETRIEVAL_DOCUMENT", topicName);
-    const dimension = embedding.length;
+    // As with topics: searchClaims is pure vector, so a mismatched dimension
+    // silently removes this claim from retrieval permanently.
+    const dimension = assertStorableEmbedding('knowledge_claims', embedding, `claim ${claimId} on "${topicName}"`);
 
     try {
         db.prepare("SELECT vector_init('knowledge_claims', 'embedding', ?)").get(`dimension=${dimension},distance=cosine`);
@@ -227,6 +316,8 @@ export async function embedClaim(claimId: number, claimText: string, topicName: 
 
     db.prepare('UPDATE knowledge_claims SET embedding = vector_as_f32(?), embedding_updated_at = CURRENT_TIMESTAMP WHERE id = ?')
         .run(JSON.stringify(embedding), claimId);
+
+    markVectorIndexDirty('knowledge_claims');
 }
 
 /**
@@ -294,16 +385,48 @@ export async function backfillAllEmbeddings(): Promise<{ topicsEmbedded: number;
  * auto-detection can't re-lock the old size) and then re-initializes each index
  * from the first new embedding's length.
  */
-export async function reembedAll(): Promise<{ chunks: number; topics: number; claims: number; dimension: number | null }> {
+export async function reembedAll(): Promise<{ chunks: number; topics: number; claims: number; communityReports: number; dimension: number | null }> {
     console.log('[Reembed] Starting full corpus re-embedding...');
 
+    // Flush the query-embedding cache on the way in AND on the way out. A vector
+    // cached before this point was produced by the old provider/dimension; handed
+    // to vector_full_scan against a freshly re-locked index it throws, and every
+    // search's catch swallows that into an empty result set with nothing pointing
+    // at the cache as the cause. TTL expiry is not sufficient — this needs to be
+    // explicit and immediate.
+    clearEmbeddingCache();
+
+    // Every quantized structure in the database describes vectors that are about
+    // to be deleted, so nothing may search one until it has been rebuilt from the
+    // new embeddings. Marked before the first write, not after the last: searches
+    // can arrive while this runs (it is long), and an approximate scan mid-migration
+    // would be answering from the old dimension's index.
+    markAllVectorIndexesDirty();
+
     // 1. Clear all stored embeddings so nothing pins the old dimension.
+    //
+    // `community_reports` is included, and was previously missed. Its embeddings
+    // are written by communities.ts and read by searchCommunities, so a re-embed
+    // that skipped them left the thematic retrieval path holding old-dimension
+    // vectors after every migration — and vector_full_scan skips mismatched rows
+    // silently while searchCommunities' catch turns the rest into `[]`, so the
+    // whole thematic layer went quiet with nothing in the logs. Wrapped because
+    // the table is created defensively in db.ts and may not exist on an older DB.
     db.exec(`
         UPDATE chunks SET embedding = NULL;
         UPDATE topics SET embedding = NULL;
         UPDATE knowledge_claims SET embedding = NULL;
     `);
-    console.log('[Reembed] Cleared existing embeddings on chunks, topics, knowledge_claims.');
+    let reportsCleared = false;
+    try {
+        db.exec('UPDATE community_reports SET embedding = NULL');
+        reportsCleared = true;
+    } catch {
+        // Pre-migration DB without the community_reports table.
+    }
+    console.log(
+        `[Reembed] Cleared existing embeddings on chunks, topics, knowledge_claims${reportsCleared ? ', community_reports' : ''}.`
+    );
 
     let newDimension: number | null = null;
     const initIndex = (table: string, dimension: number) => {
@@ -323,6 +446,13 @@ export async function reembedAll(): Promise<{ chunks: number; topics: number; cl
         EMBED_CONCURRENCY,
         (row) => getEmbedding(row.content, 'RETRIEVAL_DOCUMENT', row.filename)
     );
+    // A fallback partway through THIS batch is the worst case for the whole
+    // system: a re-embed exists to make the corpus uniform, so finishing one that
+    // wrote two different dimensions would leave the corpus permanently split
+    // while reporting success. Every embedding is already in hand and the table
+    // was cleared above, so checking uniformity here costs nothing and fails
+    // before the first row is written.
+    assertUniformEmbeddings('chunks', chunkEmbeddings, 'full-corpus re-embed');
     for (let i = 0; i < chunkRows.length; i++) {
         const embedding = chunkEmbeddings[i];
         if (newDimension === null) {
@@ -357,8 +487,45 @@ export async function reembedAll(): Promise<{ chunks: number; topics: number; cl
         if (++claimsDone % 50 === 0) console.log(`[Reembed]   claims ${claimsDone}/${claimRows.length}`);
     }
 
-    console.log(`[Reembed] Done. Re-embedded ${chunkRows.length} chunks, ${topicRows.length} topics, ${claimRows.length} claims at dimension ${newDimension}.`);
-    return { chunks: chunkRows.length, topics: topicRows.length, claims: claimRows.length, dimension: newDimension };
+    // 5. Re-embed community reports.
+    //
+    // Their title/summary text is already persisted, so this needs no LLM call —
+    // only a fresh embedding. Skipping this step was what left the thematic path
+    // dark after a migration (see the clearing step above). Failures are contained
+    // per report so one bad row can't abort a migration that has already rewritten
+    // the rest of the corpus.
+    let reportsReembedded = 0;
+    if (reportsCleared) {
+        const reportRows = db.prepare(
+            'SELECT id, title, summary FROM community_reports WHERE community_id IS NOT NULL'
+        ).all() as { id: number; title: string; summary: string }[];
+        console.log(`[Reembed] Re-embedding ${reportRows.length} community reports...`);
+        for (const report of reportRows) {
+            try {
+                const embedding = await getEmbedding(`${report.title}\n\n${report.summary}`, 'RETRIEVAL_DOCUMENT', report.title);
+                assertStorableEmbedding('community_reports', embedding, `community report "${report.title}"`);
+                if (newDimension === null) newDimension = embedding.length;
+                initIndex('community_reports', embedding.length);
+                db.prepare('UPDATE community_reports SET embedding = vector_as_f32(?), embedding_updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+                    .run(JSON.stringify(embedding), report.id);
+                reportsReembedded++;
+            } catch (e) {
+                console.error(`[Reembed] Failed to re-embed community report ${report.id} ("${report.title}"):`, (e as Error).message);
+            }
+        }
+    }
+
+    // Exit flush: guarantees nothing embedded under the previous dimension
+    // survives into the first post-migration query.
+    clearEmbeddingCache();
+
+    // Rebuild the quantized structures now that the corpus is uniform again, so
+    // the first post-migration searches don't have to pay for an exact scan
+    // (and, in a long-lived server process, don't wait on the debounce).
+    warmVectorIndexes();
+
+    console.log(`[Reembed] Done. Re-embedded ${chunkRows.length} chunks, ${topicRows.length} topics, ${claimRows.length} claims, ${reportsReembedded} community reports at dimension ${newDimension}.`);
+    return { chunks: chunkRows.length, topics: topicRows.length, claims: claimRows.length, communityReports: reportsReembedded, dimension: newDimension };
 }
 
 // ── Automatic embedding-dimension migration ─────────────────────────────────
@@ -395,9 +562,26 @@ function currentCorpusDimension(): number | null {
     );
 }
 
-/** Whether ANY embeddings are stored (i.e. there is a corpus to migrate). */
-function hasStoredEmbeddings(): boolean {
-    return currentCorpusDimension() !== null;
+/**
+ * Tables whose embedding column holds more than one distinct dimension.
+ *
+ * `currentCorpusDimension()` above reads a single arbitrary row per table, which
+ * is only a trustworthy summary of the corpus if the corpus is actually uniform.
+ * Before the write-side guard in ./embedding-dimension existed, a provider
+ * fallback could interleave two dimensions into the same column — and those
+ * minority rows are invisible to `vector_full_scan` with no error at query time,
+ * so nothing would ever surface them.
+ *
+ * A mixed table cannot be repaired in place (the vectors have to be regenerated),
+ * so this is treated as grounds for a full re-embed regardless of what the live
+ * probe says: even when the majority dimension matches the live model, the
+ * minority rows are silently missing from every search until rebuilt.
+ */
+function mixedDimensionTables(): { table: EmbeddedTable; dimensions: number[] }[] {
+    const tables: EmbeddedTable[] = ['chunks', 'topics', 'knowledge_claims', 'community_reports'];
+    return tables
+        .map(table => ({ table, dimensions: distinctDimensions(table) }))
+        .filter(entry => entry.dimensions.length > 1);
 }
 
 /**
@@ -434,13 +618,47 @@ export function ensureEmbeddingsMigrated(): Promise<void> {
                 return;
             }
 
+            // A corpus that is ALREADY mixed needs rebuilding whatever the live
+            // probe reports, so this check comes first. The minority-dimension rows
+            // are invisible to vector_full_scan and cannot be fixed in place, and
+            // comparing one arbitrary row against the live model can't detect them:
+            // if the probe happens to match the majority dimension we would return
+            // "no migration needed" and leave those rows permanently unsearchable.
+            const mixed = mixedDimensionTables();
+            if (mixed.length > 0) {
+                console.warn(
+                    `[Reembed] Mixed embedding dimensions detected — ` +
+                    mixed.map(m => `${m.table}: ${m.dimensions.join('/')}`).join(', ') +
+                    `. This is the signature of an embedding provider fallback (LiteLLM → Gemini) ` +
+                    `having written into an existing corpus. Rows at the minority dimension are ` +
+                    `silently skipped by vector search and cannot be repaired in place, so the ` +
+                    `corpus is being re-embedded in full.`
+                );
+                const repair = await reembedAll();
+                console.log(
+                    `[Reembed] Mixed-dimension repair complete: ${repair.chunks} chunks, ${repair.topics} topics, ` +
+                    `${repair.claims} claims, ${repair.communityReports} community reports at dimension ${repair.dimension}.`
+                );
+                return;
+            }
+
             // Probe the live embedding model's output dimension with a minimal
             // call. This routes through the same provider stack (LiteLLM primary
             // → Gemini fallback) as real queries, so the probed dimension is
             // exactly what queries will produce.
             let liveDim: number;
             try {
-                const probe = await getEmbedding('dimension probe', 'RETRIEVAL_QUERY');
+                // `cache: false` is load-bearing. This is a constant string sent
+                // as RETRIEVAL_QUERY, making it the single most cache-hittable
+                // text in the codebase — and its entire purpose is to observe
+                // what the LIVE provider returns right now. A remembered value
+                // would compare the stored corpus dimension against a stale
+                // number and either skip a needed reembedAll (vector search then
+                // returns nothing, forever, silently) or trigger a pointless
+                // full-corpus re-embed. It must also never be written to the
+                // cache: a probe that ran while LiteLLM was down would seed a
+                // Gemini-dimension vector under a highly-hittable constant key.
+                const probe = await getEmbedding('dimension probe', 'RETRIEVAL_QUERY', undefined, { cache: false });
                 liveDim = probe.length;
             } catch (e) {
                 console.warn('[Reembed] Could not probe live embedding dimension; skipping auto-migration this boot:', (e as Error).message);
@@ -460,7 +678,7 @@ export function ensureEmbeddingsMigrated(): Promise<void> {
             const result = await reembedAll();
             console.log(
                 `[Reembed] Automatic migration complete: ${result.chunks} chunks, ${result.topics} topics, ` +
-                `${result.claims} claims re-embedded at dimension ${result.dimension}.`
+                `${result.claims} claims, ${result.communityReports} community reports re-embedded at dimension ${result.dimension}.`
             );
         } catch (e) {
             // Never let a migration failure crash server boot. Log loudly; a
@@ -468,6 +686,10 @@ export function ensureEmbeddingsMigrated(): Promise<void> {
             // be fixed by `npm run reembed`. Reset the guard so a later trigger
             // (or next boot) can retry.
             console.error('[Reembed] Automatic embedding migration failed:', e);
+            // The guard is reset here so a later trigger can retry, which means a
+            // second probe in the same process is a real code path — flush so the
+            // retry cannot observe anything produced by the aborted run.
+            clearEmbeddingCache();
             migrationPromise = null;
         }
     })();
@@ -478,44 +700,76 @@ export async function searchChunks(query: string, limit = 5) {
     await ensureVectorInit();
     const queryEmbedding = await getEmbedding(query, "RETRIEVAL_QUERY");
     
-    // Create a safe FTS query by extracting alphanumeric words and using prefix matching.
-    // Strip FTS5 special characters and operators to prevent injection.
-    const words = query
-        .replace(/[^\w\s]/g, ' ')
-        .trim()
-        .split(/\s+/)
-        .filter(w => w.length > 2 && /^[a-zA-Z0-9_]+$/.test(w));
-    const ftsQuery = words.length > 0
-        ? words.map(w => `"${w.replace(/"/g, '""')}"*`).join(' OR ')
-        : '"*"';
-    
+    // Build the FTS5 MATCH expression via the shared helper (see ./fts-query for
+    // why it must not fold diacritics — the FTS5 tokenizer already does, on both
+    // sides). This replaced an inline sanitizer built on the ASCII-only `\w`
+    // class, which replaced every accented letter with a space and so shredded
+    // Czech query words before SQLite ever saw them: "řízení projektů" became
+    // ["zen", "projekt"], and measured against the real index `MATCH '"zen"*'`
+    // returns 0 rows while `MATCH '"řízení"*'` returns 48.
+    const ftsQuery = buildFtsMatchQuery(query, { prefix: true });
+
     // Hybrid Search using Reciprocal Rank Fusion (RRF)
     // We fetch more results initially to allow for better reranking
     let results: { content: string, filename: string, path: string | null, score: number }[] = [];
     try {
-        results = db.prepare(`
-            WITH vector_results AS (
-                SELECT rowid, row_number() OVER (ORDER BY distance ASC) as rank
-                FROM vector_full_scan('chunks', 'embedding', vector_as_f32(?), 50)
-            ),
-            fts_results AS (
-                SELECT rowid, row_number() OVER (ORDER BY rank ASC) as rank
-                FROM chunks_fts
-                WHERE content MATCH ?
-                LIMIT 50
-            )
-            SELECT c.content,
-                   d.filename,
-                   d.path,
-                   (COALESCE(1.0 / (60 + v.rank), 0) + COALESCE(1.0 / (60 + f.rank), 0)) as score
-            FROM chunks c
-            JOIN documents d ON c.doc_id = d.id
-            LEFT JOIN vector_results v ON c.id = v.rowid
-            LEFT JOIN fts_results f ON c.id = f.rowid
-            WHERE v.rank IS NOT NULL OR f.rank IS NOT NULL
-            ORDER BY score DESC
-            LIMIT 20
-        `).all(JSON.stringify(queryEmbedding), ftsQuery) as { content: string, filename: string, path: string | null, score: number }[];
+        if (ftsQuery === null) {
+            // No token survived tokenisation (e.g. a query of only very short
+            // words). Run vector-only rather than emitting a degenerate MATCH:
+            // the previous code fell back to the literal '"*"', which is NOT a
+            // match-all — it was measured returning 0 rows — so the FTS half of
+            // the fusion contributed nothing while still looking like it ran.
+            // Logged because a silently vector-only search is exactly the kind of
+            // quiet degradation that hid the original bug.
+            console.log(`[searchChunks] No FTS token survived for "${query.slice(0, 60)}" — running vector-only.`);
+            results = runVectorScan(
+                'chunks',
+                scan => `
+                WITH vector_results AS (
+                    SELECT rowid, row_number() OVER (ORDER BY distance ASC) as rank
+                    FROM ${scan}('chunks', 'embedding', vector_as_f32(?), 50)
+                )
+                SELECT c.content,
+                       d.filename,
+                       d.path,
+                       (1.0 / (60 + v.rank)) as score
+                FROM chunks c
+                JOIN documents d ON c.doc_id = d.id
+                JOIN vector_results v ON c.id = v.rowid
+                ORDER BY score DESC
+                LIMIT 20
+            `,
+                sql => db.prepare(sql).all(JSON.stringify(queryEmbedding))
+            ) as { content: string, filename: string, path: string | null, score: number }[];
+        } else {
+            results = runVectorScan(
+                'chunks',
+                scan => `
+                WITH vector_results AS (
+                    SELECT rowid, row_number() OVER (ORDER BY distance ASC) as rank
+                    FROM ${scan}('chunks', 'embedding', vector_as_f32(?), 50)
+                ),
+                fts_results AS (
+                    SELECT rowid, row_number() OVER (ORDER BY rank ASC) as rank
+                    FROM chunks_fts
+                    WHERE content MATCH ?
+                    LIMIT 50
+                )
+                SELECT c.content,
+                       d.filename,
+                       d.path,
+                       (COALESCE(1.0 / (60 + v.rank), 0) + COALESCE(1.0 / (60 + f.rank), 0)) as score
+                FROM chunks c
+                JOIN documents d ON c.doc_id = d.id
+                LEFT JOIN vector_results v ON c.id = v.rowid
+                LEFT JOIN fts_results f ON c.id = f.rowid
+                WHERE v.rank IS NOT NULL OR f.rank IS NOT NULL
+                ORDER BY score DESC
+                LIMIT 20
+            `,
+                sql => db.prepare(sql).all(JSON.stringify(queryEmbedding), ftsQuery)
+            ) as { content: string, filename: string, path: string | null, score: number }[];
+        }
     } catch (e) {
         console.warn('searchChunks: hybrid search failed (vector extension unavailable or no indexed data):', (e as Error).message);
         return [];
@@ -567,28 +821,59 @@ export async function reprocessKnowledge(
         : (db.prepare('SELECT id, filename, content, summary FROM documents ORDER BY id').all() as { id: number; filename: string; content: string; summary: string | null }[]);
 
     let processed = 0;
+    const failed: { docId: number; filename: string; reason: string }[] = [];
     for (const doc of docs) {
-        let chunkRows: { id: number; content: string }[];
-        if (options.rechunk) {
-            db.prepare('DELETE FROM chunks WHERE doc_id = ?').run(doc.id);
-            // Re-embed via the regular pipeline. `documents.content` holds the
-            // CLEANED text (see addDocument), so re-chunking it matches how the
-            // document was originally indexed — no separate cleaning pass needed
-            // here, and none is done so we don't re-translate/re-rewrite content
-            // that is already clean.
-            await embedAndStoreChunks(doc.id, doc.filename, doc.content, undefined);
+        // Contain failures per document. Previously any throw in here aborted the
+        // whole reprocess — leaving the knowledge tables wiped (with `wipeAll`) but
+        // only partially rebuilt, which is a strictly worse state than either the
+        // before or the after.
+        try {
+            let chunkRows: { id: number; content: string }[];
+            if (options.rechunk) {
+                // Re-embed via the regular pipeline. `documents.content` holds the
+                // CLEANED text (see addDocument), so re-chunking it matches how the
+                // document was originally indexed — no separate cleaning pass needed
+                // here, and none is done so we don't re-translate/re-rewrite content
+                // that is already clean.
+                //
+                // `replaceExisting` makes the swap atomic. The DELETE used to happen
+                // here, before the await: a failure part-way through embedding then
+                // left the document with NO chunks at all — unsearchable, and with
+                // its text still present so nothing flagged it as missing.
+                await embedAndStoreChunks(doc.id, doc.filename, doc.content, undefined, { replaceExisting: true });
+            }
             chunkRows = db.prepare('SELECT id, content FROM chunks WHERE doc_id = ?').all(doc.id) as { id: number; content: string }[];
-        } else {
-            chunkRows = db.prepare('SELECT id, content FROM chunks WHERE doc_id = ?').all(doc.id) as { id: number; content: string }[];
-        }
 
-        if (chunkRows.length === 0) {
-            console.warn(`Doc ${doc.id} (${doc.filename}) has no chunks; skipping knowledge processing.`);
-            continue;
-        }
+            if (chunkRows.length === 0) {
+                console.warn(`Doc ${doc.id} (${doc.filename}) has no chunks; skipping knowledge processing.`);
+                continue;
+            }
 
-        await processDocumentKnowledge(doc.id, chunkRows, doc.summary ?? undefined);
-        processed++;
+            await processDocumentKnowledge(doc.id, chunkRows, doc.summary ?? undefined);
+            processed++;
+        } catch (err) {
+            const reason = (err as Error)?.message ?? String(err);
+            failed.push({ docId: doc.id, filename: doc.filename, reason });
+            console.error(`[Reprocess] Doc ${doc.id} (${doc.filename}) failed, continuing with the rest:`, reason);
+        }
+    }
+
+    if (failed.length > 0) {
+        console.warn(
+            `[Reprocess] ${failed.length} of ${docs.length} document(s) failed: ` +
+            failed.map(f => `${f.filename} (${f.reason})`).join('; ')
+        );
+    }
+
+    // Reprocessing rewrites the topic set wholesale (and with `wipeAll` deletes
+    // every topic first), so the community partition it was clustered from no
+    // longer describes anything. Recompute it, which also prunes community
+    // reports whose member topics are gone — otherwise the thematic retrieval
+    // path would keep matching summaries of topics that no longer exist.
+    try {
+        await recomputeCommunities();
+    } catch (err) {
+        console.error('[Reprocess] Community recompute failed:', err);
     }
 
     const topicsAfter = (db.prepare('SELECT COUNT(*) AS c FROM topics').get() as { c: number }).c;
@@ -611,7 +896,8 @@ async function embedAndStoreChunks(
     docId: number | bigint,
     filename: string,
     content: string,
-    pathHint: string | undefined
+    pathHint: string | undefined,
+    options: { replaceExisting?: boolean } = {}
 ): Promise<string[]> {
     const chunks = await semanticChunkDocument(content, filename);
     const chunksWithMetadata = chunks.map((chunk) => `Document: ${pathHint || filename}\n\n${chunk}`);
@@ -625,20 +911,36 @@ async function embedAndStoreChunks(
         (text) => getEmbedding(text, 'RETRIEVAL_DOCUMENT', filename)
     );
 
-    for (let i = 0; i < chunks.length; i++) {
-        const embedding = embeddings[i];
-        const dimension = embedding.length;
+    // Same pre-write batch guard as addDocument's ingestion path.
+    assertUniformEmbeddings('chunks', embeddings, `re-chunk of "${filename}"`);
+
+    if (embeddings.length > 0) {
         try {
-            db.prepare("SELECT vector_init('chunks', 'embedding', ?)").get(`dimension=${dimension},distance=cosine`);
+            db.prepare("SELECT vector_init('chunks', 'embedding', ?)").get(`dimension=${embeddings[0].length},distance=cosine`);
         } catch (e) {
             // already initialized
         }
-        db.prepare('INSERT INTO chunks (doc_id, content, embedding) VALUES (?, ?, vector_as_f32(?))').run(
-            docId,
-            chunks[i],
-            JSON.stringify(embedding)
-        );
     }
+
+    // Replace-and-insert in ONE transaction, so a document is never left without
+    // chunks. Everything above this point is network I/O and is deliberately done
+    // before the transaction opens (holding a SQLite transaction across an await is
+    // what the phased structure in addDocument exists to avoid).
+    db.transaction(() => {
+        if (options.replaceExisting) {
+            db.prepare('DELETE FROM chunks WHERE doc_id = ?').run(docId);
+        }
+        for (let i = 0; i < chunks.length; i++) {
+            db.prepare('INSERT INTO chunks (doc_id, content, embedding) VALUES (?, ?, vector_as_f32(?))').run(
+                docId,
+                chunks[i],
+                JSON.stringify(embeddings[i])
+            );
+        }
+    })();
+
+    markVectorIndexDirty('chunks');
+
     return chunks;
 }
 
@@ -791,6 +1093,146 @@ const MIN_TOPIC_RELEVANCE = 0.45;
 const MIN_CLAIM_RELEVANCE = 0.4;
 
 /**
+ * Words that mark a query as asking whether something is permitted/required, as
+ * opposed to asking what something is. `buildKnowledgeContext` boosts
+ * negation/condition/boundary claims when one is present, because those are the
+ * claims that actually answer such a question.
+ *
+ * The list was English-only, which made the boost dead code on this corpus —
+ * measured as producing no boost: "Kdo musí schválit bezpečnostní řízení?",
+ * "Lze změnit řízení projektů?", "Může vedoucí zamítnout žádost?". The
+ * consequence is the worst kind: the governing exception keeps its base score,
+ * loses the ordering contest to plainly-worded assertions, falls outside the
+ * maxClaims cut, and the model answers confidently from general assertions while
+ * the rule that contradicts it sits unretrieved in the graph.
+ *
+ * Unicode lookarounds rather than `\b`, which is ASCII-only and places a false
+ * boundary between an accented letter and an adjacent ASCII run — that is how
+ * short alternatives like "is" or "may" could match *inside* an accented Czech
+ * word and boost on a query that asks nothing. (Same mechanism that truncated
+ * "ČSN" to "SN" in llm.ts's acronym extractor.)
+ *
+ * Exported so the eval harness can cover it; see scripts/eval/README.md.
+ */
+export const INTERROGATIVE_WORDS = [
+    // English
+    'does', 'can', 'is', 'should', 'will', 'could', 'would', 'may', 'might', 'must',
+    // Czech modals and interrogatives
+    'musí', 'může', 'lze', 'smí', 'má', 'mají', 'je', 'jsou',
+    'kdo', 'kdy', 'jak', 'jaká', 'jaké', 'jaký', 'který', 'která', 'které',
+    'nutné', 'povinné', 'zakázáno', 'povoleno'
+];
+
+const INTERROGATIVE_PATTERN = new RegExp(
+    `(?<![\\p{L}\\p{N}])(?:${INTERROGATIVE_WORDS.join('|')})(?![\\p{L}\\p{N}])`,
+    'iu'
+);
+
+/**
+ * Relevance floor for community reports. Lower than the topic floor on purpose:
+ * a report is 150-300 words covering a whole area, so its embedding sits further
+ * from any single short query than a tight topic embedding does. Holding it to
+ * MIN_TOPIC_RELEVANCE would mean the thematic path effectively never fires.
+ *
+ * Picked by reasoning about embedding geometry, not measured — it belongs in the
+ * eval harness's threshold table (scripts/eval/README.md) as soon as the golden
+ * set has cases that exercise broad thematic questions.
+ */
+const MIN_COMMUNITY_RELEVANCE = Number(process.env.MIN_COMMUNITY_RELEVANCE) || 0.35;
+
+export interface CommunityMatch {
+    id: number;
+    communityId: number | null;
+    title: string;
+    summary: string;
+    topicCount: number;
+    score: number;
+}
+
+/**
+ * Semantic search over community reports — the thematic ("global") retrieval
+ * path.
+ *
+ * Entity-level search answers "what does the corpus say about X". This answers
+ * "what areas does the corpus cover, and which one is this question in" — the
+ * class of question where no single topic holds the answer because the answer is
+ * the shape of a whole cluster. The clustering already existed (communities.ts)
+ * but had no query-time consumer; the embedded reports are what make it
+ * reachable from a question.
+ */
+export async function searchCommunities(
+    query: string,
+    limit = 2,
+    minScore = MIN_COMMUNITY_RELEVANCE
+): Promise<CommunityMatch[]> {
+    await ensureEmbeddingsMigrated();
+
+    // Cheap pre-check: skip the embedding call entirely on corpora that have no
+    // reports yet (small graphs, or COMMUNITY_REPORTS_ENABLED=false).
+    try {
+        const available = (db.prepare(
+            'SELECT COUNT(*) AS c FROM community_reports WHERE embedding IS NOT NULL AND community_id IS NOT NULL'
+        ).get() as { c: number }).c;
+        if (available === 0) return [];
+    } catch (e) {
+        return []; // table missing (pre-migration DB)
+    }
+
+    const queryEmbedding = await getEmbedding(query, 'RETRIEVAL_QUERY');
+
+    try {
+        const dimension = (() => {
+            try {
+                const row = db.prepare('SELECT LENGTH(embedding) AS len FROM community_reports WHERE embedding IS NOT NULL LIMIT 1')
+                    .get() as { len: number } | undefined;
+                return row ? row.len / 4 : EMBEDDING_DIMENSION;
+            } catch {
+                return EMBEDDING_DIMENSION;
+            }
+        })();
+        db.prepare("SELECT vector_init('community_reports', 'embedding', ?)").get(`dimension=${dimension},distance=cosine`);
+    } catch (e) {
+        // Already initialized
+    }
+
+    try {
+        const rows = runVectorScan(
+            'community_reports',
+            scan => `
+            SELECT cr.id, cr.community_id, cr.title, cr.summary, cr.topic_count,
+                   (1 - v.distance) as score
+            FROM ${scan}('community_reports', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
+            JOIN community_reports cr ON cr.id = v.rowid
+            WHERE cr.embedding IS NOT NULL AND cr.community_id IS NOT NULL
+            ORDER BY v.distance ASC
+        `,
+            sql => db.prepare(sql).all(JSON.stringify(queryEmbedding), Math.max(limit * 3, 6))
+        ) as {
+            id: number; community_id: number | null; title: string; summary: string; topic_count: number; score: number;
+        }[];
+
+        return rows
+            .filter(r => r.score >= minScore)
+            .slice(0, limit)
+            .map(r => ({
+                id: r.id,
+                communityId: r.community_id,
+                title: r.title,
+                summary: r.summary,
+                topicCount: r.topic_count,
+                score: r.score
+            }));
+    } catch (e) {
+        console.warn('searchCommunities failed (no reports or vector extension unavailable):', (e as Error).message);
+        return [];
+    }
+}
+
+// buildKeywordProbe / mergeByIdKeepingBestScore live in ./retrieval-probe so
+// they can be unit-tested without importing this module (and with it the schema
+// migration in ./db).
+
+/**
  * Semantic search on topics using embeddings.
  * Returns topics ranked by relevance to the query, filtered to those that
  * clear `minScore` (see MIN_TOPIC_RELEVANCE for rationale).
@@ -803,9 +1245,21 @@ const MIN_CLAIM_RELEVANCE = 0.4;
  * LLM round trip (e.g. the vocabulary-hint lookup during ingestion) don't
  * pay for it; buildKnowledgeContext enables it for the query-facing search.
  */
-export async function searchTopics(query: string, limit = 10, minScore = MIN_TOPIC_RELEVANCE, useRerank = false): Promise<{ id: number; name: string; description: string | null; category: string | null; score: number }[]> {
+export async function searchTopics(
+    query: string,
+    limit = 10,
+    minScore = MIN_TOPIC_RELEVANCE,
+    useRerank = false,
+    opts: { cache?: boolean } = {}
+): Promise<{ id: number; name: string; description: string | null; category: string | null; score: number }[]> {
     await ensureEmbeddingsMigrated();
-    const queryEmbedding = await getEmbedding(query, "RETRIEVAL_QUERY");
+    // `opts.cache` exists for the ingestion-side caller: buildVocabularyHint runs
+    // one searchTopics per chunk over a 1000-char chunk prefix, which is a
+    // distinct, never-reused RETRIEVAL_QUERY text. Left cacheable, a large git
+    // sync would roll thousands of those through the LRU and evict a concurrent
+    // chat turn's query vectors — correctness-neutral, but it silently undoes the
+    // cache's benefit exactly when the server is busiest.
+    const queryEmbedding = await getEmbedding(query, "RETRIEVAL_QUERY", undefined, { cache: opts.cache });
 
     try {
         const dimension = detectStoredDimension('topics') ?? EMBEDDING_DIMENSION;
@@ -816,14 +1270,18 @@ export async function searchTopics(query: string, limit = 10, minScore = MIN_TOP
 
     try {
         const fetchLimit = useRerank ? Math.max(limit * 3, 15) : limit;
-        const results = db.prepare(`
+        const results = runVectorScan(
+            'topics',
+            scan => `
             SELECT t.id, t.name, t.description, t.category,
                    (1 - v.distance) as score
-            FROM vector_full_scan('topics', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
+            FROM ${scan}('topics', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
             JOIN topics t ON t.id = v.rowid
             WHERE t.embedding IS NOT NULL
             ORDER BY v.distance ASC
-        `).all(JSON.stringify(queryEmbedding), fetchLimit) as { id: number; name: string; description: string | null; category: string | null; score: number }[];
+        `,
+            sql => db.prepare(sql).all(JSON.stringify(queryEmbedding), fetchLimit)
+        ) as { id: number; name: string; description: string | null; category: string | null; score: number }[];
 
         const filtered = results.filter(r => r.score >= minScore);
         if (!useRerank || filtered.length <= limit) {
@@ -862,18 +1320,18 @@ export async function searchClaims(
     }
 
     try {
-        let sql: string;
+        let buildSql: (scan: string) => string;
         let params: any[];
         const fetchLimit = useRerank ? Math.max(limit * 2, 20) : limit * 2;
 
         if (topicIds && topicIds.length > 0) {
             const placeholders = topicIds.map(() => '?').join(',');
-            sql = `
+            buildSql = scan => `
                 SELECT kc.id, kc.claim_text, kc.topic_id, kc.doc_id, t.name as topic_name,
                        COALESCE(kc.claim_type, 'assertion') as claim_type,
                        COALESCE(d.filename, '') as filename, d.path,
                        (1 - v.distance) as score
-                FROM vector_full_scan('knowledge_claims', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
+                FROM ${scan}('knowledge_claims', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
                 JOIN knowledge_claims kc ON kc.id = v.rowid
                 JOIN topics t ON kc.topic_id = t.id
                 LEFT JOIN documents d ON kc.doc_id = d.id
@@ -884,12 +1342,12 @@ export async function searchClaims(
             `;
             params = [JSON.stringify(queryEmbedding), fetchLimit, ...topicIds]; // Fetch more then filter
         } else {
-            sql = `
+            buildSql = scan => `
                 SELECT kc.id, kc.claim_text, kc.topic_id, kc.doc_id, t.name as topic_name,
                        COALESCE(kc.claim_type, 'assertion') as claim_type,
                        COALESCE(d.filename, '') as filename, d.path,
                        (1 - v.distance) as score
-                FROM vector_full_scan('knowledge_claims', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
+                FROM ${scan}('knowledge_claims', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
                 JOIN knowledge_claims kc ON kc.id = v.rowid
                 JOIN topics t ON kc.topic_id = t.id
                 LEFT JOIN documents d ON kc.doc_id = d.id
@@ -900,7 +1358,9 @@ export async function searchClaims(
             params = [JSON.stringify(queryEmbedding), fetchLimit];
         }
 
-        const results = db.prepare(sql).all(...params) as { id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number; claim_type: string; filename: string; path: string | null }[];
+        const results = runVectorScan('knowledge_claims', buildSql, sql =>
+            db.prepare(sql).all(...params)
+        ) as { id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number; claim_type: string; filename: string; path: string | null }[];
         const filtered = results.filter(r => r.score >= minScore);
 
         if (!useRerank || filtered.length <= limit) {
@@ -1058,7 +1518,27 @@ export interface KnowledgeContextResult {
     topicCount: number;
     claimCount: number;
     hasConflicts: boolean;
+    /** How many community reports the thematic path contributed. */
+    communityCount: number;
+    /** True when topics were seeded from a community because nothing else matched. */
+    thematicFallbackUsed: boolean;
 }
+
+/**
+ * Optional dual-level keyword sets from `analyzeAndCondenseQuery`.
+ *
+ * `lowLevel` (entities, identifiers, terms of art) probes the topic/claim
+ * layer; `highLevel` (themes, domains) probes the community-report layer.
+ * Both are optional — omit them and this degrades exactly to the previous
+ * single-probe behaviour.
+ */
+export interface QueryKeywords {
+    highLevel?: string[];
+    lowLevel?: string[];
+}
+
+/** How many community reports may enter the context at once. */
+const MAX_CONTEXT_COMMUNITIES = 2;
 
 /**
  * Build structured knowledge context from the knowledge graph for a query.
@@ -1069,20 +1549,91 @@ export interface KnowledgeContextResult {
  * `synthesizeContext` LLM pass entirely for simple single-topic queries that
  * are already well covered, instead of always paying for a reformatting pass.
  */
-export async function buildKnowledgeContext(query: string, maxTopics = 5, maxClaims = 15): Promise<KnowledgeContextResult> {
-    // Step 1: Find most relevant topics. Reranked — this is the primary
-    // query-facing retrieval path, so it's worth the extra LLM round trip
-    // (previously only searchChunks() got LLM reranking; topics/claims relied
-    // on raw cosine order alone).
-    const relevantTopics = await searchTopics(query, maxTopics, MIN_TOPIC_RELEVANCE, true);
+export async function buildKnowledgeContext(
+    query: string,
+    maxTopics = 5,
+    maxClaims = 15,
+    keywords?: QueryKeywords
+): Promise<KnowledgeContextResult> {
+    // Step 0: shape a probe per retrieval level. A single condensed query has to
+    // serve two incompatible jobs — matching the specific topic a question names,
+    // and matching the broad area it sits in. The keyword split lets each path
+    // search on text shaped for it; when no keywords are supplied both probes are
+    // null and this behaves exactly as it did before.
+    const lowLevelProbe = buildKeywordProbe(query, keywords?.lowLevel);
+    const highLevelProbe = buildKeywordProbe(query, keywords?.highLevel);
+
+    // Step 1: Find most relevant topics, and the thematic areas the question
+    // falls in, concurrently.
+    //
+    // The topic search pools candidates from the query AND the entity-keyword
+    // probe, then reranks the pooled set ONCE. Reranking each search separately
+    // would cost two LLM round trips and rank each list blind to the other; one
+    // pass over the union is both cheaper and a better ordering.
+    const topicPoolSize = Math.max(maxTopics * 3, 15);
+    const [queryTopics, keywordTopics, communities] = await Promise.all([
+        searchTopics(query, topicPoolSize, MIN_TOPIC_RELEVANCE, false),
+        lowLevelProbe
+            ? searchTopics(lowLevelProbe, topicPoolSize, MIN_TOPIC_RELEVANCE, false)
+            : Promise.resolve([] as Awaited<ReturnType<typeof searchTopics>>),
+        searchCommunities(highLevelProbe ?? query, MAX_CONTEXT_COMMUNITIES)
+    ]);
+
+    const pooledTopics = mergeByIdKeepingBestScore(queryTopics, keywordTopics);
+    let relevantTopics = pooledTopics.slice(0, maxTopics);
+    if (pooledTopics.length > maxTopics) {
+        try {
+            const rankedIndices = await rerank(
+                query,
+                pooledTopics.map(t => ({ content: `${t.name}: ${t.description ?? ''}` }))
+            );
+            const reranked = rankedIndices.map(i => pooledTopics[i]).filter(Boolean);
+            if (reranked.length > 0) relevantTopics = reranked.slice(0, maxTopics);
+        } catch (e) {
+            console.warn('[KnowledgeContext] Topic rerank failed, using cosine order:', (e as Error).message);
+        }
+    }
+
+    let thematicFallbackUsed = false;
 
     if (relevantTopics.length === 0) {
-        // Keyword-based fallback: works even when no topic embeddings exist yet
-        const words = query.replace(/[^\w\s]/g, ' ').trim().split(/\s+/).filter(w => w.length > 3);
+        // Keyword-based fallback: works even when no topic embeddings exist yet.
+        // The extracted low-level keywords are searched alongside the raw query
+        // words — they are the terms of art most likely to appear verbatim in a
+        // topic name, which is exactly what a LIKE match needs.
+        //
+        // This path was doubly broken on a Czech corpus, and the second bug is the
+        // one that makes a JS-only fix insufficient:
+        //   (a) the raw query was split with the ASCII-only `\w` class, so
+        //       "řízení" produced only the fragment "zen", which the length
+        //       filter then discarded — the query contributed nothing at all.
+        //   (b) SQLite's LOWER() is ASCII-only. Measured: LOWER('ŘÍZENÍ') returns
+        //       'ŘÍzenÍ'. So `LOWER(name) LIKE '%řízení%'` matched nothing, and
+        //       folding the *pattern* does not rescue it either —
+        //       'Řízení projektů' LIKE '%rizeni%' is also 0 — because the stored
+        //       column value stays accented. The COLUMN side has to be folded.
+        // Every topic named Řízení / Školení / Žádosti / Údržba — most of them, in
+        // Czech institutional prose — was unreachable through this last-resort path.
+        const words = [
+            ...tokenizeForFts(query),
+            ...(keywords?.lowLevel ?? [])
+        ].filter(w => [...w].length > 3);
         if (words.length > 0) {
             try {
-                const likeConditions = words.map(() => "(LOWER(name) LIKE ? OR LOWER(COALESCE(description, '')) LIKE ?)").join(' OR ');
-                const likeParams = words.flatMap(w => [`%${w.toLowerCase()}%`, `%${w.toLowerCase()}%`]);
+                registerFoldFunction();
+                // `canonical_key` is already lowercase, diacritic-folded ASCII
+                // (written by normalizeTopicName) and carries a UNIQUE index, so
+                // matching it makes both sides ASCII and plain LIKE suffices.
+                // `description` has no folded equivalent, hence fold() — which
+                // full-scans. Acceptable only because this is the rare
+                // last-resort path before "No relevant knowledge found".
+                const likeConditions = words
+                    .map(() => "(canonical_key LIKE ? ESCAPE '\\' OR fold(COALESCE(description, '')) LIKE ? ESCAPE '\\')")
+                    .join(' OR ');
+                const likeParams = words.flatMap(w => {
+                    const pattern = `%${escapeLikePattern(foldDiacritics(w.toLowerCase()))}%`;
+                    return [pattern, pattern];
+                });
                 const fallbackTopics = db.prepare(
                     `SELECT id, name, description, category FROM topics WHERE ${likeConditions} LIMIT ?`
                 ).all(...likeParams, maxTopics) as { id: number; name: string; description: string | null; category: string | null }[];
@@ -1093,9 +1644,41 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
                 console.warn('[KnowledgeContext] Keyword fallback failed:', (e as Error).message);
             }
         }
+        // Thematic fallback: nothing matched at the entity level, but a community
+        // report did. This is the case the community layer exists for — broad
+        // questions ("what does our governance cover?") whose answer is the shape
+        // of a whole cluster, so no individual topic embedding sits close to them.
+        // Seed the topic set from the matched community's members and let the
+        // normal claim assembly below fill in the facts.
+        if (relevantTopics.length === 0 && communities.length > 0) {
+            for (const community of communities) {
+                if (community.communityId === null) continue;
+                for (const member of getCommunityReportTopics(community.communityId, maxTopics)) {
+                    if (relevantTopics.some(t => t.id === member.id)) continue;
+                    const row = db.prepare('SELECT id, name, description, category FROM topics WHERE id = ?').get(member.id) as
+                        { id: number; name: string; description: string | null; category: string | null } | undefined;
+                    if (row) relevantTopics.push({ ...row, score: 0.35 });
+                }
+            }
+            if (relevantTopics.length > 0) {
+                thematicFallbackUsed = true;
+                console.log(
+                    `[KnowledgeContext] No topic matched "${query.slice(0, 60)}" directly; ` +
+                    `seeded ${relevantTopics.length} topic(s) from community report "${communities[0].title}".`
+                );
+            }
+        }
+
         if (relevantTopics.length === 0) {
             console.log(`[KnowledgeContext] No topics found for: "${query.slice(0, 80)}"`);
-            return { text: 'No relevant knowledge found for this query.', topicCount: 0, claimCount: 0, hasConflicts: false };
+            return {
+                text: 'No relevant knowledge found for this query.',
+                topicCount: 0,
+                claimCount: 0,
+                hasConflicts: false,
+                communityCount: 0,
+                thematicFallbackUsed: false
+            };
         }
     }
 
@@ -1129,9 +1712,31 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
     // DB but never read back by any retrieval path).
     const topicClaims = getTopicClaimsWithConflicts(Array.from(allTopicIds));
 
-    // Step 4: Semantic search for most relevant claims (to ensure we get the best ones).
-    // Reranked for the same reason as the topic search above.
-    const semanticClaims = await searchClaims(query, null, maxClaims, MIN_CLAIM_RELEVANCE, true);
+    // Step 4: Semantic search for the most relevant claims. Same dual-level
+    // pooling as the topic search: query probe + entity-keyword probe, merged,
+    // then one rerank pass over the union.
+    const claimPoolSize = Math.max(maxClaims * 2, 20);
+    const [queryClaims, keywordClaims] = await Promise.all([
+        searchClaims(query, null, claimPoolSize, MIN_CLAIM_RELEVANCE, false),
+        lowLevelProbe
+            ? searchClaims(lowLevelProbe, null, claimPoolSize, MIN_CLAIM_RELEVANCE, false)
+            : Promise.resolve([] as Awaited<ReturnType<typeof searchClaims>>)
+    ]);
+
+    const pooledClaims = mergeByIdKeepingBestScore(queryClaims, keywordClaims);
+    let semanticClaims = pooledClaims.slice(0, maxClaims);
+    if (pooledClaims.length > maxClaims) {
+        try {
+            const rankedIndices = await rerank(
+                query,
+                pooledClaims.map(c => ({ content: `[${c.topic_name}] ${c.claim_text}` }))
+            );
+            const reranked = rankedIndices.map(i => pooledClaims[i]).filter(Boolean);
+            if (reranked.length > 0) semanticClaims = reranked.slice(0, maxClaims);
+        } catch (e) {
+            console.warn('[KnowledgeContext] Claim rerank failed, using cosine order:', (e as Error).message);
+        }
+    }
 
     // Step 5: Merge and deduplicate claims, prioritizing semantic search results
     const claimMap = new Map<number, { claim_text: string; topic_name: string; topic_id: number; score: number; claim_type: string; filename?: string; path?: string | null; status: string }>();
@@ -1164,7 +1769,7 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
     }
 
     // Boost constraint claims for question queries
-    if (/\b(does|can|is|should|will|could|would|may|might)\b/i.test(query)) {
+    if (INTERROGATIVE_PATTERN.test(query)) {
         for (const [id, claim] of claimMap) {
             if (['negation', 'condition', 'boundary'].includes(claim.claim_type)) {
                 claim.score *= 1.5;
@@ -1173,10 +1778,41 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
     }
 
     const hasConflicts = Array.from(claimMap.values()).some(c => c.status === 'conflicting');
-    console.log(`[KnowledgeContext] query="${query.slice(0, 60)}" topics=${relevantTopics.length} claims=${claimMap.size}${hasConflicts ? ' (includes conflicting claims)' : ''}`);
+    console.log(
+        `[KnowledgeContext] query="${query.slice(0, 60)}" topics=${relevantTopics.length} claims=${claimMap.size} ` +
+        `communities=${communities.length}` +
+        (lowLevelProbe ? ` lowLevel="${lowLevelProbe.slice(0, 50)}"` : '') +
+        (highLevelProbe ? ` highLevel="${highLevelProbe.slice(0, 50)}"` : '') +
+        (hasConflicts ? ' (includes conflicting claims)' : '') +
+        (thematicFallbackUsed ? ' (thematic fallback)' : '')
+    );
 
     // Step 6: Build structured context
     const lines: string[] = ['KNOWLEDGE CONTEXT:', ''];
+
+    // Thematic overview first — it frames the specific facts that follow. Marked
+    // explicitly as derived/orienting so the answering model treats it as
+    // background rather than as a citable source: community summaries are LLM
+    // -written over topics and claims, so they are one generation removed from
+    // the documents and must never be quoted as if they were source text.
+    if (communities.length > 0) {
+        lines.push('THEMATIC OVERVIEW — corpus-level areas this question falls in.');
+        lines.push('Derived summaries, NOT source text: use them for framing and orientation only. Never quote or cite them; the specific facts are in the topic sections below.');
+        lines.push('');
+        for (const community of communities) {
+            lines.push(`#### ▣ ${community.title} (${community.topicCount} related topics)`);
+            lines.push(community.summary);
+            if (community.communityId !== null) {
+                const members = getCommunityReportTopics(community.communityId, 8).map(m => m.name);
+                if (members.length > 0) {
+                    lines.push(`*Topics in this area: ${members.join(', ')}*`);
+                }
+            }
+            lines.push('');
+        }
+        lines.push('---');
+        lines.push('');
+    }
 
     // Group claims by topic, separating active from conflicting
     const claimsByTopic = new Map<number, { claim_text: string; score: number; claim_type: string; source?: string; status: string }[]>();
@@ -1281,6 +1917,8 @@ export async function buildKnowledgeContext(query: string, maxTopics = 5, maxCla
         text: lines.join('\n'),
         topicCount: topicsWithContent,
         claimCount: claimMap.size,
-        hasConflicts
+        hasConflicts,
+        communityCount: communities.length,
+        thematicFallbackUsed
     };
 }

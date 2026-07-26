@@ -24,65 +24,45 @@ import Activity from '@lucide/svelte/icons/activity';
     });
 </script>
 
-<div class="p-8">
-    <header class="mb-12">
-        <h1 class="text-3xl font-bold text-[var(--text-primary)] mb-2">Admin Dashboard</h1>
-        <p class="text-[var(--text-muted)] text-lg">Overview of your ARCHIE instance.</p>
+<div class="p-6 max-w-5xl">
+    <header class="mb-6">
+        <h1 class="page-title">Dashboard</h1>
+        <p class="page-subtitle mt-1">Overview of this Archie instance.</p>
     </header>
 
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] p-8 rounded-3xl shadow-xl hover:border-[#78FAAE]/50 transition-all group">
-            <div class="flex items-center justify-between mb-6">
-                <div class="p-4 bg-[#0E3A2F]/30 rounded-2xl text-[#78FAAE] group-hover:scale-110 transition-transform">
-                    <FileText class="w-8 h-8" />
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {#each [
+            { label: 'Documents', value: stats.documents, hint: 'Indexed knowledge base files', icon: FileText, href: '/admin/documents' },
+            { label: 'Git repos', value: stats.repos, hint: 'Connected source repositories', icon: GitBranch, href: '/admin/repos' },
+            { label: 'Users', value: stats.users, hint: 'Registered system users', icon: Users, href: '/admin/users' }
+        ] as stat}
+            <a href={stat.href} class="card card-hover p-5 block">
+                <div class="flex items-start justify-between">
+                    <stat.icon class="w-4 h-4 text-faint mt-1" />
+                    <span class="text-3xl font-semibold tracking-tight text-strong tabular-nums">{stat.value}</span>
                 </div>
-                <span class="text-4xl font-black text-[var(--text-primary)] tracking-tighter">{stats.documents}</span>
-            </div>
-            <h3 class="text-xl font-bold text-[var(--text-secondary)] mb-1">Documents</h3>
-            <p class="text-[var(--text-faint)] text-sm">Indexed knowledge base files.</p>
-        </div>
-
-        <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] p-8 rounded-3xl shadow-xl hover:border-[#78FAAE]/50 transition-all group">
-            <div class="flex items-center justify-between mb-6">
-                <div class="p-4 bg-[#0E3A2F]/30 rounded-2xl text-[#78FAAE] group-hover:scale-110 transition-transform">
-                    <GitBranch class="w-8 h-8" />
-                </div>
-                <span class="text-4xl font-black text-[var(--text-primary)] tracking-tighter">{stats.repos}</span>
-            </div>
-            <h3 class="text-xl font-bold text-[var(--text-secondary)] mb-1">Git Repos</h3>
-            <p class="text-[var(--text-faint)] text-sm">Connected source repositories.</p>
-        </div>
-
-        <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] p-8 rounded-3xl shadow-xl hover:border-[#78FAAE]/50 transition-all group">
-            <div class="flex items-center justify-between mb-6">
-                <div class="p-4 bg-[#0E3A2F]/30 rounded-2xl text-[#78FAAE] group-hover:scale-110 transition-transform">
-                    <Users class="w-8 h-8" />
-                </div>
-                <span class="text-4xl font-black text-[var(--text-primary)] tracking-tighter">{stats.users}</span>
-            </div>
-            <h3 class="text-xl font-bold text-[var(--text-secondary)] mb-1">Users</h3>
-            <p class="text-[var(--text-faint)] text-sm">Registered system users.</p>
-        </div>
+                <p class="text-sm font-medium text-body mt-4">{stat.label}</p>
+                <p class="text-xs text-faint mt-0.5">{stat.hint}</p>
+            </a>
+        {/each}
     </div>
 
-    <div class="mt-12 p-8 bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-3xl shadow-xl">
-        <h2 class="text-xl font-bold text-[var(--text-primary)] mb-6 flex items-center gap-2">
-            <Activity class="w-5 h-5 text-[#78FAAE]" />
-            System Status
+    <div class="card p-5 mt-6">
+        <h2 class="flex items-center gap-2 text-sm font-semibold text-body">
+            <Activity class="w-4 h-4 text-faint" />
+            System status
         </h2>
-        <div class="space-y-4">
-            <div class="flex items-center justify-between p-4 bg-[var(--bg-slate-950)] rounded-2xl border border-[var(--border-primary)]">
-                <span class="text-[var(--text-muted)]">Database</span>
-                <span class="px-3 py-1 bg-[#0E3A2F]/30 text-[#78FAAE] text-xs font-bold rounded-full border border-[#0E3A2F]/50">ONLINE</span>
-            </div>
-            <div class="flex items-center justify-between p-4 bg-[var(--bg-slate-950)] rounded-2xl border border-[var(--border-primary)]">
-                <span class="text-[var(--text-muted)]">Vector Extension</span>
-                <span class="px-3 py-1 bg-[#0E3A2F]/30 text-[#78FAAE] text-xs font-bold rounded-full border border-[#0E3A2F]/50">LOADED</span>
-            </div>
-            <div class="flex items-center justify-between p-4 bg-[var(--bg-slate-950)] rounded-2xl border border-[var(--border-primary)]">
-                <span class="text-[var(--text-muted)]">Gemini API</span>
-                <span class="px-3 py-1 bg-[#0E3A2F]/30 text-[#78FAAE] text-xs font-bold rounded-full border border-[#0E3A2F]/50">CONNECTED</span>
-            </div>
-        </div>
+        <dl class="mt-4 divide-y divide-[var(--line-subtle)]">
+            {#each [
+                { name: 'Database', state: 'Online' },
+                { name: 'Vector extension', state: 'Loaded' },
+                { name: 'Model provider', state: 'Connected' }
+            ] as row}
+                <div class="flex items-center justify-between py-2.5">
+                    <dt class="text-[13px] text-dim">{row.name}</dt>
+                    <dd class="badge badge-success">{row.state}</dd>
+                </div>
+            {/each}
+        </dl>
     </div>
 </div>

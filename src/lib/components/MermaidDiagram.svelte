@@ -82,7 +82,7 @@ import Maximize2 from '@lucide/svelte/icons/maximize-2';
         </div>
     {:else}
         <div class="mermaid-diagram-loading">
-            <div class="w-5 h-5 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
+            <div class="spinner w-5 h-5"></div>
         </div>
     {/if}
 

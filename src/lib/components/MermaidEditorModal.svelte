@@ -108,7 +108,7 @@ import AlertCircle from '@lucide/svelte/icons/alert-circle';
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
-        class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-6"
+        class="fixed inset-0 z-50 bg-[var(--backdrop)] backdrop-blur-sm flex items-center justify-center p-6"
         onclick={handleBackdropClick}
         transition:fade={{ duration: 150 }}
     >
@@ -117,14 +117,14 @@ import AlertCircle from '@lucide/svelte/icons/alert-circle';
             role="dialog"
             aria-modal="true"
             aria-label="Insert Mermaid diagram"
-            class="bg-[var(--bg-raised)] border border-[var(--border-primary)] rounded-2xl shadow-2xl w-full max-w-6xl h-[80vh] flex flex-col overflow-hidden"
+            class="card shadow-xl w-full max-w-6xl h-[80vh] flex flex-col overflow-hidden"
             transition:scale={{ duration: 200, start: 0.95 }}
         >
             <!-- Header -->
-            <header class="flex items-center justify-between px-5 py-3 border-b border-[var(--border-primary)] bg-[var(--bg-slate-950)]/50">
+            <header class="flex items-center justify-between px-4 py-3 border-b border-line-subtle">
                 <div class="flex items-center gap-3">
-                    <Workflow class="w-5 h-5 text-[#78FAAE]" />
-                    <h2 class="text-sm font-bold text-[var(--text-primary)] uppercase tracking-widest">Mermaid Diagram</h2>
+                    <Workflow class="w-5 h-5 text-accent" />
+                    <h2 class="text-sm font-semibold text-body">Mermaid Diagram</h2>
                 </div>
                 <button
                     type="button"
@@ -140,21 +140,21 @@ import AlertCircle from '@lucide/svelte/icons/alert-circle';
             <div class="flex-1 flex overflow-hidden">
                 <!-- Source editor -->
                 <div class="flex-1 flex flex-col border-r border-[var(--border-primary)] min-w-0">
-                    <div class="px-4 py-2 border-b border-[var(--border-primary)] text-[10px] font-bold uppercase tracking-widest text-[var(--text-faint)]">
+                    <div class="eyebrow px-4 py-2 border-b border-line-subtle">
                         Source
                     </div>
                     <textarea
                         bind:this={textareaEl}
                         bind:value={code}
                         spellcheck="false"
-                        class="flex-1 w-full bg-[var(--bg-slate-950)] text-[#78FAAE] font-mono text-sm p-4 resize-none outline-none"
+                        class="flex-1 w-full bg-well text-body font-mono text-sm p-4 resize-none outline-none"
                         placeholder="Enter mermaid syntax..."
                     ></textarea>
                 </div>
 
                 <!-- Live preview -->
                 <div class="flex-1 flex flex-col min-w-0">
-                    <div class="px-4 py-2 border-b border-[var(--border-primary)] text-[10px] font-bold uppercase tracking-widest text-[var(--text-faint)]">
+                    <div class="eyebrow px-4 py-2 border-b border-line-subtle">
                         Preview
                     </div>
                     <div class="flex-1 overflow-auto p-4 bg-[var(--bg-page)]">
@@ -171,12 +171,12 @@ import AlertCircle from '@lucide/svelte/icons/alert-circle';
             </div>
 
             <!-- Footer -->
-            <footer class="flex items-center justify-between px-5 py-3 border-t border-[var(--border-primary)] bg-[var(--bg-slate-950)]/50">
+            <footer class="flex items-center justify-between px-4 py-3 border-t border-line-subtle">
                 <a
                     href="https://mermaid.js.org/intro/"
                     target="_blank"
                     rel="noopener"
-                    class="text-[10px] font-bold uppercase tracking-widest text-[var(--text-faint)] hover:text-[#78FAAE] transition-colors"
+                    class="text-xs text-mute hover:text-accent transition-colors"
                 >
                     Mermaid syntax reference →
                 </a>
@@ -184,7 +184,7 @@ import AlertCircle from '@lucide/svelte/icons/alert-circle';
                     <button
                         type="button"
                         onclick={onClose}
-                        class="px-4 py-2 hover:bg-[var(--hover-surface)] rounded-xl text-xs font-bold transition-all text-[var(--text-muted)]"
+                        class="btn btn-ghost btn-sm"
                     >
                         Cancel
                     </button>
@@ -192,7 +192,7 @@ import AlertCircle from '@lucide/svelte/icons/alert-circle';
                         type="button"
                         onclick={handleInsert}
                         disabled={!code.trim()}
-                        class="px-4 py-2 bg-[#78FAAE] hover:bg-[#78FAAE]/80 text-black rounded-xl text-xs font-bold transition-all disabled:opacity-50"
+                        class="px-4 py-2 bg-accent hover:bg-[var(--accent-hover)] text-on-accent rounded-xl text-xs font-bold transition-all disabled:opacity-50"
                     >
                         Insert
                     </button>

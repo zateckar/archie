@@ -380,7 +380,7 @@ import Workflow from '@lucide/svelte/icons/workflow';
 
 <div class="h-full flex flex-col">
     <!-- Toolbar -->
-    <header class="p-4 border-b border-[var(--border-primary)] flex items-center justify-between bg-[var(--bg-slate-950)]/50 backdrop-blur-sm">
+    <header class="p-4 border-b border-[var(--border-primary)] flex items-center justify-between bg-[var(--bg-well)]/50 backdrop-blur-sm">
         <div class="flex items-center gap-3 min-w-0">
             <a href={`/wiki/${repoId}`} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg text-[var(--text-faint)] hover:text-[var(--text-primary)] transition-all flex-shrink-0" title="Back to repo root">
                 <ArrowLeft class="w-4 h-4" />
@@ -390,14 +390,14 @@ import Workflow from '@lucide/svelte/icons/workflow';
                 <h2 class="font-bold text-[var(--text-primary)] text-sm truncate">{filename}</h2>
             </div>
             {#if saveMessage}
-                <span class="text-xs text-[#78FAAE] animate-in fade-in">{saveMessage}</span>
+                <span class="text-xs text-accent animate-in fade-in">{saveMessage}</span>
             {/if}
         </div>
 
         <div class="flex items-center gap-2">
             {#if !isEditing}
                 {#if canEdit}
-                    <button onclick={startEditing} class="flex items-center gap-1.5 px-4 py-2 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] rounded-xl text-xs font-bold transition-all">
+                    <button onclick={startEditing} class="btn btn-primary btn-sm">
                         <Edit3 class="w-3.5 h-3.5" />
                         Edit
                     </button>
@@ -413,7 +413,7 @@ import Workflow from '@lucide/svelte/icons/workflow';
                 <button onclick={cancelEditing} class="px-3 py-2 hover:bg-[var(--hover-surface)] rounded-xl text-xs font-bold transition-all text-[var(--text-muted)]">
                     Cancel
                 </button>
-                <button onclick={handleSave} disabled={isSaving} class="flex items-center gap-1.5 px-4 py-2 bg-[#78FAAE] hover:bg-[#78FAAE]/80 text-black rounded-xl text-xs font-bold transition-all disabled:opacity-50">
+                <button onclick={handleSave} disabled={isSaving} class="btn btn-primary btn-sm">
                     {#if isSaving}
                         <div class="w-3.5 h-3.5 border-2 border-black/30 border-t-black rounded-full animate-spin"></div>
                         Saving...
@@ -428,7 +428,7 @@ import Workflow from '@lucide/svelte/icons/workflow';
 
     <!-- Editor toolbar (when editing) -->
     {#if isEditing && !showSource}
-        <div class="flex items-center gap-1 px-4 py-2 border-b border-[var(--border-primary)] bg-[var(--bg-slate-900)]/30 overflow-x-auto">
+        <div class="flex items-center gap-1 px-4 py-2 border-b border-[var(--border-primary)] bg-[var(--bg-page)]/30 overflow-x-auto">
             <button onclick={() => execCmd('bold')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={isActive('bold')} title="Bold"><Bold class="w-4 h-4" /></button>
             <button onclick={() => execCmd('italic')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={isActive('italic')} title="Italic"><Italic class="w-4 h-4" /></button>
             <span class="w-px h-5 bg-[var(--border-hover)] mx-1"></span>
@@ -443,7 +443,7 @@ import Workflow from '@lucide/svelte/icons/workflow';
             <button onclick={() => execCmd('blockquote')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={isActive('blockquote')} title="Blockquote"><Quote class="w-4 h-4" /></button>
             <button onclick={() => execCmd('link')} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all" class:bg-[var(--hover-surface)]={isActive('link')} title="Link"><LinkIcon class="w-4 h-4" /></button>
             <span class="w-px h-5 bg-[var(--border-hover)] mx-1"></span>
-            <button onclick={openMermaidModal} class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg transition-all text-[#78FAAE]" title="Insert Mermaid diagram"><Workflow class="w-4 h-4" /></button>
+            <button onclick={openMermaidModal} class="btn btn-ghost btn-icon text-accent" title="Insert Mermaid diagram"><Workflow class="w-4 h-4" /></button>
         </div>
     {/if}
 
@@ -453,18 +453,18 @@ import Workflow from '@lucide/svelte/icons/workflow';
         <div class="flex-1 overflow-y-auto">
             {#if isLoading}
                 <div class="flex items-center justify-center h-full">
-                    <div class="w-8 h-8 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
+                    <div class="spinner w-7 h-7"></div>
                 </div>
             {:else if fileNotFound}
                 <div class="flex flex-col items-center justify-center h-full gap-4 text-[var(--text-faint)]">
-                    <FileText class="w-16 h-16 text-slate-700" />
+                    <FileText class="w-16 h-16 text-ghost" />
                     <p class="text-lg">File not found</p>
                     <p class="text-sm text-[var(--text-faintest)]">The requested document doesn't exist in this repository.</p>
                 </div>
             {:else if !isEditing}
                 <!-- View mode -->
                 <div class="h-full p-8">
-                    <div bind:this={viewContainerEl} class="prose prose-invert prose-headings:text-[var(--text-primary)] prose-a:text-[var(--code-text)] prose-strong:text-[var(--text-primary)] prose-code:text-[var(--code-text)] prose-pre:bg-[var(--bg-slate-900)] prose-pre:border prose-pre:border-[var(--border-primary)] prose-blockquote:border-[var(--code-text)] prose-blockquote:text-[var(--text-muted)] max-w-none">
+                    <div bind:this={viewContainerEl} class="prose prose-invert prose-headings:text-[var(--text-primary)] prose-a:text-[var(--code-text)] prose-strong:text-[var(--text-primary)] prose-code:text-[var(--code-text)] prose-pre:bg-[var(--bg-page)] prose-pre:border prose-pre:border-[var(--border-primary)] prose-blockquote:border-[var(--code-text)] prose-blockquote:text-[var(--text-muted)] max-w-none">
                         {@html renderedContent}
                     </div>
                 </div>
@@ -492,14 +492,14 @@ import Workflow from '@lucide/svelte/icons/workflow';
             {:else}
                 <!-- WYSIWYG editor -->
                 <div class="h-full p-8">
-                    <div bind:this={editorEl} class="prose prose-invert prose-headings:text-[var(--text-primary)] prose-a:text-[var(--code-text)] prose-strong:text-[var(--text-primary)] prose-code:text-[var(--code-text)] prose-pre:bg-[var(--bg-slate-900)] prose-pre:border prose-pre:border-[var(--border-primary)] prose-blockquote:border-[var(--code-text)] prose-blockquote:text-[var(--text-muted)] max-w-none h-full outline-none"></div>
+                    <div bind:this={editorEl} class="prose prose-invert prose-headings:text-[var(--text-primary)] prose-a:text-[var(--code-text)] prose-strong:text-[var(--text-primary)] prose-code:text-[var(--code-text)] prose-pre:bg-[var(--bg-page)] prose-pre:border prose-pre:border-[var(--border-primary)] prose-blockquote:border-[var(--code-text)] prose-blockquote:text-[var(--text-muted)] max-w-none h-full outline-none"></div>
                 </div>
             {/if}
         </div>
 
         <!-- History sidebar -->
         {#if showHistory}
-            <aside class="w-80 border-l border-[var(--border-primary)] bg-[var(--bg-slate-950)]/50 overflow-y-auto flex-shrink-0">
+            <aside class="w-80 border-l border-[var(--border-primary)] bg-[var(--bg-well)]/50 overflow-y-auto flex-shrink-0">
                 <div class="p-4 border-b border-[var(--border-primary)] flex items-center justify-between">
                     <h3 class="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-2">
                         <Clock class="w-3.5 h-3.5" />
@@ -512,7 +512,7 @@ import Workflow from '@lucide/svelte/icons/workflow';
 
                 {#if loadingHistory}
                     <div class="flex items-center justify-center py-8">
-                        <div class="w-5 h-5 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
+                        <div class="spinner w-5 h-5"></div>
                     </div>
                 {:else if historyEntries.length === 0}
                     <p class="text-sm text-[var(--text-faintest)] italic p-4">No history available.</p>
@@ -524,21 +524,21 @@ import Workflow from '@lucide/svelte/icons/workflow';
                                 role="button"
                                 tabindex="0"
                                 onkeydown={(e) => e.key === 'Enter' && viewDiff(entry)}
-                                class={"w-full p-3 rounded-xl transition-all cursor-pointer border " + (selectedHistoryItem?.oid === entry.oid ? 'border-[#78FAAE]/40' : 'border-[var(--border-primary)] hover:border-[var(--border-hover)]')}
+                                class={"w-full p-3 rounded-xl transition-all cursor-pointer border " + (selectedHistoryItem?.oid === entry.oid ? 'border-[color-mix(in_oklab,var(--accent)_30%,transparent)]' : 'border-[var(--border-primary)] hover:border-[var(--border-hover)]')}
                                 onclick={() => viewDiff(entry)}
                             >
                                 <div class="flex items-start justify-between gap-2">
                                     <div class="min-w-0">
                                         <p class="text-xs font-mono text-[var(--text-faint)] mb-1">{entry.oid.slice(0, 7)}</p>
                                         <p class="text-sm text-[var(--text-secondary)] truncate">{entry.message}</p>
-                                        <p class="text-[10px] text-[var(--text-faintest)] mt-1">
+                                        <p class="text-[11px] text-[var(--text-faintest)] mt-1">
                                             {entry.author} · {new Date(entry.date).toLocaleDateString()}
                                         </p>
                                     </div>
                                     {#if canEdit}
                                         <button 
                                             onclick={(e) => { e.stopPropagation(); handleRevert(entry.oid); }}
-                                            class="p-1 hover:bg-[var(--hover-surface)] rounded-lg text-[var(--text-faint)] hover:text-[#78FAAE] transition-all flex-shrink-0"
+                                            class="p-1 hover:bg-[var(--hover-surface)] rounded-lg text-[var(--text-faint)] hover:text-accent transition-all flex-shrink-0"
                                             title="Revert to this version"
                                         >
                                             <RotateCcw class="w-3.5 h-3.5" />
@@ -550,7 +550,7 @@ import Workflow from '@lucide/svelte/icons/workflow';
                                     <div class="mt-3 pt-3 border-t border-[var(--border-primary)]">
                                         {#if loadingDiff}
                                             <div class="flex items-center justify-center py-4">
-                                                <div class="w-4 h-4 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
+                                                <div class="spinner w-4 h-4"></div>
                                             </div>
                                         {:else if diffContent === '(Initial commit)'}
                                             <p class="text-xs text-[var(--text-faint)] italic">Initial version</p>
@@ -593,22 +593,25 @@ import Workflow from '@lucide/svelte/icons/workflow';
     :global(.tiptap p) { margin-bottom: 0.5rem; }
     :global(.tiptap ul), :global(.tiptap ol) { padding-left: 1.5rem; margin-bottom: 0.5rem; }
     :global(.tiptap li) { margin-bottom: 0.25rem; }
-    :global(.tiptap pre) { background: var(--bg-slate-950); padding: 0.75rem; border-radius: 0.75rem; border: 1px solid var(--border-primary); margin-bottom: 0.5rem; }
+    :global(.tiptap pre) { background: var(--bg-well); padding: 0.75rem; border-radius: 0.75rem; border: 1px solid var(--border-primary); margin-bottom: 0.5rem; }
     :global(.tiptap code) { font-size: 0.875rem; }
-    :global(.tiptap blockquote) { border-left: 3px solid #78FAAE; padding-left: 1rem; color: var(--text-muted); margin-bottom: 0.5rem; }
-    :global(.tiptap a) { color: #78FAAE; text-decoration: underline; }
+    :global(.tiptap blockquote) { border-left: 2px solid var(--accent-quiet); padding-left: 1rem; color: var(--text-muted); margin-bottom: 0.5rem; }
+    :global(.tiptap a) { color: var(--accent-quiet); text-decoration: underline; }
 
-    /* Bright highlight for sentences matching the chat "Find sources" selection */
+    /* Highlight for sentences matching the chat "Find sources" selection. Uses
+       the same treatment as the source panel's snippet highlight, so a match
+       looks the same wherever it is shown. */
     :global(mark.doc-highlight) {
-        background: #FFE600;
-        color: #1a1a00;
+        background: color-mix(in oklab, var(--accent) 26%, transparent);
+        color: var(--text-strong);
         border-radius: 3px;
         padding: 0.05em 0.15em;
-        box-shadow: 0 0 0 2px rgba(255, 230, 0, 0.35);
+        font-weight: 600;
+        box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 18%, transparent);
         animation: doc-hl-pulse 1.2s ease-in-out 2;
     }
     @keyframes doc-hl-pulse {
-        0%, 100% { box-shadow: 0 0 0 2px rgba(255, 230, 0, 0.35); }
-        50% { box-shadow: 0 0 0 5px rgba(255, 230, 0, 0.6); }
+        0%, 100% { box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 18%, transparent); }
+        50% { box-shadow: 0 0 0 5px color-mix(in oklab, var(--accent) 32%, transparent); }
     }
 </style>

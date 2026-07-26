@@ -37,24 +37,22 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
     <div>
         <button
             onclick={() => ctx.toggleDir(item.path)}
-            class="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-[var(--hover-surface)] transition-all text-sm group"
-            style="padding-left: {12 + level * 16}px"
+            class="nav-item w-full py-1.5"
+            style="padding-left: {8 + level * 14}px"
         >
-            <span class="w-4 flex-shrink-0">
+            <span class="w-3.5 flex-shrink-0">
                 {#if isExpanded}
-                    <ChevronDown class="w-3.5 h-3.5 text-[var(--text-faint)]" />
+                    <ChevronDown class="w-3.5 h-3.5 text-faint" />
                 {:else}
-                    <ChevronRight class="w-3.5 h-3.5 text-[var(--text-faint)]" />
+                    <ChevronRight class="w-3.5 h-3.5 text-faint" />
                 {/if}
             </span>
-            <span class="w-4 flex-shrink-0">
-                {#if isExpanded}
-                    <FolderOpen class="w-4 h-4 text-[#78FAAE]" />
-                {:else}
-                    <Folder class="w-4 h-4 text-[var(--text-faint)]" />
-                {/if}
-            </span>
-            <span class="text-[var(--text-muted)] truncate">{item.name}</span>
+            {#if isExpanded}
+                <FolderOpen class="w-4 h-4 flex-shrink-0 text-faint" />
+            {:else}
+                <Folder class="w-4 h-4 flex-shrink-0 text-faint" />
+            {/if}
+            <span class="truncate">{item.name}</span>
         </button>
 
         {#if isExpanded && item.children && item.children.length > 0}
@@ -68,12 +66,10 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
 {:else}
     <a
         href={ctx.getFileUrl(item.path)}
-        style="padding-left: {28 + level * 16}px"
-        class="flex items-center gap-2 px-2 py-1.5 rounded-lg transition-all text-sm group {isActive
-            ? 'bg-[#0E3A2F] text-[#78FAAE]'
-            : 'text-[var(--text-muted)] hover:bg-[var(--hover-surface)]'}"
+        style="padding-left: {26 + level * 14}px"
+        class="nav-item py-1.5 {isActive ? 'nav-item-active' : ''}"
     >
-        <FileText class="w-4 h-4 flex-shrink-0 {isActive ? 'text-[#78FAAE]' : 'text-[var(--text-faintest)]'}" />
+        <FileText class="w-4 h-4 flex-shrink-0 {isActive ? 'text-accent' : 'text-ghost'}" />
         <span class="truncate">{item.name}</span>
     </a>
 {/if}

@@ -2,9 +2,10 @@ import 'dotenv/config';
 
 import Database from 'better-sqlite3';
 import { platform, arch } from 'os';
-import { join } from 'path';
+import path, { join } from 'path';
 import fs from 'fs';
 import { normalizeTopicName } from './topic-normalize';
+import { buildFtsMatchQuery } from './fts-query';
 
 const isWindows = platform() === 'win32';
 
@@ -34,8 +35,19 @@ if (isWindows) {
 
 const dbPath = process.env.DATABASE_PATH || 'data/rag.db';
 
-// Ensure directory exists
-const dbDir = join(process.cwd(), dbPath.includes('/') ? dbPath.split('/').slice(0, -1).join('/') : '');
+// Ensure the containing directory exists.
+//
+// This used to be `join(process.cwd(), <dir part>)` unconditionally, which broke
+// any ABSOLUTE DATABASE_PATH — the common shape for a container deployment with a
+// mounted volume. On Windows it produced a nonsense path
+// ("D:\app\C:\data\rag.db") and failed loudly; on Linux `/data/rag.db` silently
+// became `<cwd>/data/rag.db`, so the process quietly created a second, empty
+// database inside the image instead of using the mounted volume — the corpus
+// would look empty with nothing explaining why.
+//
+// `path.dirname` also replaces the manual '/'-splitting, which missed backslash
+// separators on Windows entirely.
+const dbDir = path.dirname(path.isAbsolute(dbPath) ? dbPath : path.resolve(process.cwd(), dbPath));
 if (dbDir && !fs.existsSync(dbDir)) {
     fs.mkdirSync(dbDir, { recursive: true });
 }
@@ -122,7 +134,7 @@ db.exec(`
         conversation_id TEXT,
         content TEXT NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
         FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
     );
 `);
@@ -177,6 +189,35 @@ try {
             embedding BLOB,
             FOREIGN KEY(doc_id) REFERENCES documents(id) ON DELETE CASCADE
         );
+        -- The omitted tokenize= is DELIBERATE. Do not "fix" it.
+        --
+        -- No tokenize= selects FTS5's default, "unicode61 remove_diacritics 1",
+        -- which classifies token characters by Unicode category and already folds
+        -- Czech diacritics on BOTH sides — at insert, and inside MATCH, because
+        -- the query text runs through the same tokenizer. Measured on the live
+        -- corpus: 7196 indexed terms, ZERO containing an accented character
+        -- ("řízení" is indexed as "rizeni"), and MATCH '"rizeni"' and
+        -- MATCH '"řízení"' each return the same 48 rows. This diacritic
+        -- insensitivity is exactly what a Czech corpus wants.
+        --
+        -- remove_diacritics 0 was measured to drop MATCH '"rizeni"*' to 0 rows
+        -- against "Bezpečnostní řízení projektů" — i.e. setting it explicitly to
+        -- the wrong value destroys matching this corpus depends on. (remove_diacritics 2
+        -- is a no-op for Czech; it only adds multi-combining-mark Latin like ǖ/ǭ.)
+        --
+        -- All Czech FTS breakage was upstream in JS, in the query sanitizers that
+        -- shredded accented words before SQLite saw them. Fixed in ./fts-query.
+        --
+        -- If the tokenizer ever genuinely must change: CREATE VIRTUAL TABLE IF NOT
+        -- EXISTS will NOT alter an existing table's tokenizer, so editing this line
+        -- alone is a silent no-op on every deployed database while the source claims
+        -- otherwise. It requires a schema_migrations-guarded DROP + CREATE +
+        -- INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild'), all inside ONE
+        -- transaction — the chunks_ai/chunks_ad/chunks_au triggers below reference
+        -- chunks_fts by name, so a crash between DROP and CREATE makes every write
+        -- to the chunks table fail with "no such table" and break ingestion for good.
+        -- Omitting the 'rebuild' leaves a valid but EMPTY index, which both callers
+        -- swallow into an empty result set with no error.
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
             content,
             content='chunks',
@@ -290,6 +331,44 @@ try {
     db.exec('CREATE INDEX IF NOT EXISTS idx_topics_community_id ON topics(community_id)');
 } catch (e) {}
 
+// ── Migration: community reports (thematic / "global" retrieval) ────────────
+// Louvain assigns every topic a `community_id`, but a bare cluster of topic IDs
+// is not retrievable — you cannot embed "community 7" and match it against a
+// query. A *report* (LLM-written title + summary over the community's topics and
+// claims) can be embedded, which is what turns the clustering into a retrieval
+// path for broad, thematic questions ("what areas does the corpus cover?",
+// "summarise our security posture") that no single topic answers well.
+//
+// Keyed on `member_hash` rather than `community_id` because Louvain renumbers
+// communities on every recompute: a cluster whose membership is unchanged
+// generally comes back under a different id. Hashing the sorted member topic ids
+// (plus their active-claim count, so a report refreshes when the underlying
+// facts materially change) lets an unchanged cluster reuse its cached report for
+// free and re-point `community_id` at it, instead of paying for an LLM call per
+// community on every single ingestion.
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS community_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_hash TEXT NOT NULL UNIQUE,
+            community_id INTEGER,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            topic_count INTEGER NOT NULL DEFAULT 0,
+            claim_count INTEGER NOT NULL DEFAULT 0,
+            embedding BLOB,
+            embedding_updated_at DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+} catch (e) {}
+try {
+    // Reports whose community_id is NULL are orphans from a partition that no
+    // longer exists; the thematic search path filters on this column.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_community_reports_community_id ON community_reports(community_id) WHERE community_id IS NOT NULL');
+} catch (e) {}
+
 // Migration: Add chunk_id to knowledge_claims for source lineage
 try {
     db.exec('ALTER TABLE knowledge_claims ADD COLUMN chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL');
@@ -298,6 +377,36 @@ try {
 // Migration: Add claim_type to knowledge_claims for expanded claim types
 try {
     db.exec("ALTER TABLE knowledge_claims ADD COLUMN claim_type TEXT DEFAULT 'assertion'");
+} catch (e) {}
+
+// ── Migration: claim supersession ───────────────────────────────────────────
+// `checkConsistencyBatch` classifies each new claim against the topic's
+// existing ones as unique/duplicate/conflict/update, but the `update` verdict —
+// "this is a more recent or more specific version of an existing claim" — was
+// mapped to plain `active` and thrown away. Both the stale claim and its
+// replacement then stayed active forever, so retrieval kept serving superseded
+// facts alongside current ones with nothing to tell them apart.
+//
+// `superseded_by` points at the claim that replaced this one, and
+// `superseded_at` records when. Together with the existing `created_at` these
+// give claims a transaction-time history: what the knowledge base believed, and
+// when it stopped believing it. Retirement is a status change, never a delete,
+// so the trail stays auditable and a bad supersession can be undone.
+//
+// Note this is transaction time only. Real bi-temporal modelling would also
+// carry valid-time (when the fact holds in the world, independent of when we
+// learned it), but nothing in the extraction pipeline produces those dates
+// today, so there is no honest value to put in such a column.
+try {
+    db.exec('ALTER TABLE knowledge_claims ADD COLUMN superseded_by INTEGER REFERENCES knowledge_claims(id) ON DELETE SET NULL');
+} catch (e) {}
+try {
+    db.exec('ALTER TABLE knowledge_claims ADD COLUMN superseded_at DATETIME');
+} catch (e) {}
+try {
+    // Supports the "what did this claim replace / what replaced it" lookups
+    // behind the admin history view.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_claims_superseded_by ON knowledge_claims(superseded_by) WHERE superseded_by IS NOT NULL');
 } catch (e) {}
 
 // Migration: Add extraction_failed to chunks so a failed knowledge-extraction
@@ -398,6 +507,105 @@ try {
     console.error('[Migration] Failed to create topics.canonical_key unique index:', e);
 }
 
+// ── Migration: recompute canonical_key after the unicode-folding fix ────────
+// `normalizeTopicName` used to strip every non-ASCII character when building
+// the key, so on a Czech corpus "Řízení" keyed as "zen" and "Řešení" as "een".
+// Two consequences, both silent: the same concept typed with and without
+// diacritics ("Řízení projektů" / "Rizeni projektu") produced *different* keys
+// and was never merged, and unrelated accented topics could be squashed onto
+// the same mangled key. `foldDiacritics` now folds to the ASCII base letter
+// instead.
+//
+// The backfill above only touches rows where canonical_key IS NULL, so every
+// topic that already carries a mangled key would keep it forever. This runs
+// once to recompute the whole column under the new algorithm.
+//
+// Unlike the try/catch ALTER TABLE blocks around it, this one is guarded by a
+// `schema_migrations` row: it is not idempotent-by-accident (re-running it
+// would re-null keys an admin may have merged by hand since), so it needs a
+// real applied/not-applied record.
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+} catch (e) {
+    console.error('[Migration] Failed to create schema_migrations table:', e);
+}
+
+const RECOMPUTE_KEYS_MIGRATION = 'recompute-canonical-key-unicode-fold';
+try {
+    const alreadyApplied = db
+        .prepare('SELECT 1 FROM schema_migrations WHERE name = ?')
+        .get(RECOMPUTE_KEYS_MIGRATION);
+
+    if (!alreadyApplied) {
+        const rows = db
+            .prepare('SELECT id, name FROM topics ORDER BY id ASC')
+            .all() as { id: number; name: string }[];
+
+        // Oldest row per key wins, matching the backfill above and the app's
+        // ON CONFLICT upsert. Losers are left NULL rather than deleted: a
+        // collision here means two topics the old algorithm kept apart are in
+        // fact the same concept, and merging their claims is a judgement call
+        // for an admin, not something a startup migration should do silently.
+        const seen = new Map<string, { id: number; name: string }>();
+        const collisions: { kept: string; dropped: string; key: string }[] = [];
+        const assignments: { id: number; key: string | null }[] = [];
+
+        for (const row of rows) {
+            const { key } = normalizeTopicName(row.name);
+            if (!key) {
+                assignments.push({ id: row.id, key: null });
+                continue;
+            }
+            const winner = seen.get(key);
+            if (winner) {
+                collisions.push({ kept: winner.name, dropped: row.name, key });
+                assignments.push({ id: row.id, key: null });
+                continue;
+            }
+            seen.set(key, row);
+            assignments.push({ id: row.id, key });
+        }
+
+        // The unique index must go before the rewrite: intermediate states
+        // during the UPDATE pass would otherwise violate it even though the
+        // final state is conflict-free.
+        const rewriteTx = db.transaction(() => {
+            db.exec('DROP INDEX IF EXISTS idx_topics_canonical_key');
+            const update = db.prepare('UPDATE topics SET canonical_key = ? WHERE id = ?');
+            for (const a of assignments) {
+                update.run(a.key, a.id);
+            }
+            db.exec(
+                "CREATE UNIQUE INDEX idx_topics_canonical_key ON topics(canonical_key) WHERE canonical_key IS NOT NULL AND canonical_key != ''"
+            );
+            db.prepare('INSERT INTO schema_migrations (name) VALUES (?)').run(RECOMPUTE_KEYS_MIGRATION);
+        });
+        rewriteTx();
+
+        console.log(
+            `[Migration] Recomputed canonical_key for ${rows.length} topic(s) using unicode folding.`
+        );
+        if (collisions.length > 0) {
+            // Loud on purpose: these are duplicate topics the old ASCII-strip
+            // hid, and they stay split until someone merges them in the
+            // knowledge admin UI.
+            console.warn(
+                `[Migration] ${collisions.length} topic(s) now collide with an existing topic and were left unkeyed for manual merge:`
+            );
+            for (const c of collisions) {
+                console.warn(`[Migration]   "${c.dropped}" -> "${c.kept}" (key: ${c.key})`);
+            }
+        }
+    }
+} catch (e) {
+    console.error(`[Migration] Failed to recompute topics.canonical_key:`, e);
+}
+
 // ── Migration: enforce claim_hash uniqueness at the DB level ────────────────
 // Ingestion already checks `SELECT ... WHERE claim_hash = ?` before inserting,
 // but that check-then-insert is not atomic: two concurrent ingestion runs can
@@ -459,6 +667,54 @@ try {
 try {
     // Chunk lookups/cleanup by document (reprocessing, deletion).
     db.exec('CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id)');
+} catch (e) {}
+try {
+    // The paged claim list (lib/server/knowledge-queries.ts) filters on status for
+    // every page and every COUNT — the explorer on 'active', the admin review tabs
+    // on 'conflicting' / 'flagged' / 'superseded'. Without this, each page view is
+    // two full scans of the largest table in the schema.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_knowledge_claims_status ON knowledge_claims(status)');
+} catch (e) {}
+try {
+    // Category is the primary filter on the paged topic list and the graph view.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_topics_category ON topics(category)');
+} catch (e) {}
+try {
+    // Topic list sorted by name (the 'name' sort and the hierarchy view's ORDER BY)
+    // built a temporary B-tree over every topic on each request.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_topics_name ON topics(name)');
+} catch (e) {}
+try {
+    // The hierarchy view resolves children by parent; also the orphan-topic count.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_topics_parent ON topics(parent_topic_id) WHERE parent_topic_id IS NOT NULL');
+} catch (e) {}
+
+// ── Per-user access paths ────────────────────────────────────────────────────
+// These three queries run on the hottest paths in the app and every one of them
+// was a full table scan (verified with EXPLAIN QUERY PLAN); the two with an
+// ORDER BY also built a temporary B-tree to sort. Small tables today, but
+// chat_history gains a row per message and is never pruned, so this is the set
+// that degrades as the app is actually used.
+try {
+    // `SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC`
+    // — the sidebar, on every page load. Including updated_at lets the index
+    // satisfy the sort as well as the filter, removing the temp B-tree.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_conversations_user_updated ON conversations(user_id, updated_at DESC)');
+} catch (e) {}
+try {
+    // `SELECT ... FROM chat_history WHERE user_id = ? AND conversation_id = ?
+    //  ORDER BY created_at ASC` — every time a conversation is opened. Covers
+    // filter and sort in one index.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_chat_history_user_conv_created ON chat_history(user_id, conversation_id, created_at)');
+} catch (e) {}
+try {
+    // Needed by the ON DELETE CASCADE from users, and by the expired-session
+    // purge in auth.ts. Without it, deleting a user scans the whole table.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)');
+} catch (e) {}
+try {
+    // The daily purge filters on expires_at alone.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at)');
 } catch (e) {}
 
 // Migration: Response feedback table for user ratings
@@ -573,17 +829,27 @@ export function searchSourceDocuments(
     limit = 20,
     restrictTo?: string[]
 ): SourceDocumentMatch[] {
-    // Build a safe FTS5 MATCH query: keep alphanumeric words (>2 chars), OR them
-    // together. Mirrors the sanitizer used by searchChunks in rag.ts.
-    const words = (rawText || '')
-        .replace(/[^\w\s]/g, ' ')
-        .trim()
-        .split(/\s+/)
-        .filter(w => w.length > 2 && /^[a-zA-Z0-9_]+$/.test(w));
+    // Built by the shared helper in ./fts-query, which `searchChunks` in rag.ts
+    // also uses — previously each had its own copy of the sanitizer with a
+    // comment claiming they mirrored each other, and they had silently drifted
+    // (one emitted prefix matches, the other exact).
+    //
+    // Both copies were broken the same way: the ASCII-only `\w` class replaced
+    // every accented letter with a space, so a Czech selection shattered into
+    // fragments. Measured against an index holding "Bezpečnostní řízení projektů
+    // vyžaduje schválení": the fragments it produced ("bezpe", "nostn", "zen",
+    // "schv", "len") returned 0 rows individually AND as an OR chain, while the
+    // correct tokens returned 1 each. So "Find sources" came back empty for
+    // essentially every Czech selection, and the UI blamed the user's selection
+    // rather than the query builder.
+    //
+    // `prefix: true` where this used to demand exact tokens: Czech is heavily
+    // inflected, so the surface form the user selected ("řízení") routinely
+    // differs from the form indexed in another chunk ("řízeními"). Exact-token
+    // matching costs real recall even now that the folding bug is gone.
+    const ftsQuery = buildFtsMatchQuery(rawText || '', { prefix: true });
 
-    if (words.length === 0) return [];
-
-    const ftsQuery = words.map(w => `"${w.replace(/"/g, '""')}"`).join(' OR ');
+    if (ftsQuery === null) return [];
 
     // Optional scoping to the documents actually used in the answer. Sources
     // carry either a `path` or a `filename`, so match on both columns.

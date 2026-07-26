@@ -6,9 +6,9 @@ import Moon from '@lucide/svelte/icons/moon';
 
 <button
     onclick={() => theme.toggle()}
-    class="p-2 rounded-xl transition-all border border-[var(--border-primary)] hover:border-[var(--border-hover)] { $theme === 'dark' ? 'bg-[var(--bg-slate-800)] hover:bg-[var(--bg-slate-800-50)] text-[var(--text-muted)]' : 'bg-[var(--bg-slate-800)] hover:bg-[var(--bg-muted)] text-[var(--text-muted)]' }"
-    aria-label="Toggle theme"
-    title="Toggle dark/light mode"
+    class="btn btn-ghost btn-icon"
+    aria-label={$theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+    title={$theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
 >
     {#if $theme === 'dark'}
         <Sun class="w-4 h-4" />

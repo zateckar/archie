@@ -152,6 +152,31 @@ Archie doesn't just store chunks; it understands the content.
     *   **Updates:** If a claim provides more recent or specific information, it is marked accordingly.
 *   **Claim Attribution:** Each claim stores the `content_hash` of the source document at extraction time.
 
+#### Browsing it: `/knowledge` (and `/admin/knowledge`)
+
+Both pages are **server-paged** — 20 rows per request by default, with search,
+category filter and sort resolved in SQL (`lib/server/knowledge-queries.ts`). They
+previously loaded the whole graph in one response and filtered it in the browser,
+which is why they slowed down as the corpus grew.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/knowledge/topics` | paged topics with SQL-computed claim/relationship counts (`page`, `pageSize`, `search`, `category`, `sort`); `view=tree` returns slim rows for the admin hierarchy |
+| `GET /api/knowledge/claims` | paged claims (`topicId`, `status`, `search`, `category`, `sort`) — non-`active` statuses are admin-only |
+| `GET /api/knowledge/stats` | headline counts, per-category counts, isolated-topic count |
+| `GET /api/knowledge/graph` | a bounded, **connected** subgraph for the canvas |
+
+**The graph view** (`lib/components/KnowledgeGraph.svelte`, shared by both pages)
+selects nodes from *relationships* rather than from topic scores, so every node it
+draws has at least one visible edge — no disconnected circles, whatever the filters
+do. Nodes are laid out per community (the Louvain partition in
+`topics.community_id`), each cluster inside a reserved, non-overlapping region with
+its report title as a label, so clusters read as clusters instead of one mass.
+Selecting a node dims everything but its neighbourhood and labels each relationship
+type; "Focus" switches to an ego view of 1–3 hops. The status line always states
+what is not being drawn (nodes over the budget, nodes with no visible link, and
+topics with no relationships at all).
+
 ### 3. Topic Taxonomy (LLM-Driven Hierarchy)
 
 Archie automatically organizes topics into a meaningful hierarchy using a two-phase approach:
@@ -256,6 +281,15 @@ The chat interface provides a natural way to interact with the knowledge base, w
 *   **Query Condensation:** Rephrases follow-up questions into standalone search queries.
 *   **Conversation Memory:** For multi-turn conversations, a conversation briefing summarizes established facts, topics, and user intent from recent exchanges.
 *   **Hybrid Search:** Vector + FTS5 keyword search, combined via Reciprocal Rank Fusion (RRF).
+*   **Quantized Vector Search (TurboQuant, 4-bit):** Vector searches run against
+    sqlite-vector's precomputed TurboQuant index instead of scanning every stored
+    embedding. Measured on a 3072-dim corpus (`npx tsx scripts/eval/quantization.ts`):
+    recall@10 96.7–97.5%, recall@20 97.6–98.4%, the exact top hit preserved on 100%
+    of queries, 1.8–3.2× faster — and the margin grows with corpus size. A table
+    whose embeddings changed since its last quantize automatically falls back to the
+    exact scan until the structure is rebuilt (debounced, in the background), so
+    freshly ingested data is never invisible to search. See
+    `lib/server/vector-index.ts` and the `VECTOR_*` variables in `.env.example`.
 *   **Multi-Pass Context Gathering:** If initial retrieval is insufficient, the pipeline refines queries and searches again for missing aspects.
 *   **Context Synthesis:** An intermediate LLM call transforms raw retrieved data (knowledge graph claims + verbatim excerpts) into a coherent, query-focused briefing document. This replaces the "retrieval dump" pattern with expert-style prose that the chat model can reason over naturally.
 *   **Lean System Prompt:** A ~600-token prompt focused on reasoning quality (vs. the previous ~2000-token adversarial formatting prompt), letting the model spend its attention on content rather than compliance.
@@ -405,6 +439,20 @@ services:
 
 ## 🔒 Security
 
+- **Authentication is deny-by-default.** `hooks.server.ts` requires a session for
+  every route. The only public paths are:
+  - `/login` (the page and its form action)
+  - `/api/auth/*` — OIDC start/callback and logout, which cannot require a session
+  - `/api/health` — the unauthenticated liveness probe the container healthcheck in
+    `docker-compose.yml` depends on; it returns only `{status, db}`
+
+  Anything else without a session gets a `401` (under `/api/`) or a `302` to
+  `/login?redirectTo=<path>`, and sign-in returns the user to that path
+  (same-origin absolute paths only — see `safeRedirectTarget` in `lib/server/auth.ts`).
+  Adding a route now protects it by default; there is no list to remember to update.
+- **Roles:** admin-only API surfaces and every `/admin` route are checked in the
+  same hook (`403`/redirect for a non-admin), on top of the `+layout.server.ts`
+  guard. Wiki writes require admin or contributor.
 - **Passwords:** Hashed using scrypt (salted, CPU/memory-hard KDF)
 - **PAT Tokens:** Encrypted at rest using AES-256-GCM
 - **Session Duration:** 24 hours (configurable via `SESSION_DURATION_MS` in code)

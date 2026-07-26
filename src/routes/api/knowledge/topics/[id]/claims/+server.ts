@@ -18,17 +18,21 @@ export async function GET({ params, url, locals }) {
     const offset = offsetParam ? parseInt(offsetParam, 10) : 0;
     const limit = limitParam ? parseInt(limitParam, 10) : 50;
 
-    if (!['active', 'conflicting', 'flagged', 'all'].includes(status)) {
-        return json({ error: 'Invalid status. Must be "active", "conflicting", "flagged", or "all"' }, { status: 400 });
+    if (!['active', 'conflicting', 'flagged', 'superseded', 'all'].includes(status)) {
+        return json({ error: 'Invalid status. Must be "active", "conflicting", "flagged", "superseded", or "all"' }, { status: 400 });
     }
 
     try {
-        // Build query based on status filter
+        // Build query based on status filter.
+        // A superseded claim joins to its replacement so the history view can
+        // show what took its place, not just that something did.
         let sql = `
             SELECT kc.id, kc.claim_text, kc.status, kc.created_at, kc.doc_content_hash,
+                   kc.superseded_by, kc.superseded_at, succ.claim_text AS superseded_by_text,
                    d.filename, d.path
             FROM knowledge_claims kc
             LEFT JOIN documents d ON kc.doc_id = d.id
+            LEFT JOIN knowledge_claims succ ON kc.superseded_by = succ.id
             WHERE kc.topic_id = ?
         `;
 

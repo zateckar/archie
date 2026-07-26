@@ -1,7 +1,13 @@
 import { json } from '@sveltejs/kit';
-import { getGraphStats, getAllCommunities, getNoiseTopics, recomputeCommunities } from '$lib/server/communities';
+import {
+    getGraphStats,
+    getAllCommunities,
+    getNoiseTopics,
+    recomputeCommunities,
+    getCommunityReports
+} from '$lib/server/communities';
 
-/** GET: return graph diagnostics and all communities */
+/** GET: return graph diagnostics, all communities, and their reports */
 export async function GET({ locals }: any) {
     const user = locals.user;
     if (!user) {
@@ -11,14 +17,20 @@ export async function GET({ locals }: any) {
     const stats = getGraphStats();
     const communities = getAllCommunities();
     const noise = getNoiseTopics();
+    // Reports are what the thematic retrieval path actually matches against, so
+    // they need to be inspectable: a bad or stale summary shows up in chat
+    // context, and there is otherwise no way to see what got generated.
+    const reports = getCommunityReports();
 
     return json({
         stats,
         communities,
         noise,
+        reports,
         total_topics: stats.nodeCount,
         total_communities: communities.length,
         noise_count: noise.length,
+        reports_count: reports.length,
     });
 }
 

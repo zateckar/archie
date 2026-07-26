@@ -19,38 +19,34 @@ import Network from '@lucide/svelte/icons/network';
     ];
 </script>
 
-<div class="flex h-screen bg-[var(--bg-page)] text-slate-100 font-sans overflow-hidden">
+<div class="flex h-screen bg-page text-body font-sans overflow-hidden">
     <!-- Admin Sidebar -->
-    <aside class="w-64 bg-[var(--bg-slate-900)] border-r border-[var(--border-primary)] flex flex-col shadow-xl">
-        <div class="p-6 border-b border-[var(--border-primary)] flex items-center justify-between">
-            <h1 class="text-xl font-bold bg-gradient-to-r from-[#78FAAE] to-[#0E3A2F] bg-clip-text text-transparent uppercase tracking-widest">
-                ARCHIE ADMIN
-            </h1>
+    <aside class="w-60 bg-surface border-r border-line flex flex-col flex-shrink-0">
+        <div class="h-14 px-4 border-b border-line-subtle flex items-center">
+            <p class="wordmark">Archie<span class="wordmark-dot ml-1"></span></p>
+            <span class="chip ml-2">Admin</span>
         </div>
 
-        <nav class="flex-1 p-4 space-y-2">
+        <nav class="flex-1 p-2 space-y-0.5">
             {#each menuItems as item}
-                <a 
-                    href={item.href} 
-                    class="flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group
-                    {page.url.pathname === item.href ? 'bg-[#0E3A2F] text-[#78FAAE] shadow-lg shadow-[#0E3A2F]/20' : 'hover:bg-[var(--hover-surface)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'}"
-                >
-                    <item.icon class="w-5 h-5 {page.url.pathname === item.href ? 'text-[#78FAAE]' : 'text-[var(--text-faint)] group-hover:text-[#78FAAE]'}" />
-                    <span class="font-medium">{item.name}</span>
+                {@const active = page.url.pathname === item.href}
+                <a href={item.href} class="nav-item {active ? 'nav-item-active' : ''}">
+                    <item.icon class="w-4 h-4 {active ? 'text-accent' : 'text-faint'}" />
+                    <span>{item.name}</span>
                 </a>
             {/each}
         </nav>
 
-        <div class="p-4 border-t border-[var(--border-primary)]">
-            <a href="/" class="flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-[var(--hover-surface)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-all group">
-                <ChevronLeft class="w-5 h-5 text-[var(--text-faint)] group-hover:text-[#78FAAE]" />
-                <span class="font-medium">Back to Chat</span>
+        <div class="p-2 border-t border-line-subtle">
+            <a href="/" class="nav-item">
+                <ChevronLeft class="w-4 h-4 text-faint" />
+                <span>Back to chat</span>
             </a>
         </div>
     </aside>
 
     <!-- Main Content -->
-    <main class="flex-1 overflow-y-auto bg-[var(--bg-page)] relative">
+    <main class="flex-1 overflow-y-auto bg-page relative">
         {@render children()}
     </main>
 </div>

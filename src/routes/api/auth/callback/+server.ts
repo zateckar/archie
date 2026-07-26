@@ -1,6 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import { db } from '$lib/server/db';
-import { createSession } from '$lib/server/auth';
+import { createSession, safeRedirectTarget } from '$lib/server/auth';
 
 export async function GET({ request, cookies }) {
     const url = new URL(request.url);
@@ -8,7 +8,18 @@ export async function GET({ request, cookies }) {
     const state = url.searchParams.get('state');
     const storedState = cookies.get('oidc_state');
 
-    if (!code || !state || state !== storedState) {
+    // Consumed alongside the state cookie whether or not the exchange succeeds,
+    // so a stale destination can't attach itself to a later sign-in.
+    const redirectTo = safeRedirectTarget(cookies.get('oidc_redirect'));
+    cookies.delete('oidc_redirect', { path: '/' });
+
+    // Single-use: consume the state cookie before doing anything with it. It was
+    // previously left in place for its full 10-minute maxAge, so the same
+    // (code, state) pair remained replayable for that whole window — and a state
+    // value that outlives its one exchange is not serving its purpose.
+    cookies.delete('oidc_state', { path: '/' });
+
+    if (!code || !state || !storedState || state !== storedState) {
         return new Response('Invalid state or code', { status: 400 });
     }
 
@@ -52,7 +63,29 @@ export async function GET({ request, cookies }) {
         let user = db.prepare('SELECT * FROM users WHERE provider = ? AND provider_id = ?').get('oidc', userInfo.sub) as any;
 
         if (!user) {
-            const username = userInfo.preferred_username || userInfo.email || userInfo.sub;
+            // `users.username` is UNIQUE across providers, so an OIDC identity
+            // whose preferred_username collides with an existing local account
+            // (the seeded `admin`, most plausibly) previously threw a raw UNIQUE
+            // constraint error and surfaced as a blank 500 "Authentication
+            // failed" with the cause visible only in server logs.
+            //
+            // The collision must NOT be resolved by adopting the existing row —
+            // that would hand whoever controls the IdP username the local
+            // account, admin included. Instead the OIDC identity gets a distinct,
+            // suffixed username; `provider_id` remains the real identity key, and
+            // display_name still shows the human-readable name in the UI.
+            const desiredUsername = userInfo.preferred_username || userInfo.email || userInfo.sub;
+            let username = desiredUsername;
+            const taken = (name: string) =>
+                !!db.prepare('SELECT 1 FROM users WHERE username = ?').get(name);
+            if (taken(username)) {
+                // Deterministic and collision-free: `sub` is unique per IdP subject.
+                username = `${desiredUsername}@oidc-${String(userInfo.sub).slice(0, 12)}`;
+                console.warn(
+                    `[OIDC] Username "${desiredUsername}" is already taken by another account; ` +
+                    `provisioning this OIDC identity as "${username}" instead.`
+                );
+            }
             const result = db.prepare('INSERT INTO users (username, role, provider, provider_id, display_name, email) VALUES (?, ?, ?, ?, ?, ?)').run(
                 username,
                 'user', // default role
@@ -85,5 +118,5 @@ export async function GET({ request, cookies }) {
         return new Response('Authentication failed', { status: 500 });
     }
 
-    throw redirect(302, '/');
+    throw redirect(302, redirectTo);
 }

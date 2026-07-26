@@ -22,6 +22,40 @@ export interface FileHistoryItem {
     date: string;
 }
 
+/**
+ * Resolves `filePath` inside `repoRoot` and returns the absolute path, or null if
+ * it escapes the repository.
+ *
+ * The containment checks this replaces were written as
+ * `resolvedPath.startsWith(repoDir)`, which is a *character* prefix test: a repo
+ * at `…/repos/wiki` also accepts `…/repos/wiki-secret/x.md`, because the latter
+ * genuinely starts with the former. Comparing against `repoDir + path.sep` (or an
+ * exact match) is what actually confines the path to the directory.
+ *
+ * Backslashes are normalised first so a Windows-style separator in an
+ * API-supplied path can't sidestep the POSIX-style handling elsewhere in this
+ * module.
+ */
+export function resolveRepoPath(repoRoot: string, filePath: string): string | null {
+    if (typeof filePath !== 'string' || filePath.length === 0) return null;
+    // NUL bytes truncate paths in some syscalls; reject rather than normalise.
+    if (filePath.includes('\0')) return null;
+
+    const normalized = filePath.replace(/\\/g, '/');
+    const repoDir = path.resolve(repoRoot);
+    // `path.resolve(repoDir, normalized)` rather than resolving a `path.join`:
+    // resolve honours an absolute second argument, so an absolute input escapes to
+    // itself and is then rejected by the containment check below. `join` would
+    // instead glue it onto the repo root ("/etc/passwd" landing at
+    // "<repo>/etc/passwd"), quietly serving a different file than was asked for,
+    // and on Windows a drive-qualified input concatenates into a malformed path.
+    // Rejecting is the honest outcome; every caller supplies a repo-relative path.
+    const resolved = path.resolve(repoDir, normalized);
+
+    if (resolved !== repoDir && !resolved.startsWith(repoDir + path.sep)) return null;
+    return resolved;
+}
+
 export function listWikiRepos() {
     return db.prepare('SELECT id, url, local_path, last_commit FROM git_repos').all() as { id: number; url: string; local_path: string; last_commit: string | null }[];
 }
@@ -136,10 +170,8 @@ export function readWikiFile(repoId: number, filePath: string): string | null {
     const repo = getRepo(repoId);
     if (!repo) return null;
 
-    const fullPath = path.join(repo.local_path, filePath);
-    const resolvedPath = path.resolve(fullPath);
-    const repoDir = path.resolve(repo.local_path);
-    if (!resolvedPath.startsWith(repoDir)) return null;
+    const resolvedPath = resolveRepoPath(repo.local_path, filePath);
+    if (!resolvedPath) return null;
 
     if (!fs.existsSync(resolvedPath)) return null;
 
@@ -483,10 +515,8 @@ export async function saveWikiFile(repoId: number, filePath: string, content: st
     if (!repo) throw new Error('Repo not found');
 
     const normalizedFilePath = filePath.replace(/\\/g, '/');
-    const fullPath = path.join(repo.local_path, normalizedFilePath);
-    const resolvedPath = path.resolve(fullPath);
-    const repoDir = path.resolve(repo.local_path);
-    if (!resolvedPath.startsWith(repoDir)) throw new Error('Invalid path');
+    const resolvedPath = resolveRepoPath(repo.local_path, normalizedFilePath);
+    if (!resolvedPath) throw new Error('Invalid path');
 
     const dir = path.dirname(resolvedPath);
     if (!fs.existsSync(dir)) {
@@ -641,7 +671,12 @@ export async function revertToCommit(repoId: number, filePath: string, oid: stri
     const repo = getRepo(repoId);
     if (!repo) throw new Error('Repo not found');
 
-    const fullPath = path.join(repo.local_path, normalizedFilePath);
+    // Containment check. readWikiFile and saveWikiFile both had one; this function
+    // did not, so `POST /api/wiki/[repoId]/revert` took a caller-supplied path
+    // straight to `fs.writeFileSync` and any contributor could write outside the
+    // repository. The path is confined the same way as every other write here.
+    const fullPath = resolveRepoPath(repo.local_path, normalizedFilePath);
+    if (!fullPath) throw new Error('Invalid path');
 
     // Cache the previous content of the file (or null if new) to roll back on failure
     let previousContent: string | null = null;
@@ -651,6 +686,7 @@ export async function revertToCommit(repoId: number, filePath: string, oid: stri
         }
     } catch (_) {}
 
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
     fs.writeFileSync(fullPath, oldContent, 'utf8');
 
     const pat = repo.pat.startsWith('enc:') ? decrypt(repo.pat.slice(4)) : repo.pat;

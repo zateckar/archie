@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 import * as providers from './providers';
 
 /**
@@ -616,7 +617,9 @@ export async function summarizeDocument(text: string, filename: string): Promise
     }
 }
 
-export async function getEmbedding(text: string, taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_DOCUMENT", title?: string) {
+type EmbeddingTaskType = "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY";
+
+async function embedUncached(text: string, taskType: EmbeddingTaskType, title?: string): Promise<number[]> {
     // Primary: LiteLLM embeddings; fallback: Gemini EMBEDDING_MODEL. The
     // taskType/title retrieval hints are Gemini-specific and only applied on the
     // fallback path (see providers.embedContent).
@@ -624,12 +627,204 @@ export async function getEmbedding(text: string, taskType: "RETRIEVAL_DOCUMENT" 
     return result.embedding.values;
 }
 
+// ── Query-embedding memoization ─────────────────────────────────────────────
+//
+// One chat turn embedded the SAME query string 3-4 times independently: pass 1
+// issues 6 embedding calls over only 3 distinct texts (searchTopics ×2,
+// searchClaims ×2, searchCommunities, searchChunks), and each refinement query
+// issues 4 more over 1 distinct text. All of it network latency on the hot path.
+//
+// The crux is that the duplicate calls run CONCURRENTLY under Promise.all, so a
+// cache populated after `await` misses every one of them — they all look up an
+// empty map before any resolves. This caches the PENDING PROMISE, set
+// synchronously in the same turn as the call, which is the only shape that
+// dedups a concurrent fan-out.
+const MAX_CACHED_QUERY_EMBEDDINGS = 256;
+const EMBEDDING_CACHE_TTL_MS = 10 * 60 * 1000;
+
+interface CachedEmbedding {
+    vector: number[];
+    dimension: number;
+    at: number;
+}
+
+/** Pending calls. Kept separate from `done` so size pressure can never evict an
+ *  in-flight entry and resurrect the duplicate request it exists to prevent. */
+const inflightEmbeddings = new Map<string, Promise<number[]>>();
+/** Resolved vectors. Insertion-ordered, so the oldest key is the LRU victim. */
+const doneEmbeddings = new Map<string, CachedEmbedding>();
+/** Dimension of the currently-active provider, learned from the first vector. */
+let activeEmbeddingDimension: number | null = null;
+
+/**
+ * Drops every cached vector. MUST be called around anything that changes what
+ * the provider returns for a given text — see reembedAll /
+ * ensureEmbeddingsMigrated in rag.ts. A stale vector of the wrong dimension
+ * handed to vector_full_scan throws, and every search's catch turns that into an
+ * empty result set with nothing in the logs pointing at the cache.
+ */
+export function clearEmbeddingCache(): void {
+    doneEmbeddings.clear();
+    inflightEmbeddings.clear();
+    activeEmbeddingDimension = null;
+}
+
+function embeddingCacheKey(text: string, taskType: EmbeddingTaskType, title?: string): string {
+    // `title` only reaches Gemini, and only for RETRIEVAL_DOCUMENT (see
+    // providers.embedContent), so a QUERY call carrying a stray title must not
+    // fork the key pointlessly.
+    const effectiveTitle = taskType === 'RETRIEVAL_DOCUMENT' ? (title ?? '') : '';
+    // Hashed so the map does not hold a second full copy of every embedded text,
+    // and so key comparison is O(1) rather than O(len).
+    return crypto
+        .createHash('sha256')
+        .update(`${EMBEDDING_MODEL} ${taskType} ${effectiveTitle} ${text}`)
+        .digest('hex');
+}
+
+export async function getEmbedding(
+    text: string,
+    taskType: EmbeddingTaskType = "RETRIEVAL_DOCUMENT",
+    title?: string,
+    opts: { cache?: boolean } = {}
+): Promise<number[]> {
+    // RETRIEVAL_DOCUMENT is never cached, and that is the structural answer to
+    // "ingestion must not evict hot query vectors" — better than trying to tune
+    // an LRU to survive the churn. Document-side texts have zero reuse by
+    // construction: addDocument embeds each chunk exactly once and persists it;
+    // reembedAll walks each row exactly once. Caching them would push thousands
+    // of ~24-33 KB entries through the store for no hits at all.
+    //
+    // taskType is in the key AND gates caching because RETRIEVAL_QUERY and
+    // RETRIEVAL_DOCUMENT are different projections of the same Gemini model —
+    // same dimension, different vectors, by design (asymmetric retrieval).
+    // Serving one for the other raises nothing and logs nothing; the cosine
+    // scores are simply computed across two spaces, fall below the MIN_*_RELEVANCE
+    // floors, and retrieval quietly reports "no relevant knowledge found". The
+    // repo has texts that genuinely cross both task types (a claim is embedded as
+    // DOCUMENT by embedClaim and as QUERY by the alignment check), so this is a
+    // live hazard rather than a theoretical one.
+    const cacheable =
+        opts.cache !== false &&
+        taskType === 'RETRIEVAL_QUERY' &&
+        text.trim().length > 0;
+
+    if (!cacheable) return embedUncached(text, taskType, title);
+
+    const key = embeddingCacheKey(text, taskType, title);
+
+    const hit = doneEmbeddings.get(key);
+    if (hit) {
+        if (Date.now() - hit.at <= EMBEDDING_CACHE_TTL_MS) {
+            // Refresh recency: delete + set moves the key to the end of the
+            // insertion order, which is what makes eviction LRU rather than FIFO.
+            doneEmbeddings.delete(key);
+            doneEmbeddings.set(key, hit);
+            return hit.vector;
+        }
+        doneEmbeddings.delete(key);
+    }
+
+    const pending = inflightEmbeddings.get(key);
+    if (pending) return pending;
+
+    const promise = embedUncached(text, taskType, title).then(
+        (vector) => {
+            inflightEmbeddings.delete(key);
+            storeEmbedding(key, vector);
+            return vector;
+        },
+        (err) => {
+            // Never cache a failure: doing so would turn one transient 429/503
+            // into a TTL-long outage for that query text. Note withRetry lives
+            // inside embedUncached, so concurrent callers share one backoff
+            // instead of hammering a rate-limited gateway four times over.
+            inflightEmbeddings.delete(key);
+            throw err;
+        }
+    );
+    // Synchronous, same turn as the call — no await between the lookup above and
+    // this set, so no interleaving can produce two fetches for one key.
+    inflightEmbeddings.set(key, promise);
+    return promise;
+}
+
+function storeEmbedding(key: string, vector: number[]): void {
+    // Dimension tripwire. providers.embedContent silently degrades LiteLLM →
+    // Gemini on any error, and those return different dimensions. Uncached, one
+    // gateway blip costs one bad query and the next recovers. Cached, that
+    // wrong-dimension vector would be PINNED for the whole TTL, so one specific
+    // question deterministically returns nothing while every other question
+    // works — a genuinely horrible thing to debug.
+    if (activeEmbeddingDimension === null) {
+        activeEmbeddingDimension = vector.length;
+    } else if (vector.length !== activeEmbeddingDimension) {
+        console.warn(
+            `[EmbeddingCache] Dimension changed ${activeEmbeddingDimension} -> ${vector.length} ` +
+            `(likely a provider fallback) — flushing cache and adopting the new dimension.`
+        );
+        doneEmbeddings.clear();
+        activeEmbeddingDimension = vector.length;
+        return; // don't store this one; the next identical call re-fetches cleanly
+    }
+
+    // Opportunistic TTL sweep on insert, so an idle server drains instead of
+    // pinning memory. No setInterval — an unref'd timer that touches a cache is
+    // a needless liveness hook.
+    const now = Date.now();
+    for (const [k, v] of doneEmbeddings) {
+        if (now - v.at > EMBEDDING_CACHE_TTL_MS) doneEmbeddings.delete(k);
+    }
+
+    doneEmbeddings.set(key, { vector, dimension: vector.length, at: now });
+
+    // Bounded LRU. Memory: values are plain number[] — 8 bytes per element, not
+    // 4 — so at the 3072-dim default that is ~24 KB/entry and 256 entries is
+    // ~6 MB; at 4096 dims (LiteLLM) ~8.4 MB. Acceptable steady state for a
+    // long-lived server. Keys are 64-char hashes, so key memory is negligible.
+    while (doneEmbeddings.size > MAX_CACHED_QUERY_EMBEDDINGS) {
+        const oldest = doneEmbeddings.keys().next();
+        if (oldest.done) break;
+        doneEmbeddings.delete(oldest.value);
+    }
+}
+
 export interface QueryAnalysis {
     needsClarification: boolean;
     clarificationQuestions?: string[];
     searchableQuery: string;
     confidence: 'high' | 'medium' | 'low';
+    /**
+     * Broad themes/concepts the query is really about ("access control",
+     * "incident response"). Drive the thematic/community retrieval path, which
+     * answers questions no single topic covers.
+     */
+    highLevelKeywords?: string[];
+    /**
+     * Concrete entities, names, identifiers and terms of art the query mentions
+     * ("IT-PEP", "two-factor authentication", "Level S"). Drive the entity/topic
+     * and claim retrieval path.
+     */
+    lowLevelKeywords?: string[];
 }
+
+/**
+ * Instruction block shared by `analyzeQuery` and `analyzeAndCondenseQuery`.
+ *
+ * A single condensed query string forces one embedding to serve two different
+ * retrieval jobs at once: finding the specific topic a question names, and
+ * finding the broad area it belongs to. Those pull in opposite directions —
+ * "does IT-PEP require a security review before go-live?" embeds close to the
+ * IT-PEP topic and far from anything thematic, so the corpus-level context that
+ * would explain *why* the rule exists never gets retrieved. Splitting the query
+ * into two keyword sets lets each retrieval path get a probe shaped for it
+ * (see `buildKnowledgeContext`).
+ */
+const DUAL_LEVEL_KEYWORD_RULES = `
+        - highLevelKeywords: 1-4 broad themes, domains or concepts the query is about. Abstract, not verbatim — for "does IT-PEP require a security review before go-live?" these are ["release governance", "security review process"], NOT ["IT-PEP"]. Leave as [] only if the query is a pure identifier lookup with no conceptual angle at all.
+        - lowLevelKeywords: 1-6 concrete entities, proper nouns, identifiers, acronyms or terms of art actually named in the query (or resolved from history). For the same example: ["IT-PEP", "security review", "go-live"]. Leave as [] if the query names nothing specific.
+        - Keep keywords in the SAME LANGUAGE as the corpus/query; do not translate them.
+        - Do not pad either list to reach a count — fewer, sharper keywords retrieve better than many vague ones.`;
 
 export async function analyzeQuery(prompt: string, history: { role: string, content: string }[] = []): Promise<QueryAnalysis> {
     const historyContext = history.length > 0
@@ -652,7 +847,9 @@ export async function analyzeQuery(prompt: string, history: { role: string, cont
             "needsClarification": true/false,
             "clarificationQuestions": ["question 1", "question 2"] or null,
             "searchableQuery": "refined query to use for search",
-            "confidence": "high/medium/low"
+            "confidence": "high/medium/low",
+            "highLevelKeywords": ["broad theme", "..."],
+            "lowLevelKeywords": ["specific entity", "..."]
         }
 
         Rules:
@@ -662,16 +859,17 @@ export async function analyzeQuery(prompt: string, history: { role: string, cont
         - clarificationQuestions should only appear when the query literally cannot be searched in any meaningful way
         - Always provide a searchableQuery (best guess at user intent)
         - confidence: high if query is specific, medium if somewhat vague, low if very unclear
+${DUAL_LEVEL_KEYWORD_RULES}
     `;
 
     try {
         const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const text = result.response.text();
-        return parseJSON<QueryAnalysis>(text, {
+        return normalizeQueryAnalysis(parseJSON<QueryAnalysis>(text, {
             needsClarification: false,
             searchableQuery: prompt,
             confidence: 'medium'
-        });
+        }), prompt);
     } catch (e) {
         console.error('Query analysis failed:', e);
         return {
@@ -680,6 +878,33 @@ export async function analyzeQuery(prompt: string, history: { role: string, cont
             confidence: 'medium'
         };
     }
+}
+
+/**
+ * Coerces whatever the model returned into a usable `QueryAnalysis`.
+ *
+ * The keyword lists are advisory — retrieval must not regress when the model
+ * omits them, returns a bare string instead of an array, or emits empty
+ * strings. Anything unusable is dropped and the caller falls back to searching
+ * on `searchableQuery` alone, which is exactly the pre-dual-level behaviour.
+ */
+export function normalizeQueryAnalysis(analysis: QueryAnalysis, originalPrompt: string): QueryAnalysis {
+    const clean = (value: unknown): string[] | undefined => {
+        const arr = Array.isArray(value) ? value : typeof value === 'string' ? [value] : [];
+        const cleaned = arr
+            .filter((v): v is string => typeof v === 'string')
+            .map(v => v.trim())
+            .filter(v => v.length > 1)
+            .slice(0, 8);
+        return cleaned.length > 0 ? cleaned : undefined;
+    };
+
+    return {
+        ...analysis,
+        searchableQuery: analysis.searchableQuery?.trim() || originalPrompt,
+        highLevelKeywords: clean(analysis.highLevelKeywords),
+        lowLevelKeywords: clean(analysis.lowLevelKeywords)
+    };
 }
 
 /**
@@ -702,16 +927,19 @@ export async function analyzeAndCondenseQuery(prompt: string, history: { role: s
 
         ${historyContext}User Query: "${prompt}"
 
-        Perform two tasks in one pass:
+        Perform three tasks in one pass:
         1. ANALYZE: decide if the query is clear enough to search, or if clarification is truly required (see rules below).
         2. REWRITE: produce a standalone, search-friendly query that resolves pronouns/references from the conversation history (e.g. "it", "that", "the above") and captures the user's full intent. If the query doesn't depend on history and is already standalone, return it close to as-is.
+        3. SPLIT: extract two separate keyword sets from the rewritten query — broad themes, and specific entities. These drive two different retrieval paths, so keep them genuinely distinct rather than restating each other.
 
         Return ONLY a JSON object:
         {
             "needsClarification": true/false,
             "clarificationQuestions": ["question 1", "question 2"] or null,
             "searchableQuery": "standalone, rewritten search query",
-            "confidence": "high/medium/low"
+            "confidence": "high/medium/low",
+            "highLevelKeywords": ["broad theme", "..."],
+            "lowLevelKeywords": ["specific entity", "..."]
         }
 
         Rules:
@@ -721,16 +949,17 @@ export async function analyzeAndCondenseQuery(prompt: string, history: { role: s
         - clarificationQuestions should only appear when the query literally cannot be searched in any meaningful way
         - Always provide a searchableQuery (best guess at user intent, standalone from history)
         - confidence: high if query is specific, medium if somewhat vague, low if very unclear
+${DUAL_LEVEL_KEYWORD_RULES}
     `;
 
     try {
         const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const text = result.response.text();
-        return parseJSON<QueryAnalysis>(text, {
+        return normalizeQueryAnalysis(parseJSON<QueryAnalysis>(text, {
             needsClarification: false,
             searchableQuery: prompt,
             confidence: 'medium'
-        });
+        }), prompt);
     } catch (e) {
         console.error('Query analysis+condense failed:', e);
         return {
@@ -1173,7 +1402,10 @@ export async function rerank(query: string, documents: { content: string }[]): P
         const nativeRanked = await withRetry(() =>
             providers.rerankDocuments(query, documents.map(d => d.content.substring(0, RERANK_CONTENT_PREVIEW_CHARS)))
         );
-        if (nativeRanked) return nativeRanked;
+        // Normalised for the same reasons as the LLM path below — a gateway that
+        // honours `top_n` partially, or repeats an index, would otherwise silently
+        // drop or duplicate candidates.
+        if (nativeRanked) return normalizeRanking(nativeRanked, documents.length, 'native rerank');
     } catch (e) {
         console.warn('Native rerank failed, falling back to LLM reranker:', (e as Error).message);
     }
@@ -1202,7 +1434,7 @@ export async function rerank(query: string, documents: { content: string }[]): P
         // Accept a bare array or the first array-valued property of such an object;
         // otherwise fall back to the original order so callers always get an array.
         const indices = coerceIndexArray(parsed);
-        if (indices) return indices;
+        if (indices) return normalizeRanking(indices, documents.length, 'LLM rerank');
         console.warn('Reranking returned non-array/unusable shape, using original order.');
     } catch (e) {
         console.error('Reranking failed:', e);
@@ -1210,6 +1442,65 @@ export async function rerank(query: string, documents: { content: string }[]): P
 
     // Fallback to original order if reranking fails
     return identity;
+}
+
+/**
+ * Turns a raw model/gateway ranking into a valid permutation of `0..count-1`.
+ *
+ * Callers treat the result as a reordering and then slice it — e.g.
+ * `rankedIndices.map(i => pooled[i]).filter(Boolean).slice(0, limit)`. That
+ * absorbs out-of-range indices but not the two failure modes that actually
+ * change results:
+ *
+ *   - **Truncation.** A reranker that returns 3 indices for a 15-candidate pool
+ *     silently discards the other 12. In buildKnowledgeContext that turns a
+ *     `maxTopics = 5` request into 3 topics with nothing logged — a retrieval
+ *     regression that looks like a quiet corpus rather than a broken response.
+ *   - **Duplicates.** `[0, 0, 1]` puts the same chunk in the context twice and
+ *     lists the same source twice.
+ *
+ * So: drop anything out of range, de-duplicate, then append the indices the
+ * reranker never mentioned in their original relative order. Ranking quality for
+ * the items it *did* rank is preserved exactly; the unranked tail lands after
+ * them, which is the right default since the reranker expressed no preference
+ * about it. The result is always a complete permutation, so a slice is a real
+ * top-k rather than an artefact of how much the model bothered to emit.
+ *
+ * Exported for unit tests (see rerank-normalize.test.ts).
+ */
+export function normalizeRanking(raw: number[], count: number, source: string): number[] {
+    const seen = new Set<number>();
+    const ranked: number[] = [];
+    let dropped = 0;
+
+    for (const value of raw) {
+        const index = Math.trunc(value);
+        if (!Number.isInteger(index) || index < 0 || index >= count) {
+            dropped++;
+            continue;
+        }
+        if (seen.has(index)) {
+            dropped++;
+            continue;
+        }
+        seen.add(index);
+        ranked.push(index);
+    }
+
+    const missing: number[] = [];
+    for (let i = 0; i < count; i++) {
+        if (!seen.has(i)) missing.push(i);
+    }
+
+    if (dropped > 0 || missing.length > 0) {
+        console.warn(
+            `[Rerank] ${source} returned ${raw.length} indices for ${count} documents ` +
+            `(${dropped} invalid/duplicate, ${missing.length} never ranked). ` +
+            `Appending the unranked ones in original order so no candidate is lost.`
+        );
+    }
+
+    return [...ranked, ...missing];
 }
 
 /**
@@ -1523,6 +1814,90 @@ Include an entry for EVERY topic in this batch. Do not include markdown formatti
     return results;
 }
 
+export interface CommunityReport {
+    title: string;
+    summary: string;
+}
+
+/**
+ * Writes a retrievable report for one graph community: a short title plus a
+ * summary of what the cluster of topics collectively covers.
+ *
+ * This is the piece that makes community detection usable at query time.
+ * `communities.ts` can tell you that topics 4, 17 and 39 cluster together, but
+ * a set of ids cannot be embedded and matched against a question. The summary
+ * can, which is what gives the retrieval layer a thematic ("what does the
+ * corpus say about X as an area?") path alongside the entity-level one.
+ *
+ * Deliberately grounded: the prompt forbids inventing connections the supplied
+ * topics and claims don't support, because a report that speculates becomes a
+ * hallucination source the moment it is injected into chat context.
+ */
+export async function summarizeCommunity(
+    topics: { name: string; description: string | null; category: string | null }[],
+    claims: string[],
+    relationshipHints: string[] = []
+): Promise<CommunityReport | null> {
+    if (topics.length === 0) return null;
+
+    const topicBlock = topics
+        .map(t => `- ${t.name}${t.category ? ` (${t.category})` : ''}${t.description ? `: ${t.description}` : ''}`)
+        .join('\n        ');
+
+    const claimBlock = claims.length > 0
+        ? `
+        REPRESENTATIVE CLAIMS from these topics:
+        ${claims.map(c => `- ${c}`).join('\n        ')}
+        `
+        : '';
+
+    const relBlock = relationshipHints.length > 0
+        ? `
+        RELATIONSHIPS between these topics:
+        ${relationshipHints.map(r => `- ${r}`).join('\n        ')}
+        `
+        : '';
+
+    const prompt = `
+        You are a knowledge engineer documenting one thematic cluster of a knowledge graph.
+
+        TOPICS in this cluster:
+        ${topicBlock}
+        ${relBlock}${claimBlock}
+
+        Write a report describing what this cluster of topics collectively covers.
+
+        Return ONLY a JSON object:
+        {
+            "title": "short noun phrase naming the theme (3-8 words)",
+            "summary": "150-300 word summary"
+        }
+
+        Rules:
+        - The title must name the AREA, not list the topics ("Release Approval and Security Gating", not "IT-PEP, Security Review, Go-Live")
+        - The summary states what this area is about, what it governs, and how its topics relate — as direct factual prose
+        - Ground everything in the topics, relationships and claims given above. Do NOT invent facts, connections, obligations or numbers that are not supported by them
+        - Do NOT write meta-commentary ("this cluster contains...", "the topics listed above..."). Write about the subject matter itself
+        - Write in the SAME LANGUAGE as the topics and claims above
+        - If the topics have no coherent common theme, say so plainly in the summary rather than manufacturing one
+    `;
+
+    try {
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
+        const parsed = parseJSON<Partial<CommunityReport>>(result.response.text(), {});
+        const title = parsed.title?.trim();
+        const summary = parsed.summary?.trim();
+        if (!title || !summary) {
+            console.warn('[Communities] Report generation returned no usable title/summary.');
+            return null;
+        }
+        return { title, summary };
+    } catch (e) {
+        console.error('[Communities] Report generation failed:', e);
+        return null;
+    }
+}
+
 export async function checkConsistency(newClaim: string, existingClaims: string[]): Promise<{ status: 'unique' | 'duplicate' | 'conflict' | 'update', reason?: string }> {
     if (existingClaims.length === 0) return { status: 'unique' };
 
@@ -1561,13 +1936,26 @@ export async function checkConsistency(newClaim: string, existingClaims: string[
  * Batch version of checkConsistency - checks multiple new claims at once.
  * More efficient than calling checkConsistency repeatedly.
  */
+export interface ConsistencyResult {
+    status: 'unique' | 'duplicate' | 'conflict' | 'update';
+    reason?: string;
+    claimIndex: number;
+    /**
+     * For an `update` verdict: the index into `existingClaims` of the claim this
+     * one replaces. Callers use it to retire that specific claim rather than
+     * guessing. Absent or out-of-range means the model didn't identify a single
+     * target, and the caller must not supersede anything.
+     */
+    supersedesIndex?: number;
+}
+
 export async function checkConsistencyBatch(
     newClaims: string[],
     existingClaims: string[]
-): Promise<{ status: 'unique' | 'duplicate' | 'conflict' | 'update'; reason?: string; claimIndex: number }[]> {
+): Promise<ConsistencyResult[]> {
     if (newClaims.length === 0) return [];
     if (existingClaims.length === 0) {
-        return newClaims.map((_, index) => ({ status: 'unique', claimIndex: index }));
+        return newClaims.map((_, index) => ({ status: 'unique' as const, claimIndex: index }));
     }
 
     const prompt = `
@@ -1580,6 +1968,15 @@ export async function checkConsistencyBatch(
         - **conflict**: Contradicts an existing claim.
         - **update**: Provides a more recent or more specific version of an existing claim.
 
+        When and ONLY when the status is "update", also return "supersedesIndex":
+        the number E of the single existing claim [E<number>] that the new claim
+        replaces. The replaced claim will be retired from the knowledge base, so
+        only use "update" when you are confident the existing claim is genuinely
+        obsoleted by the new one. If a new claim merely adds detail alongside an
+        existing claim that remains true on its own, use "unique" instead. If it
+        would replace several existing claims, or you cannot identify exactly
+        which one, use "unique" and explain in "reason".
+
         New Claims:
         ${newClaims.map((c, i) => `[${i}] ${c}`).join('\n')}
 
@@ -1589,7 +1986,7 @@ export async function checkConsistencyBatch(
         Return ONLY a valid JSON array with one object per new claim:
         [
             {"claimIndex": 0, "status": "unique" | "duplicate" | "conflict" | "update", "reason": "brief explanation"},
-            {"claimIndex": 1, "status": "unique", "reason": "..."},
+            {"claimIndex": 1, "status": "update", "supersedesIndex": 3, "reason": "..."},
             ...
         ]
 
@@ -1599,9 +1996,9 @@ export async function checkConsistencyBatch(
     try {
         const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
         const responseText = result.response.text();
-        const parsed = parseJSON<{ status: 'unique' | 'duplicate' | 'conflict' | 'update'; reason?: string; claimIndex: number }[]>(
+        const parsed = parseJSON<ConsistencyResult[]>(
             responseText,
-            newClaims.map((_, index) => ({ status: 'unique', claimIndex: index }))
+            newClaims.map((_, index) => ({ status: 'unique' as const, claimIndex: index }))
         );
 
         // Ensure we have results for all claims
@@ -1615,20 +2012,96 @@ export async function checkConsistencyBatch(
             }
         }
 
-        return parsed;
+        return parsed.map(normalizeConsistencyResult);
     } catch (e) {
         console.error('Batch consistency check failed:', e);
-        return newClaims.map((_, index) => ({ status: 'unique', claimIndex: index }));
+        return newClaims.map((_, index) => ({ status: 'unique' as const, claimIndex: index }));
     }
 }
 
+/**
+ * Guard the supersession pointer before it can retire a claim.
+ *
+ * `supersedesIndex` is the only field in this pipeline whose value causes
+ * existing data to be retired, so a hallucinated or off-by-one index is not a
+ * cosmetic error. Anything that isn't an `update` carrying a real integer index
+ * is downgraded to a plain `update` with no target, which the caller then
+ * treats as an ordinary new claim.
+ *
+ * The index is *not* range-checked here — the caller owns `existingClaims` and
+ * validates against the actual row set it fetched.
+ *
+ * Exported for direct unit testing.
+ */
+export function normalizeConsistencyResult(r: ConsistencyResult): ConsistencyResult {
+    if (r.status !== 'update') {
+        const { supersedesIndex, ...rest } = r;
+        return rest;
+    }
+    const idx = typeof r.supersedesIndex === 'string' ? Number(r.supersedesIndex) : r.supersedesIndex;
+    if (idx === undefined || !Number.isInteger(idx) || idx < 0) {
+        const { supersedesIndex, ...rest } = r;
+        return rest;
+    }
+    return { ...r, supersedesIndex: idx };
+}
+
+
+/** HTTP statuses worth a retry: rate limiting and transient server/gateway faults. */
+const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/**
+ * Node/undici network error codes that mean "the request never got a real answer".
+ * A fresh attempt is the correct response to all of them.
+ */
+const RETRYABLE_ERROR_CODES = new Set([
+    'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN',
+    'ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_SOCKET'
+]);
+
+/**
+ * Whether a failed provider call should be retried.
+ *
+ * Previously this matched only 503/429, and did so partly via
+ * `e.message?.includes('503')` — which had a gap at each end. It missed the
+ * failure most likely to actually occur: `litellmFetch` aborts at
+ * LLM_TIMEOUT_MS (125s by default) and throws `request timed out after …`, which
+ * contains neither status, so a hung gateway — the one this codebase repeatedly
+ * notes is slow — got zero retries. And because `litellmError` embeds the full
+ * response body in its message, the substring test could also fire on a body that
+ * merely *contained* "503" or "429", e.g. an ingested document quoted back in an
+ * error payload.
+ *
+ * Status codes are now read from the structured fields providers.ts sets, with a
+ * tightened message match only as a fallback for SDK errors that carry the status
+ * in text alone (`[503 Service Unavailable]`, `status: 429`).
+ */
+function isRetryableError(e: any): boolean {
+    if (!e) return false;
+
+    const status = typeof e.status === 'number' ? e.status : typeof e.statusCode === 'number' ? e.statusCode : undefined;
+    if (status !== undefined) return RETRYABLE_STATUSES.has(status);
+
+    const code = typeof e.code === 'string' ? e.code : e.cause?.code;
+    if (typeof code === 'string' && RETRYABLE_ERROR_CODES.has(code)) return true;
+
+    // AbortController-driven timeouts (litellmFetch) and undici aborts.
+    if (e.name === 'AbortError' || e.name === 'TimeoutError') return true;
+
+    const message = typeof e.message === 'string' ? e.message : '';
+    if (/\btimed out\b|\btimeout\b|fetch failed|socket hang up|network error/i.test(message)) return true;
+
+    // Anchored status patterns rather than a bare substring, so an error body that
+    // happens to contain "503" cannot masquerade as a 503.
+    return /(?:^|\[|\bstatus[:=]\s*|\bcode[:=]\s*)(408|425|429|500|502|503|504)\b/.test(message);
+}
 
 async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
     try {
         return await fn();
     } catch (e: any) {
-        if (retries > 0 && (e.status === 503 || e.status === 429 || e.message?.includes('503') || e.message?.includes('429'))) {
-            console.warn(`API error, retrying in ${delay}ms... (${retries} retries left)`);
+        if (retries > 0 && isRetryableError(e)) {
+            console.warn(`API error (${e?.status ?? e?.code ?? e?.name ?? 'unknown'}), retrying in ${delay}ms... (${retries} retries left): ${String(e?.message ?? e).slice(0, 200)}`);
             await new Promise(resolve => setTimeout(resolve, delay));
             return withRetry(fn, retries - 1, delay * 2);
         }

@@ -1,23 +1,82 @@
 import { json } from '@sveltejs/kit';
-import { searchChunks, buildKnowledgeContext } from '$lib/server/rag';
+import { searchChunks, buildKnowledgeContext, type QueryKeywords } from '$lib/server/rag';
 import { chatStream, condenseQuery, analyzeAndCondenseQuery, evaluateContext, synthesizeContext, buildConversationBriefing } from '$lib/server/llm';
 import { db } from '$lib/server/db';
+import { checkRateLimit, CHAT_RATE_LIMIT } from '$lib/server/rate-limit';
+
+/** A turn as the LLM helpers expect it. Anything else in `history` is dropped. */
+function sanitizeHistory(raw: unknown): { role: string; content: string }[] {
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .filter((m): m is { role: unknown; content: unknown } => !!m && typeof m === 'object')
+        .filter(m => typeof m.role === 'string' && typeof m.content === 'string')
+        .map(m => ({ role: m.role as string, content: m.content as string }));
+}
 
 export async function POST({ request, locals }) {
-    const { prompt, history, conversationId, skipAnalysis } = await request.json();
     const user = locals.user;
     if (!user) {
         return json({ error: 'Unauthorized' }, { status: 401 });
     }
-    if (!prompt) {
+
+    // Rate limit before any provider call. This endpoint fans out to a dozen-plus
+    // LLM requests per invocation, so it is by far the most expensive thing a
+    // client can trigger and was previously the only unthrottled one.
+    const { allowed, resetAt } = checkRateLimit(`chat:${user.id}`, CHAT_RATE_LIMIT);
+    if (!allowed) {
+        const retryAfter = Math.max(1, Math.ceil((resetAt - Date.now()) / 1000));
+        return json(
+            { error: `Too many requests. Try again in ${retryAfter} seconds.` },
+            { status: 429, headers: { 'Retry-After': String(retryAfter) } }
+        );
+    }
+
+    const body = await request.json().catch(() => null);
+    if (!body || typeof body !== 'object') {
+        return json({ error: 'Invalid JSON body' }, { status: 400 });
+    }
+    const { prompt, conversationId, skipAnalysis } = body as Record<string, unknown>;
+
+    // `prompt` was previously only checked for truthiness, then `.slice(0, 50)`d
+    // when titling a new conversation — a numeric or object prompt reached that
+    // line and threw, turning a malformed request into a 500.
+    if (typeof prompt !== 'string' || prompt.trim().length === 0) {
         return json({ error: 'Missing prompt' }, { status: 400 });
+    }
+
+    // `history` was read straight from the body and then dereferenced as
+    // `history.length` further down, so a request that simply omitted it — or
+    // sent a non-array — produced a 500 rather than being handled. Normalised to
+    // an array of well-formed turns once, here, so nothing downstream has to
+    // guess.
+    const history = sanitizeHistory((body as Record<string, unknown>).history);
+
+    // Validate conversation ownership up front — see the write site below for why
+    // the check exists. It has to happen HERE, before the retrieval and synthesis
+    // passes: those cost a dozen-plus provider calls, and rejecting afterwards
+    // would mean an unauthorized request still burned the full pipeline.
+    if (conversationId !== undefined && conversationId !== null && conversationId !== '') {
+        if (typeof conversationId !== 'string') {
+            return json({ error: 'conversationId must be a string' }, { status: 400 });
+        }
+        const owner = db.prepare('SELECT user_id FROM conversations WHERE id = ?').get(conversationId) as
+            { user_id: number } | undefined;
+        if (!owner || owner.user_id !== user.id) {
+            return json({ error: 'Conversation not found' }, { status: 404 });
+        }
     }
 
     // Step 1+2: Analyze query quality AND condense it with conversation history
     // in a single LLM call (previously two sequential calls: analyzeQuery then
     // condenseQuery). Skipped entirely when the user already answered a
     // clarification prompt — in that case we only need condensing.
+    //
+    // The same call also splits the query into high-level (thematic) and
+    // low-level (entity) keyword sets, which drive the two retrieval levels in
+    // buildKnowledgeContext. On the skipAnalysis path there are no keywords and
+    // retrieval falls back to searching on the condensed query alone.
     let searchPrompt: string;
+    let queryKeywords: QueryKeywords | undefined;
     if (!skipAnalysis) {
         const analysis = await analyzeAndCondenseQuery(prompt, history);
 
@@ -30,6 +89,10 @@ export async function POST({ request, locals }) {
             });
         }
         searchPrompt = analysis.searchableQuery;
+        queryKeywords = {
+            highLevel: analysis.highLevelKeywords,
+            lowLevel: analysis.lowLevelKeywords
+        };
     } else {
         searchPrompt = await condenseQuery(history, prompt);
     }
@@ -37,7 +100,7 @@ export async function POST({ request, locals }) {
     // Step 3: Multi-pass context gathering
     // Pass 1: Primary search — knowledge graph + verbatim chunks in parallel
     const [knowledgeResult, relevantChunks] = await Promise.all([
-        buildKnowledgeContext(searchPrompt, 5, 15),
+        buildKnowledgeContext(searchPrompt, 5, 15, queryKeywords),
         searchChunks(searchPrompt, 3)
     ]);
 
@@ -93,9 +156,14 @@ export async function POST({ request, locals }) {
     // when there's nothing to synthesize across topics or reconcile from a
     // second search pass. Multi-topic or refined-search results still get the
     // full synthesis pass since that's where it earns its cost.
+    // A thematic overview in the context is itself a reason NOT to skip: the
+    // whole point of that section is material that spans topics, and it is
+    // derived prose that must be folded into the briefing rather than passed
+    // through raw next to the facts it summarises.
     const canSkipSynthesis =
         !refinementHappened &&
         !knowledgeResult.hasConflicts &&
+        knowledgeResult.communityCount === 0 &&
         knowledgeResult.topicCount <= 1 &&
         relevantChunks.length <= 1 &&
         context.length < 4000;
@@ -115,9 +183,19 @@ export async function POST({ request, locals }) {
         synthesizedContext = context;
     }
 
-    // Save user prompt to history
-    let currentConversationId = conversationId;
-    if (!currentConversationId) {
+    // Resolve the conversation to append to.
+    //
+    // `conversationId` arrives from the request body and was previously trusted
+    // verbatim: any authenticated user could pass another user's conversation id
+    // and have this endpoint write chat_history rows against it and bump its
+    // `updated_at`, reordering and polluting a conversation they do not own.
+    // (`/api/conversations/[id]` DELETE already verifies ownership the same way —
+    // this endpoint was the one that skipped the check.) Ownership was confirmed
+    // near the top of the handler; by here the id is either ours or absent.
+    let currentConversationId: string;
+    if (typeof conversationId === 'string' && conversationId !== '') {
+        currentConversationId = conversationId;
+    } else {
         currentConversationId = crypto.randomUUID();
         db.prepare(`
             INSERT INTO conversations (id, user_id, title)

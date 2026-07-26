@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "corpus": "not yet seeded — run `npm run eval:seed`",
+  "cases": [
+    {
+      "id": "topic-2",
+      "query": "Co je IT Product Manager (ITPM)?",
+      "expectedTopics": [
+        "IT Product Manager (ITPM)"
+      ],
+      "expectedClaimSubstrings": [
+        "IT Product Managers and IT Delivery Managers must"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (27 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-131",
+      "query": "Co je Business Partner (External Subject)?",
+      "expectedTopics": [
+        "Business Partner (External Subject)"
+      ],
+      "expectedClaimSubstrings": [
+        "Before application takeover, external applications must be checked"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (22 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-483",
+      "query": "Co je Firewall Approval?",
+      "expectedTopics": [
+        "Firewall Approval"
+      ],
+      "expectedClaimSubstrings": [
+        "If a critical situation like production interruption occurs"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (19 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-400",
+      "query": "Co je Image Recording (POZ)?",
+      "expectedTopics": [
+        "Image Recording (POZ)"
+      ],
+      "expectedClaimSubstrings": [
+        "Extraordinary image recordings involving confidential or secret information"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (19 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-26",
+      "query": "Co je FIG (IT Governance, Security, and Service Management)?",
+      "expectedTopics": [
+        "FIG (IT Governance, Security, and Service Management)"
+      ],
+      "expectedClaimSubstrings": [
+        "FIG defines new Planning Groups when an Organizational"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (16 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-473",
+      "query": "Co je Network Access Control (NAC)?",
+      "expectedTopics": [
+        "Network Access Control (NAC)"
+      ],
+      "expectedClaimSubstrings": [
+        "Disabling network access control functions in an emergency"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (15 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-496",
+      "query": "Co je WiFi Security?",
+      "expectedTopics": [
+        "WiFi Security"
+      ],
+      "expectedClaimSubstrings": [
+        "The use of WPA2/3-PSK requires technical requirement checks,"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (14 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-591",
+      "query": "Co je Microsoft Teams?",
+      "expectedTopics": [
+        "Microsoft Teams"
+      ],
+      "expectedClaimSubstrings": [
+        "Effective June 1, 2023, placing emergency calls (such"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (13 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    }
+  ]
+}

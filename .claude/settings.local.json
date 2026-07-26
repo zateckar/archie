@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(npm run check)"
+      "PowerShell(npm run check)",
+      "PowerShell(\\(Get-Content src/lib/server/rag.ts | Measure-Object -Line\\).Lines; echo \"---\"; Select-String -Path src/lib/server/rag.ts -Pattern \"vector|quant|vector_init|vector_quantize|preload|distance\" | Select-Object -First 60 | ForEach-Object { \"$\\($_.LineNumber\\): $\\($_.Line.Trim\\(\\)\\)\" })",
+      "PowerShell(node -e \"const {getExtensionPath}=require\\('@sqliteai/sqlite-vector'\\);const Database=require\\('better-sqlite3'\\);const db=new Database\\('data/chatbot.db',{readonly:true}\\);db.loadExtension\\(getExtensionPath\\(\\)\\);console.log\\('version',db.prepare\\('SELECT vector_version\\(\\)'\\).pluck\\(\\).get\\(\\)\\);\" 2>&1)",
+      "PowerShell($env:Path)"
     ]
   }
 }

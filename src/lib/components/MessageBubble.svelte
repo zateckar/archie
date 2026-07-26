@@ -168,27 +168,29 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
     }
 </script>
 
-<div 
+<div
     class="group flex {msg.role === 'user' ? 'justify-end' : 'justify-start'}"
-    in:fly={{ y: 20, duration: 400, delay: 0 }}
+    in:fly={{ y: 8, duration: 200 }}
 >
-    <div class="flex max-w-[85%] space-x-4 {msg.role === 'user' ? 'flex-row-reverse space-x-reverse' : 'flex-row'}">
-        <div class="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-transform hover:scale-110
-            {msg.role === 'user' ? 'bg-[#0E3A2F] shadow-lg shadow-[#0E3A2F]/30 text-[#78FAAE]' : 'bg-[var(--bg-slate-900)] border border-[var(--border-primary)] shadow-xl shadow-black/40'}">
+    <div class="flex max-w-[80ch] gap-3 {msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'}">
+        <div class="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0
+            {msg.role === 'user' ? 'bg-accent-solid text-on-accent' : 'bg-surface border border-line text-accent'}">
             {#if msg.role === 'user'}
-                <UserIcon class="w-5 h-5" />
+                <UserIcon class="w-4 h-4" />
             {:else}
-                <Bot class="w-5 h-5 text-[#78FAAE]" />
+                <Bot class="w-4 h-4" />
             {/if}
         </div>
-        <div class="space-y-3">
-            <div class="p-5 rounded-2xl leading-relaxed shadow-2xl
-                {msg.role === 'user' ? 'bg-[#0E3A2F] text-[#78FAAE] rounded-tr-none border border-[#78FAAE]/20' : 'bg-[var(--bg-raised)] border border-[var(--border-secondary)] text-[var(--text-secondary)] rounded-tl-none'}">
+        <div class="min-w-0 space-y-2">
+            <div class="px-4 py-3 rounded-2xl text-sm leading-relaxed
+                {msg.role === 'user'
+                    ? 'bg-accent-solid text-on-accent-body rounded-tr-sm whitespace-pre-wrap'
+                    : 'bg-surface border border-line-subtle text-dim rounded-tl-sm'}">
                 {#if msg.role === 'assistant'}
                     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
                     <div
                         bind:this={proseEl}
-                        class="prose prose-sm prose-slate max-w-none"
+                        class="prose prose-sm max-w-none"
                         class:prose-invert={isDark}
                         onmouseup={handleSelectionEnd}
                         role="article"
@@ -200,29 +202,31 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
                 {/if}
             </div>
             {#if msg.sources && msg.sources.length > 0}
-                <div class="flex flex-wrap gap-2 pt-1 opacity-40 hover:opacity-100 transition-opacity duration-300">
-                    <span class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-faint)] font-black self-center">Sources</span>
+                <div class="flex flex-wrap items-center gap-1.5">
+                    <span class="eyebrow">Sources</span>
                     {#each msg.sources as source}
-                        <span class="text-[10px] px-2.5 py-1 bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-lg text-[var(--text-muted)] font-mono">
+                        <span class="chip font-mono text-[11px]" title={source.path || source.filename}>
                             {source.path || source.filename}
                         </span>
                     {/each}
                 </div>
             {/if}
             {#if msg.role === 'assistant' && msg.content}
-                <div class="flex items-center gap-1.5 pt-0.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                     <button
                         onclick={() => submitFeedback(1)}
-                        class="p-1 rounded-md transition-colors {feedbackGiven === 1 ? 'text-green-400 bg-green-400/10' : 'text-[var(--text-faintest)] hover:text-[var(--text-muted)] hover:bg-[var(--hover-surface)]'}"
+                        class="btn btn-ghost btn-icon {feedbackGiven === 1 ? 'text-success' : ''}"
                         disabled={feedbackGiven !== null}
+                        aria-label="Mark answer as helpful"
                         title="Helpful"
                     >
                         <ThumbsUp class="w-3.5 h-3.5" />
                     </button>
                     <button
                         onclick={() => submitFeedback(-1)}
-                        class="p-1 rounded-md transition-colors {feedbackGiven === -1 ? 'text-red-400 bg-red-400/10' : 'text-[var(--text-faintest)] hover:text-[var(--text-muted)] hover:bg-[var(--hover-surface)]'}"
+                        class="btn btn-ghost btn-icon {feedbackGiven === -1 ? 'text-danger' : ''}"
                         disabled={feedbackGiven !== null}
+                        aria-label="Mark answer as not helpful"
                         title="Not helpful"
                     >
                         <ThumbsDown class="w-3.5 h-3.5" />
@@ -236,7 +240,7 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
 {#if showFindBtn}
     <button
         data-find-sources-btn
-        class="fixed z-[70] -translate-x-1/2 -translate-y-full flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0E3A2F] border border-[#78FAAE]/40 text-[#78FAAE] text-xs font-semibold shadow-xl shadow-black/40 hover:bg-[#134a3c] transition-colors"
+        class="btn btn-primary btn-sm fixed z-[70] -translate-x-1/2 -translate-y-full shadow-xl"
         style="left: {btnX}px; top: {btnY}px;"
         onclick={findSources}
         transition:fly={{ y: 6, duration: 120 }}

@@ -62,81 +62,74 @@
     >
         <!-- backdrop -->
         <button
-            class="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            class="absolute inset-0 bg-[var(--backdrop)] backdrop-blur-sm"
             aria-label="Close source results"
             onclick={onClose}
         ></button>
 
         <!-- panel -->
         <aside
-            class="relative w-full max-w-md h-full bg-[var(--bg-raised)] border-l border-[var(--border-secondary)] shadow-2xl flex flex-col"
-            transition:fly={{ x: 400, duration: 250 }}
+            class="relative w-full max-w-md h-full bg-surface border-l border-line shadow-xl flex flex-col"
+            transition:fly={{ x: 400, duration: 200 }}
         >
-            <header class="p-5 border-b border-[var(--border-primary)] flex items-start gap-3">
-                <div class="w-9 h-9 rounded-xl bg-[#0E3A2F] flex items-center justify-center flex-shrink-0">
-                    <Search class="w-4 h-4 text-[#78FAAE]" />
-                </div>
+            <header class="p-4 border-b border-line-subtle flex items-start gap-3">
                 <div class="min-w-0 flex-1">
-                    <p class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-faint)] font-black">Source documents</p>
-                    <p class="text-sm text-[var(--text-secondary)] truncate mt-0.5" title={query}>“{query}”</p>
+                    <p class="eyebrow">Source documents</p>
+                    <p class="text-[13px] text-body truncate mt-1" title={query}>“{query}”</p>
                 </div>
-                <button
-                    class="p-1.5 rounded-lg text-[var(--text-faint)] hover:text-[var(--text-secondary)] hover:bg-[var(--hover-surface)] transition-colors"
-                    onclick={onClose}
-                    aria-label="Close"
-                >
+                <button class="btn btn-ghost btn-icon" onclick={onClose} aria-label="Close">
                     <X class="w-4 h-4" />
                 </button>
             </header>
 
-            <div class="flex-1 overflow-y-auto p-4 space-y-3">
+            <div class="flex-1 overflow-y-auto p-4 space-y-2.5">
                 {#if loading}
                     <div class="flex items-center justify-center py-16">
-                        <div class="w-7 h-7 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
+                        <div class="spinner w-6 h-6"></div>
                     </div>
                 {:else if error}
-                    <p class="text-sm text-red-400 text-center py-10">{error}</p>
+                    <p class="text-[13px] text-danger text-center py-10">{error}</p>
                 {:else if !hasSources}
-                    <div class="flex flex-col items-center gap-3 text-[var(--text-faint)] py-16 text-center">
-                        <FileText class="w-12 h-12 text-slate-700" />
-                        <p class="text-sm">This answer has no cited source documents.</p>
-                        <p class="text-xs text-[var(--text-faintest)]">There's nothing to trace this selection back to.</p>
+                    <div class="flex flex-col items-center gap-2 py-16 text-center">
+                        <FileText class="w-8 h-8 text-ghost" />
+                        <p class="text-[13px] text-mute">This answer cites no source documents.</p>
+                        <p class="text-xs text-faint">There is nothing to trace this selection back to.</p>
                     </div>
                 {:else if results.length === 0}
-                    <div class="flex flex-col items-center gap-3 text-[var(--text-faint)] py-16 text-center">
-                        <FileText class="w-12 h-12 text-slate-700" />
-                        <p class="text-sm">Not found in this answer's sources.</p>
-                        <p class="text-xs text-[var(--text-faintest)]">The selected text wasn't matched in the documents used for this response. Try selecting a distinctive phrase.</p>
+                    <div class="flex flex-col items-center gap-2 py-16 text-center">
+                        <FileText class="w-8 h-8 text-ghost" />
+                        <p class="text-[13px] text-mute">Not found in this answer's sources.</p>
+                        <p class="text-xs text-faint">Try selecting a more distinctive phrase.</p>
                     </div>
                 {:else}
-                    <p class="text-[11px] text-[var(--text-faint)] px-1">
-                        Found in {results.length} of this answer's source document{results.length === 1 ? '' : 's'}
+                    <p class="text-xs text-faint px-0.5 pb-1">
+                        Found in {results.length} source document{results.length === 1 ? '' : 's'}
                     </p>
                     {#each results as m (m.doc_id)}
                         {@const url = wikiUrl(m)}
-                        <div class="rounded-xl bg-[var(--bg-slate-900)]/60 border border-[var(--border-primary)] p-4 hover:border-[#78FAAE]/40 transition-colors">
+                        <div class="well card-hover p-3.5">
                             <div class="flex items-center gap-2 mb-2">
-                                <FileText class="w-3.5 h-3.5 text-[#78FAAE] flex-shrink-0" />
-                                <span class="text-xs font-mono text-[var(--text-secondary)] truncate" title={m.path || m.filename}>
+                                <FileText class="w-3.5 h-3.5 text-faint flex-shrink-0" />
+                                <span class="text-xs font-mono text-body truncate" title={m.path || m.filename}>
                                     {m.filename}
                                 </span>
-                                <span class="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-[#0E3A2F] text-[#78FAAE] font-bold flex-shrink-0">
+                                <span class="chip chip-accent ml-auto flex-shrink-0 text-[11px]">
                                     {m.matches} hit{m.matches === 1 ? '' : 's'}
                                 </span>
                             </div>
-                            <p class="text-xs text-[var(--text-muted)] leading-relaxed src-snippet">
+                            <p class="text-xs text-mute leading-relaxed src-snippet">
                                 {@html renderSnippet(m.snippet)}
                             </p>
                             {#if url}
                                 <a
                                     href={url}
-                                    class="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-[#78FAAE] hover:underline"
+                                    class="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-accent hover:underline"
                                 >
-                                    Open &amp; review
+                                    Open and review
                                     <ExternalLink class="w-3 h-3" />
                                 </a>
                             {:else}
-                                <p class="mt-3 text-[10px] text-[var(--text-faintest)] italic">Not linked to an editable wiki file</p>
+                                <p class="mt-3 text-xs text-faint">Not linked to an editable wiki file</p>
                             {/if}
                         </div>
                     {/each}
@@ -148,10 +141,10 @@
 
 <style>
     :global(.src-snippet mark.src-hl) {
-        background: #78FAAE;
-        color: #05140d;
+        background: color-mix(in oklab, var(--accent) 26%, transparent);
+        color: var(--text-strong);
         border-radius: 3px;
         padding: 0 2px;
-        font-weight: 700;
+        font-weight: 600;
     }
 </style>

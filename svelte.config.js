@@ -21,7 +21,18 @@ const config = {
 				'font-src': ['self'],
 				'connect-src': ['self', 'ws:', 'wss:', 'https://generativelanguage.googleapis.com'],
 				'frame-ancestors': ['none'],
-				'base-uri': ['self']
+				'base-uri': ['self'],
+				// `form-action` does NOT fall back to `default-src` — with it absent,
+				// form submission to any origin was permitted. That was the one gap
+				// this policy left open against HTML injected into rendered markdown:
+				// script execution is already blocked by `script-src` having no
+				// 'unsafe-inline', and exfiltration by `img-src 'self'`, but an
+				// injected <form> posting a fake "session expired, re-enter your
+				// password" prompt to an attacker origin would have submitted fine.
+				'form-action': ['self'],
+				// Belt-and-braces against plugin/embed content; `object-src` does
+				// inherit from `default-src`, but stating 'none' is unambiguous.
+				'object-src': ['none']
 			}
 		}
 	}

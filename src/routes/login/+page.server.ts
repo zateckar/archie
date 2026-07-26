@@ -1,14 +1,16 @@
 import { fail, redirect } from '@sveltejs/kit';
 import { db } from '$lib/server/db';
-import { getUser, createSession, verifyPassword, hashPassword } from '$lib/server/auth';
+import { getUser, createSession, verifyPassword, hashPassword, safeRedirectTarget } from '$lib/server/auth';
 import { checkRateLimit } from '$lib/server/rate-limit';
 
-export const load = async ({ locals }) => {
+export const load = async ({ locals, url }) => {
+    const redirectTo = safeRedirectTarget(url.searchParams.get('redirectTo'));
     if (locals.user) {
-        throw redirect(302, '/');
+        throw redirect(302, redirectTo);
     }
     return {
-        oidcEnabled: !!(process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID)
+        oidcEnabled: !!(process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID),
+        redirectTo
     };
 };
 
@@ -55,6 +57,9 @@ export const actions = {
             secure: process.env.NODE_ENV === 'production'
         });
 
-        throw redirect(302, '/');
+        // Return the user to the page the auth guard interrupted, not always the
+        // root — the guard now catches every route, so arriving at sign-in from
+        // a deep link is the common case rather than the exception.
+        throw redirect(302, safeRedirectTarget(data.get('redirectTo') as string | null));
     }
 };

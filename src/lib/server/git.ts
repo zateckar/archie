@@ -6,6 +6,7 @@ import path from 'path';
 import { db } from './db';
 import { addDocument } from './rag';
 import { rebuildTaxonomy } from './knowledge';
+import { recomputeCommunities } from './communities';
 import { encrypt, decrypt } from './crypto-utils';
 import { clearWikiTreeCache } from './wiki';
 
@@ -152,33 +153,51 @@ export async function syncGitRepo(repoId: number) {
         const existingDocs = db.prepare('SELECT id, path, content_hash FROM documents WHERE repo_id = ?').all(repoId) as { id: number, path: string, content_hash: string }[];
         const existingPaths = new Map(existingDocs.map(d => [d.path, d.id]));
 
+        const failedDocs: { path: string; reason: string }[] = [];
+
         for (const filePath of docFiles) {
             const fullPath = path.join(dir, filePath);
             const content = fs.readFileSync(fullPath, 'utf8');
             const filename = path.basename(filePath);
 
-            if (existingPaths.has(filePath)) {
-                // Update if changed (simple check: content hash or just always update for now)
-                // To be efficient, we could check if content changed, but addDocument currently doesn't handle updates well.
-                // Let's delete and re-add for simplicity, or modify addDocument.
-                const docId = existingPaths.get(filePath)!;
-                
+            // Retire this path from the "present in repo" bookkeeping BEFORE any
+            // await. It used to happen after `await addDocumentFromGit(...)`, so an
+            // ingestion failure skipped it, the path stayed in `existingPaths`, and
+            // the deletion sweep below then removed a document that is still very
+            // much in the repository — losing the previously-indexed copy because
+            // re-indexing it failed. Presence in the repo is a fact about the file
+            // list; it does not depend on whether ingestion succeeded.
+            const existingDocId = existingPaths.get(filePath);
+            existingPaths.delete(filePath);
+
+            if (existingDocId !== undefined) {
                 // Check if content is different using hash
                 const contentHash = crypto.createHash('sha256').update(content).digest('hex');
-                const currentDoc = existingDocs.find(d => d.id === docId);
-                if (currentDoc?.content_hash !== contentHash) {
-                    console.log('Updating document:', filePath);
-                    // addDocument now uses INSERT OR REPLACE, so it will handle the update and cleanup old chunks via CASCADE
-
-                    // Add new one
-                    await addDocumentFromGit(repoId, filePath, filename, content, dir);
-                } else {
+                const currentDoc = existingDocs.find(d => d.id === existingDocId);
+                if (currentDoc?.content_hash === contentHash) {
                     console.log('Document unchanged:', filePath);
+                    continue;
                 }
-                existingPaths.delete(filePath);
+                console.log('Updating document:', filePath);
+                // addDocument replaces the row and cleans up old chunks via CASCADE
             } else {
                 console.log('Adding new document:', filePath);
+            }
+
+            // Contain the failure to this document. The loop previously let any
+            // error propagate out of syncGitRepo, so one unreadable document — or
+            // one transient provider failure inside the ingestion pipeline — aborted
+            // the whole sync: every later file went unprocessed, removed files went
+            // uncollected, and the taxonomy rebuild and community recompute at the
+            // end of this function never ran. A per-document skip leaves the corpus
+            // consistent and the failure is retried on the next sync, because the
+            // stored content_hash still doesn't match the file.
+            try {
                 await addDocumentFromGit(repoId, filePath, filename, content, dir);
+            } catch (err) {
+                const reason = (err as Error)?.message ?? String(err);
+                failedDocs.push({ path: filePath, reason });
+                console.error(`[Git Sync] Failed to ingest ${filePath}, skipping it and continuing:`, reason);
             }
         }
 
@@ -186,6 +205,13 @@ export async function syncGitRepo(repoId: number) {
         for (const [filePath, docId] of existingPaths) {
             console.log('Deleting removed document:', filePath);
             db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
+        }
+
+        if (failedDocs.length > 0) {
+            console.warn(
+                `[Git Sync] ${failedDocs.length} of ${docFiles.length} document(s) failed to ingest and were left ` +
+                `at their previous state: ${failedDocs.map(f => `${f.path} (${f.reason})`).join('; ')}`
+            );
         }
     } else {
         console.log('No new remote changes in repo', url, '- checking for previously staged Clean/ files...');
@@ -264,6 +290,22 @@ export async function syncGitRepo(repoId: number) {
         console.error('[Git Sync] Taxonomy rebuild failed:', err);
     }
 
+    // ...then the community partition and its reports, once, over the final
+    // state. Per-file ingestion passed `batch: true` and so left reports
+    // untouched; without this call the corpus would carry reports describing a
+    // partition from before the sync.
+    console.log(`[Git Sync] Recomputing communities and reports after sync of repo ${repoId}...`);
+    try {
+        const result = await recomputeCommunities();
+        console.log(
+            `[Git Sync] Communities: ${result.communityCount}, ` +
+            `reports ${result.reports.generated} generated / ${result.reports.reused} reused` +
+            (result.reports.deferred > 0 ? ` (${result.reports.deferred} deferred)` : '')
+        );
+    } catch (err) {
+        console.error('[Git Sync] Community recompute failed:', err);
+    }
+
     // Invalidate the wiki tree cache after sync
     try {
         clearWikiTreeCache(repoId);
@@ -271,7 +313,9 @@ export async function syncGitRepo(repoId: number) {
 }
 
 async function addDocumentFromGit(repoId: number, filePath: string, filename: string, content: string, repoDir: string) {
-    const { cleanedContent } = await addDocument(filename, content, { repoId, path: filePath });
+    // batch: one file of a sync — suppresses per-file community report generation.
+    // The sync tail runs a single unsuppressed recomputeCommunities() instead.
+    const { cleanedContent } = await addDocument(filename, content, { repoId, path: filePath, batch: true });
 
     // Save the cleaned & restructured version to the Clean/ folder in the local repo clone
     try {

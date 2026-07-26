@@ -109,20 +109,20 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
     });
 </script>
 
-<div class="p-8">
+<div class="p-6">
     <header class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
         <div>
-            <h1 class="text-3xl font-bold text-[var(--text-primary)] mb-2">Knowledge Base</h1>
-            <p class="text-[var(--text-muted)]">Manage documents used for RAG.</p>
+            <h1 class="page-title">Knowledge Base</h1>
+            <p class="page-subtitle mt-1">Manage documents used for RAG.</p>
         </div>
         
         <label 
-            class="flex items-center justify-center gap-2 px-6 py-3 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] rounded-2xl font-bold transition-all cursor-pointer shadow-lg shadow-[#0E3A2F]/20"
+            class="btn btn-primary cursor-pointer"
             class:opacity-50={isUploading}
             class:pointer-events-none={isUploading}
         >
             {#if isUploading}
-                <Loader2 class="w-5 h-5 animate-spin" />
+                <Loader2 class="w-4 h-4 animate-spin" />
                 <span>Uploading...</span>
             {:else}
                 <Upload class="w-5 h-5" />
@@ -132,21 +132,21 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
         </label>
     </header>
 
-    <div class="bg-[var(--bg-slate-900)] border border-[var(--border-primary)] rounded-3xl shadow-xl overflow-hidden">
+    <div class="card overflow-hidden">
         <div class="p-6 border-b border-[var(--border-primary)] flex flex-col md:flex-row gap-4 justify-between items-center">
             <div class="relative w-full md:w-96">
-                <Search class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-faint)]" />
+                <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-faint pointer-events-none" />
                 <input 
                     type="text" 
                     bind:value={searchQuery} 
                     placeholder="Search documents..." 
-                    class="w-full bg-[var(--bg-slate-950)] border border-[var(--border-primary)] rounded-2xl py-3 pl-12 pr-4 text-sm focus:outline-none focus:border-[#78FAAE]/50 transition-all"
+                    class="field pl-10"
                 />
             </div>
             
             <div class="flex items-center gap-2 text-sm text-[var(--text-muted)]">
                 <span>Show</span>
-                <select bind:value={pageSize} class="bg-[var(--bg-slate-950)] border border-[var(--border-primary)] rounded-xl px-2 py-1 focus:outline-none focus:border-[#78FAAE]/50">
+                <select bind:value={pageSize} class="bg-[var(--bg-well)] border border-[var(--border-primary)] rounded-xl px-2 py-1 focus:outline-none focus:border-accent-quiet">
                     <option value={10}>10</option>
                     <option value={25}>25</option>
                     <option value={50}>50</option>
@@ -158,26 +158,26 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
         <div class="overflow-x-auto">
             <table class="w-full text-left border-collapse">
                 <thead>
-                    <tr class="bg-[var(--bg-slate-800-30)]">
-                        <th class="p-6 text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider cursor-pointer hover:text-[var(--text-primary)] transition-colors" onclick={() => toggleSort('filename')}>
+                    <tr class="bg-[var(--bg-muted-30)]">
+                        <th class="eyebrow px-4 py-3 cursor-pointer hover:text-body transition-colors" onclick={() => toggleSort('filename')}>
                             <div class="flex items-center gap-2">
                                 Filename
                                 <ArrowUpDown class="w-3 h-3" />
                             </div>
                         </th>
-                        <th class="p-6 text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider cursor-pointer hover:text-[var(--text-primary)] transition-colors" onclick={() => toggleSort('repo_url')}>
+                        <th class="eyebrow px-4 py-3 cursor-pointer hover:text-body transition-colors" onclick={() => toggleSort('repo_url')}>
                             <div class="flex items-center gap-2">
                                 Source
                                 <ArrowUpDown class="w-3 h-3" />
                             </div>
                         </th>
-                        <th class="p-6 text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider cursor-pointer hover:text-[var(--text-primary)] transition-colors" onclick={() => toggleSort('created_at')}>
+                        <th class="eyebrow px-4 py-3 cursor-pointer hover:text-body transition-colors" onclick={() => toggleSort('created_at')}>
                             <div class="flex items-center gap-2">
                                 Added
                                 <ArrowUpDown class="w-3 h-3" />
                             </div>
                         </th>
-                        <th class="p-6 text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider text-right">Actions</th>
+                        <th class="eyebrow px-4 py-3 text-right">Actions</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-[var(--border-primary)]">
@@ -196,7 +196,7 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
                             <tr class="hover:bg-[var(--hover-surface)] transition-colors group">
                                 <td class="p-6">
                                     <div class="flex items-center gap-3">
-                                        <div class="w-10 h-10 rounded-xl bg-[var(--bg-slate-800)] flex items-center justify-center text-[#78FAAE]">
+                                        <div class="w-10 h-10 rounded-xl bg-[var(--bg-muted)] flex items-center justify-center text-accent">
                                             <FileText class="w-5 h-5" />
                                         </div>
                                         <span class="font-medium text-[var(--text-secondary)]">{doc.filename}</span>
@@ -204,7 +204,7 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
                                 </td>
                                 <td class="p-6">
                                     {#if doc.repo_url}
-                                        <span class="text-xs font-mono text-[var(--text-faint)] bg-[var(--bg-slate-950)] px-2 py-1 rounded-lg border border-[var(--border-primary)]">
+                                        <span class="text-xs font-mono text-[var(--text-faint)] bg-[var(--bg-well)] px-2 py-1 rounded-lg border border-[var(--border-primary)]">
                                             {doc.repo_url.split('/').pop()}
                                         </span>
                                     {:else}
@@ -217,7 +217,7 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
                                 <td class="p-6 text-right">
                                     <button 
                                         onclick={() => handleDelete(doc.id)}
-                                        class="p-2 hover:bg-red-900/30 rounded-xl text-[var(--text-faint)] hover:text-red-400 transition-all opacity-0 group-hover:opacity-100"
+                                        class="p-2 hover:bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] rounded-xl text-[var(--text-faint)] hover:text-danger transition-all opacity-0 group-hover:opacity-100"
                                     >
                                         <Trash2 class="w-5 h-5" />
                                     </button>
@@ -251,7 +251,7 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
                             <button 
                                 onclick={() => currentPage = i + 1}
                                 class="w-8 h-8 rounded-lg text-sm font-medium transition-all
-                                {currentPage === i + 1 ? 'bg-[#0E3A2F] text-[#78FAAE]' : 'hover:bg-[var(--hover-surface)] text-[var(--text-faint)]'}"
+                                {currentPage === i + 1 ? 'bg-accent-solid text-accent' : 'hover:bg-[var(--hover-surface)] text-[var(--text-faint)]'}"
                             >
                                 {i + 1}
                             </button>

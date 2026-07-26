@@ -35,6 +35,27 @@ import BookOpen from '@lucide/svelte/icons/book-open';
     let recognition: any = null;
     let speechSupported = $state(false);
     let micError = $state<string | null>(null);
+    let textareaEl = $state<HTMLTextAreaElement>();
+
+    // Starter prompts on the empty state. They fill the composer rather than
+    // sending immediately, so the wording stays editable.
+    const starters = [
+        { label: 'Summarise', text: 'Summarise the latest project documents.' },
+        { label: 'Find', text: 'Find the technical specification for TS-FIV.' }
+    ];
+
+    /** Grow the composer with its content, up to a scroll cap. */
+    function resizeComposer() {
+        if (!textareaEl) return;
+        textareaEl.style.height = 'auto';
+        textareaEl.style.height = `${Math.min(textareaEl.scrollHeight, 200)}px`;
+    }
+
+    function useStarter(text: string) {
+        currentPrompt = text;
+        textareaEl?.focus();
+        requestAnimationFrame(resizeComposer);
+    }
 
     const SPEECH_ERROR_MESSAGES: Record<string, string> = {
         'not-allowed': 'Microphone blocked. Allow microphone access for this site, and in Edge check Settings > Privacy, search, and services > Speech > "Online speech recognition" is turned on.',
@@ -111,6 +132,7 @@ import BookOpen from '@lucide/svelte/icons/book-open';
 
         const prompt = currentPrompt;
         currentPrompt = '';
+        requestAnimationFrame(resizeComposer);
         messages = [...messages, { role: 'user', content: prompt }];
 
         isChatting = true;
@@ -273,104 +295,100 @@ import BookOpen from '@lucide/svelte/icons/book-open';
     });
 </script>
 
-<div class="flex h-screen bg-[var(--bg-page)] text-[var(--text-page)] font-sans overflow-hidden">
+<div class="flex h-screen bg-page text-body font-sans overflow-hidden">
     <!-- Sidebar -->
-    <aside 
-        class="sidebar-panel w-72 bg-[var(--bg-surface)] border-r border-[var(--border-secondary)] flex flex-col z-20 {isSidebarOpen ? 'sidebar-visible' : 'sidebar-hidden'}"
+    <aside
+        class="sidebar-panel w-72 bg-surface border-r border-line flex flex-col z-20 {isSidebarOpen ? 'sidebar-visible' : 'sidebar-hidden'}"
     >
-            <div class="p-4 border-b border-[var(--border-secondary)] flex items-center justify-between">
-                <h1 class="text-xs font-black bg-gradient-to-r from-[#78FAAE] to-[#0E3A2F] bg-clip-text text-transparent uppercase tracking-[0.2em]">
-                    ARCHIE
-                </h1>
-                <button 
+            <div class="h-14 px-4 border-b border-line-subtle flex items-center justify-between">
+                <p class="wordmark">Archie<span class="wordmark-dot ml-1"></span></p>
+                <button
                     onclick={() => isSidebarOpen = false}
-                    class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg text-[var(--text-muted)] transition-colors"
+                    class="btn btn-ghost btn-icon"
+                    aria-label="Hide sidebar"
+                    title="Hide sidebar"
                 >
                     <PanelLeftClose class="w-4 h-4" />
                 </button>
             </div>
 
             <div class="p-3">
-                <button 
-                    onclick={startNewChat}
-                    class="w-full flex items-center gap-3 px-4 py-3 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] rounded-xl transition-all shadow-lg shadow-[#0E3A2F]/20 font-bold text-xs uppercase tracking-wider group border border-[#78FAAE]/20"
-                >
-                    <Plus class="w-4 h-4 group-hover:rotate-90 transition-transform" />
-                    New Conversation
+                <button onclick={startNewChat} class="btn btn-primary w-full">
+                    <Plus class="w-4 h-4" />
+                    New conversation
                 </button>
             </div>
 
-            <div class="flex-1 overflow-y-auto px-2 space-y-1 custom-scrollbar">
-                <div class="px-3 py-2 text-[10px] font-bold text-[var(--text-faint)] uppercase tracking-widest">Recent Chats</div>
+            <div class="flex-1 overflow-y-auto px-2 pb-2 space-y-0.5">
+                <p class="eyebrow px-3 py-2">Recent</p>
                 {#each conversations as conv}
-                    <div 
+                    <div
                         role="button"
                         tabindex="0"
                         onclick={() => loadConversation(conv.id)}
                         onkeydown={(e) => e.key === 'Enter' && loadConversation(conv.id)}
-                        class="w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl transition-all group cursor-pointer
-                        {currentConversationId === conv.id ? 'bg-[#0E3A2F] text-[#78FAAE] border border-[#78FAAE]/20' : 'text-[var(--text-muted)] hover:bg-[var(--hover-surface)] hover:text-[var(--text-secondary)] border border-transparent'}"
+                        class="nav-item group cursor-pointer justify-between {currentConversationId === conv.id ? 'nav-item-active' : ''}"
                     >
-                        <div class="flex items-center gap-3 overflow-hidden">
-                            <MessageSquare class="w-4 h-4 flex-shrink-0 {currentConversationId === conv.id ? 'text-[#78FAAE]' : 'text-[var(--text-faintest)]'}" />
-                            <span class="text-xs font-medium truncate">{conv.title}</span>
+                        <div class="flex items-center gap-2.5 overflow-hidden">
+                            <MessageSquare class="w-4 h-4 flex-shrink-0 {currentConversationId === conv.id ? 'text-accent' : 'text-ghost'}" />
+                            <span class="truncate">{conv.title}</span>
                         </div>
-                        <button 
+                        <button
                             onclick={(e) => deleteConversation(conv.id, e)}
-                            class="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-900/20 hover:text-red-400 rounded-md transition-all"
+                            class="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1 rounded-md text-faint hover:text-danger transition-colors"
                             aria-label="Delete conversation"
+                            title="Delete conversation"
                         >
-                            <Trash class="w-3 h-3" />
+                            <Trash class="w-3.5 h-3.5" />
                         </button>
                     </div>
                 {/each}
             </div>
 
-            <div class="p-4 border-t border-[var(--border-secondary)]">
+            <div class="p-3 border-t border-line-subtle">
                 <div class="relative">
-                    <button 
+                    <button
                         onclick={() => isUserMenuOpen = !isUserMenuOpen}
-                        class="w-full flex items-center gap-3 p-2 hover:bg-[var(--hover-surface)] rounded-xl transition-all border border-transparent hover:border-[var(--border-primary)]"
+                        class="w-full flex items-center gap-2.5 p-2 rounded-xl hover:bg-[var(--hover-surface)] transition-colors"
                     >
-                        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-[#0E3A2F] to-[#78FAAE] flex items-center justify-center text-[10px] font-bold shadow-lg shadow-[#0E3A2F]/20 text-[#0E3A2F]">
+                        <div class="w-8 h-8 rounded-lg bg-accent-solid text-on-accent flex items-center justify-center text-[11px] font-semibold flex-shrink-0">
                             {user?.username.slice(0, 2).toUpperCase()}
                         </div>
                         <div class="flex-1 text-left overflow-hidden">
-                            <p class="text-xs font-bold text-[var(--text-secondary)] truncate">{user?.username}</p>
-                            <p class="text-[10px] text-[var(--text-faint)] uppercase tracking-tighter">{user?.role}</p>
+                            <p class="text-[13px] font-medium text-body truncate">{user?.username}</p>
+                            <p class="text-xs text-faint capitalize">{user?.role}</p>
                         </div>
-                        <ChevronDown class="w-4 h-4 text-[var(--text-faint)] transition-transform {isUserMenuOpen ? 'rotate-180' : ''}" />
+                        <ChevronDown class="w-4 h-4 text-faint transition-transform {isUserMenuOpen ? 'rotate-180' : ''}" />
                     </button>
 
                     {#if isUserMenuOpen}
-                        <div 
-                            transition:fly={{ y: 10, duration: 200 }}
-                            class="absolute bottom-full left-0 right-0 mb-2 bg-[var(--bg-raised)] border border-[var(--border-primary)] rounded-2xl shadow-2xl py-2 z-50 overflow-hidden"
+                        <div
+                            transition:fly={{ y: 6, duration: 150 }}
+                            class="absolute bottom-full left-0 right-0 mb-2 bg-raised border border-line rounded-2xl shadow-xl p-1.5 z-50"
                         >
-                            <a href="/knowledge" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-[var(--hover-surface-solid)] hover:text-white transition-colors uppercase tracking-wider">
-                                <Network class="w-4 h-4 text-cyan-400" />
-                                Knowledge Graph
+                            <a href="/knowledge" class="nav-item">
+                                <Network class="w-4 h-4 text-faint" />
+                                Knowledge graph
                             </a>
-                            <a href="/wiki" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-[var(--hover-surface-solid)] hover:text-white transition-colors uppercase tracking-wider">
-                                <BookOpen class="w-4 h-4 text-emerald-400" />
+                            <a href="/wiki" class="nav-item">
+                                <BookOpen class="w-4 h-4 text-faint" />
                                 Wiki
                             </a>
-                            <a href="/about" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-[var(--hover-surface-solid)] hover:text-white transition-colors uppercase tracking-wider">
-                                <Info class="w-4 h-4 text-purple-400" />
+                            <a href="/about" class="nav-item">
+                                <Info class="w-4 h-4 text-faint" />
                                 About
                             </a>
-                            <div class="my-1 border-t border-[var(--border-secondary)]"></div>
                             {#if user?.role === 'admin'}
-                                <a href="/admin" class="flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-slate-300 hover:bg-[var(--hover-surface-solid)] hover:text-white transition-colors uppercase tracking-wider">
-                                    <LayoutDashboard class="w-4 h-4 text-[#78FAAE]" />
-                                    Admin Dashboard
+                                <a href="/admin" class="nav-item">
+                                    <LayoutDashboard class="w-4 h-4 text-faint" />
+                                    Admin dashboard
                                 </a>
-                                <div class="my-1 border-t border-[var(--border-secondary)]"></div>
                             {/if}
+                            <div class="my-1.5 border-t border-line-subtle"></div>
                             <form method="POST" action="/api/auth/logout">
-                                <button type="submit" class="w-full flex items-center gap-3 px-4 py-2.5 text-xs font-bold text-red-400 hover:bg-red-900/20 transition-colors uppercase tracking-wider">
+                                <button type="submit" class="nav-item w-full text-danger hover:text-danger">
                                     <LogOut class="w-4 h-4" />
-                                    Logout
+                                    Sign out
                                 </button>
                             </form>
                         </div>
@@ -380,51 +398,55 @@ import BookOpen from '@lucide/svelte/icons/book-open';
     </aside>
 
     <!-- Main: Chat Interface -->
-    <main class="flex-1 flex flex-col relative w-full bg-[var(--bg-page)]">
-        <header class="h-14 px-4 border-b border-[var(--border-secondary)] flex items-center justify-between bg-[var(--bg-page)]/80 backdrop-blur-xl sticky top-0 z-10">
-            <div class="flex items-center gap-4">
-                <a href="/wiki" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[var(--bg-slate-900)] border border-[var(--border-primary)] hover:border-[#78FAAE]/50 transition-all group">
-                    <BookOpen class="w-4 h-4 text-[#78FAAE] group-hover:scale-110 transition-transform" />
-                    <span class="text-[10px] font-bold text-[var(--text-muted)] group-hover:text-white uppercase tracking-widest">Wiki</span>
-                </a>
+    <main class="flex-1 flex flex-col relative w-full bg-page">
+        <header class="h-14 px-4 border-b border-line-subtle flex items-center justify-between bg-page/90 backdrop-blur-md sticky top-0 z-10">
+            <div class="flex items-center gap-2">
                 {#if !isSidebarOpen}
-                    <button 
+                    <button
                         onclick={() => isSidebarOpen = true}
-                        class="p-1.5 hover:bg-[var(--hover-surface)] rounded-lg text-[var(--text-muted)] transition-colors"
+                        class="btn btn-ghost btn-icon"
+                        aria-label="Show sidebar"
+                        title="Show sidebar"
                     >
                         <PanelLeftOpen class="w-4 h-4" />
                     </button>
                 {/if}
+                <a href="/wiki" class="btn btn-ghost btn-sm">
+                    <BookOpen class="w-4 h-4" />
+                    Wiki
+                </a>
+                <a href="/knowledge" class="btn btn-ghost btn-sm">
+                    <Network class="w-4 h-4" />
+                    Knowledge graph
+                </a>
             </div>
 
             <div class="flex items-center gap-3">
                 <ThemeToggle />
-                <div class="h-4 w-px bg-slate-800"></div>
-                <span class="text-[10px] font-bold text-[var(--text-faintest)] uppercase tracking-widest">v1.1.0</span>
+                <span class="text-xs text-ghost tabular-nums">v1.1.0</span>
             </div>
         </header>
 
-        <div class="flex-1 overflow-y-auto p-4 space-y-8 scroll-smooth custom-scrollbar">
+        <div class="flex-1 overflow-y-auto px-4 py-6 space-y-6 scroll-smooth">
             {#if messages.length === 0}
-                <div class="h-full flex flex-col items-center justify-center text-center space-y-6 max-w-md mx-auto" in:fade>
-                    <div class="w-16 h-16 rounded-3xl bg-gradient-to-br from-[#0E3A2F] to-[#78FAAE] flex items-center justify-center shadow-2xl shadow-[#0E3A2F]/40 rotate-12">
-                        <Bot class="w-8 h-8 text-[#0E3A2F]" />
+                <div class="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto" in:fade>
+                    <div class="w-11 h-11 rounded-2xl bg-surface border border-line flex items-center justify-center">
+                        <Bot class="w-5 h-5 text-accent" />
                     </div>
-                    <div class="space-y-2">
-                        <h2 class="text-xl font-black tracking-tight text-[var(--text-primary)]">How can I help you today?</h2>
-                        <p class="text-sm text-[var(--text-faint)] leading-relaxed">
-                            Ask me anything about your documents. I can search through your knowledge base and provide precise answers with sources.
-                        </p>
-                    </div>
-                    <div class="grid grid-cols-2 gap-3 w-full">
-                        <button class="p-3 rounded-2xl bg-[var(--bg-slate-900)]/50 border border-[var(--border-primary)] hover:border-[#78FAAE]/50 transition-all text-left group">
-                            <p class="text-[10px] font-bold text-[#78FAAE] uppercase tracking-wider mb-1">Analyze</p>
-                            <p class="text-xs text-[var(--text-muted)] group-hover:text-[var(--text-secondary)] transition-colors">Summarize the latest project docs</p>
-                        </button>
-                        <button class="p-3 rounded-2xl bg-[var(--bg-slate-900)]/50 border border-[var(--border-primary)] hover:border-[#78FAAE]/50 transition-all text-left group">
-                            <p class="text-[10px] font-bold text-[#78FAAE] uppercase tracking-wider mb-1">Search</p>
-                            <p class="text-xs text-[var(--text-muted)] group-hover:text-[var(--text-secondary)] transition-colors">Find technical specs for TS-FIV</p>
-                        </button>
+                    <h2 class="page-title mt-5">How can I help?</h2>
+                    <p class="text-[13px] text-mute leading-relaxed mt-2">
+                        Ask about anything in your documents. Answers cite the sources they came from.
+                    </p>
+                    <div class="grid grid-cols-2 gap-2 w-full mt-7">
+                        {#each starters as starter}
+                            <button
+                                onclick={() => useStarter(starter.text)}
+                                class="card card-hover p-3 text-left"
+                            >
+                                <p class="eyebrow eyebrow-accent">{starter.label}</p>
+                                <p class="text-[13px] text-dim mt-1.5 leading-snug">{starter.text}</p>
+                            </button>
+                        {/each}
                     </div>
                 </div>
             {/if}
@@ -440,66 +462,68 @@ import BookOpen from '@lucide/svelte/icons/book-open';
 
             {#if isChatting}
                 <div class="flex justify-start" in:fade>
-                    <div class="flex space-x-4">
-                        <div class="w-9 h-9 rounded-xl bg-[var(--bg-slate-900)] border border-[var(--border-primary)] flex items-center justify-center">
-                            <Bot class="w-5 h-5 text-[#78FAAE] animate-pulse" />
+                    <div class="flex gap-3">
+                        <div class="w-8 h-8 rounded-lg bg-surface border border-line flex items-center justify-center flex-shrink-0">
+                            <Bot class="w-4 h-4 text-accent" />
                         </div>
-                        <div class="bg-[var(--bg-raised)] border border-[var(--border-secondary)] p-5 rounded-2xl rounded-tl-none shadow-inner flex items-center gap-3">
-                            <div class="flex gap-1">
-                                <div class="w-1.5 h-1.5 bg-[#78FAAE] rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                                <div class="w-1.5 h-1.5 bg-[#78FAAE] rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                                <div class="w-1.5 h-1.5 bg-[#78FAAE] rounded-full animate-bounce"></div>
+                        <div class="bg-raised border border-line-subtle px-4 py-3 rounded-2xl rounded-tl-sm flex items-center gap-2.5">
+                            <div class="flex gap-1" aria-hidden="true">
+                                <div class="w-1.5 h-1.5 bg-accent-quiet rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+                                <div class="w-1.5 h-1.5 bg-accent-quiet rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                                <div class="w-1.5 h-1.5 bg-accent-quiet rounded-full animate-bounce"></div>
                             </div>
-                            <span class="text-[10px] font-bold text-[var(--text-faint)] uppercase tracking-widest">Archie is thinking</span>
+                            <span class="text-[13px] text-mute">Searching your documents…</span>
                         </div>
                     </div>
                 </div>
             {/if}
         </div>
 
-        <footer class="p-6 bg-gradient-to-t from-[var(--bg-page)] via-[var(--bg-page)] to-transparent">
-            <div class="max-w-4xl mx-auto relative group">
-                <div class="absolute -inset-1 bg-gradient-to-r from-[#0E3A2F] to-[#78FAAE] rounded-2xl blur opacity-20 group-focus-within:opacity-40 transition duration-500"></div>
-                <textarea 
-                    bind:value={currentPrompt}
-                    onkeydown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleChat())}
-                    placeholder="Ask anything about your documents..."
-                    class="relative w-full bg-[var(--bg-surface)] border border-[var(--border-primary)] rounded-2xl py-5 pl-6 pr-28 focus:outline-none focus:border-[#78FAAE]/50 transition-all resize-none shadow-2xl text-sm text-[var(--text-secondary)] placeholder:text-[var(--text-faintest)]"
-                    rows="1"
-                ></textarea>
-                <div class="absolute right-3 bottom-3 flex items-center gap-2">
-                    {#if speechSupported}
+        <footer class="px-4 pb-5 pt-2 bg-page">
+            <div class="max-w-3xl mx-auto">
+                <div class="composer">
+                    <textarea
+                        bind:this={textareaEl}
+                        bind:value={currentPrompt}
+                        oninput={resizeComposer}
+                        onkeydown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleChat())}
+                        placeholder="Ask about your documents…"
+                        class="composer-input"
+                        rows="1"
+                    ></textarea>
+                    <div class="flex items-center gap-1.5 pb-2 pr-2">
+                        {#if speechSupported}
+                            <button
+                                onclick={toggleVoiceInput}
+                                disabled={isChatting}
+                                class="btn btn-icon {micError || isRecording ? 'btn-danger' : 'btn-ghost'}"
+                                aria-label={isRecording ? 'Stop recording' : 'Start voice input'}
+                                title={micError ?? (isRecording ? 'Stop recording' : 'Start voice input')}
+                            >
+                                {#if isRecording}
+                                    <MicOff class="w-4 h-4" />
+                                {:else}
+                                    <Mic class="w-4 h-4" />
+                                {/if}
+                            </button>
+                        {/if}
                         <button
-                            onclick={toggleVoiceInput}
-                            disabled={isChatting}
-                            class="p-2.5 rounded-xl transition-all shadow-lg border {micError ? 'bg-red-500/10 hover:bg-red-500/20 text-red-400 border-red-500/40' : isRecording ? 'bg-red-500/20 hover:bg-red-500/30 text-red-400 border-red-500/30 animate-pulse' : 'bg-[var(--bg-slate-800)] hover:bg-[var(--hover-surface-solid)] text-[var(--text-muted)] border-[var(--border-hover)]'} disabled:bg-[var(--bg-slate-800)] disabled:text-[var(--text-faintest)] disabled:border-[var(--border-primary)]"
-                            aria-label={isRecording ? 'Stop recording' : 'Start voice input'}
-                            title={micError ?? (isRecording ? 'Stop recording' : 'Start voice input')}
+                            onclick={() => handleChat()}
+                            disabled={!currentPrompt.trim() || isChatting}
+                            class="btn btn-primary btn-icon"
+                            aria-label="Send message"
+                            title="Send message"
                         >
-                            {#if isRecording}
-                                <MicOff class="w-5 h-5" />
-                            {:else}
-                                <Mic class="w-5 h-5" />
-                            {/if}
+                            <Send class="w-4 h-4" />
                         </button>
-                    {/if}
-                    <button
-                        onclick={() => handleChat()}
-                        disabled={!currentPrompt.trim() || isChatting}
-                        class="p-2.5 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] disabled:bg-[var(--bg-slate-800)] disabled:text-[var(--text-faintest)] rounded-xl transition-all shadow-lg shadow-[#0E3A2F]/20 border border-[#78FAAE]/20"
-                    >
-                        <Send class="w-5 h-5" />
-                    </button>
+                    </div>
                 </div>
-            </div>
-            {#if micError}
-                <div class="max-w-4xl mx-auto mt-3 px-4 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs text-center" in:fade>
-                    {micError}
-                </div>
-            {/if}
-            <div class="flex items-center justify-center gap-6 mt-4">
-                <p class="text-[9px] text-[var(--text-faintest)] uppercase tracking-[0.3em] font-black">
-                    Powered by SQLite-Vector & Gemini AI
+
+                {#if micError}
+                    <p class="mt-2 text-xs text-danger text-center" in:fade>{micError}</p>
+                {/if}
+                <p class="mt-2.5 text-xs text-faint text-center">
+                    Enter to send · Shift + Enter for a new line
                 </p>
             </div>
         </footer>
@@ -507,13 +531,8 @@ import BookOpen from '@lucide/svelte/icons/book-open';
 </div>
 
 <style>
-    :global(body) {
-        margin: 0;
-        background: var(--bg-page);
-    }
-
     .sidebar-panel {
-        transition: transform 0.3s ease, opacity 0.3s ease;
+        transition: transform 0.25s ease, opacity 0.25s ease;
     }
 
     .sidebar-visible {
@@ -528,31 +547,37 @@ import BookOpen from '@lucide/svelte/icons/book-open';
         height: 100%;
     }
 
-    .custom-scrollbar::-webkit-scrollbar {
-        width: 4px;
+    /* The composer is one field: the textarea and its buttons share a single
+       border and focus state instead of the buttons floating over the input. */
+    .composer {
+        display: flex;
+        align-items: flex-end;
+        background: var(--bg-surface);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-3xl);
+        box-shadow: var(--elev-1);
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
 
-    .custom-scrollbar::-webkit-scrollbar-track {
+    .composer:focus-within {
+        border-color: var(--accent-quiet);
+        box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 16%, transparent);
+    }
+
+    .composer-input {
+        flex: 1;
+        min-height: 2.75rem;
+        max-height: 12.5rem;
+        padding: 0.8125rem 0.25rem 0.8125rem 1rem;
         background: transparent;
+        border: 0;
+        resize: none;
+        font-family: inherit;
+        font-size: 0.875rem;
+        line-height: 1.5;
+        color: var(--text-primary);
     }
 
-    .custom-scrollbar::-webkit-scrollbar-thumb {
-        background: var(--scrollbar-thumb);
-        border-radius: 10px;
-    }
-
-    .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-        background: var(--scrollbar-hover);
-    }
-
-    :global(.prose pre) {
-        background: var(--code-bg) !important;
-        border: 1px solid var(--code-border);
-        border-radius: 12px;
-    }
-
-    :global(.prose code) {
-        color: var(--code-text) !important;
-        font-family: 'JetBrains Mono', monospace;
-    }
+    .composer-input::placeholder { color: var(--text-faintest); }
+    .composer-input:focus { outline: none; }
 </style>

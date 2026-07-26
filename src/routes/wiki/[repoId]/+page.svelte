@@ -87,10 +87,10 @@ import Loader2 from '@lucide/svelte/icons/loader-2';
 
 <div class="h-full flex items-center justify-center p-8">
     {#if loading}
-        <div class="w-6 h-6 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
+        <div class="spinner w-6 h-6"></div>
     {:else if !defaultPath}
         <div class="max-w-md text-center">
-            <div class="inline-flex p-4 bg-[var(--bg-slate-900)] rounded-2xl border border-[var(--border-primary)] mb-6">
+            <div class="inline-flex p-4 bg-[var(--bg-page)] rounded-2xl border border-[var(--border-primary)] mb-6">
                 <BookOpen class="w-10 h-10 text-[var(--text-faintest)]" />
             </div>
             <h2 class="text-2xl font-bold text-[var(--text-primary)] mb-3">No documents yet</h2>
@@ -104,10 +104,10 @@ import Loader2 from '@lucide/svelte/icons/loader-2';
                         type="text" 
                         bind:value={newFileName}
                         placeholder="README.md"
-                        class="w-full bg-[var(--bg-slate-900)] border border-[var(--border-hover)] rounded-xl px-4 py-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-faintest)] focus:outline-none focus:border-[#78FAAE]/50"
+                        class="w-full bg-[var(--bg-page)] border border-[var(--border-hover)] rounded-xl px-4 py-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-faintest)] focus:outline-none focus:border-accent-quiet"
                     />
                     <div class="flex gap-2 justify-center">
-                        <button type="submit" class="px-6 py-3 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] rounded-xl font-bold text-sm transition-all">
+                        <button type="submit" class="px-6 py-3 bg-accent-solid hover:bg-[var(--accent-solid-hover)] text-accent rounded-xl font-bold text-sm transition-all">
                             Create Page
                         </button>
                         <button type="button" onclick={() => showCreateForm = false} class="px-4 py-3 hover:bg-[var(--hover-surface)] rounded-xl text-sm transition-all">
@@ -116,7 +116,7 @@ import Loader2 from '@lucide/svelte/icons/loader-2';
                     </div>
                 </form>
             {:else}
-                <button onclick={() => showCreateForm = true} class="inline-flex items-center gap-2 px-6 py-3 bg-[#0E3A2F] hover:bg-[#0E3A2F]/80 text-[#78FAAE] rounded-xl font-bold text-sm transition-all">
+                <button onclick={() => showCreateForm = true} class="inline-flex items-center gap-2 px-6 py-3 bg-accent-solid hover:bg-[var(--accent-solid-hover)] text-accent rounded-xl font-bold text-sm transition-all">
                     <Plus class="w-4 h-4" />
                     Create First Page
                 </button>

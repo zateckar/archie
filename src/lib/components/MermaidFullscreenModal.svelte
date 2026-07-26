@@ -209,7 +209,7 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
-        class="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 sm:p-8"
+        class="fixed inset-0 z-[100] bg-[var(--backdrop)] backdrop-blur-sm flex items-center justify-center p-4 sm:p-8"
         onclick={handleBackdropClick}
         transition:fade={{ duration: 150 }}
     >
@@ -222,8 +222,8 @@
             transition:scaleTransition={{ duration: 200, start: 0.95 }}
         >
             <!-- Header -->
-            <header class="flex items-center justify-between gap-4 px-5 py-3 border-b border-[var(--border-primary)] bg-[var(--bg-slate-950)]/50 flex-shrink-0">
-                <h2 class="text-sm font-bold text-[var(--text-primary)] uppercase tracking-widest">Diagram</h2>
+            <header class="flex items-center justify-between gap-4 px-5 py-3 border-b border-[var(--border-primary)] bg-[var(--bg-well)]/50 flex-shrink-0">
+                <h2 class="text-sm font-semibold text-body">Diagram</h2>
                 <div class="flex items-center gap-1.5">
                     <button
                         type="button"
@@ -301,8 +301,8 @@
             </div>
 
             <!-- Footer hint -->
-            <footer class="px-5 py-2 border-t border-[var(--border-primary)] bg-[var(--bg-slate-950)]/50 flex-shrink-0">
-                <p class="text-[10px] uppercase tracking-widest text-[var(--text-faint)] font-bold text-center">
+            <footer class="px-5 py-2 border-t border-[var(--border-primary)] bg-[var(--bg-well)]/50 flex-shrink-0">
+                <p class="text-[11px] uppercase tracking-widest text-[var(--text-faint)] font-bold text-center">
                     Scroll to zoom · Drag to pan · Esc to close
                 </p>
             </footer>

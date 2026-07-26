@@ -24,7 +24,8 @@ async function main() {
     const secs = ((Date.now() - start) / 1000).toFixed(1);
     console.log(
         `\n✅ Re-embedding complete in ${secs}s: ` +
-        `${result.chunks} chunks, ${result.topics} topics, ${result.claims} claims ` +
+        `${result.chunks} chunks, ${result.topics} topics, ${result.claims} claims, ` +
+        `${result.communityReports} community reports ` +
         `at dimension ${result.dimension}.`
     );
     process.exit(0);

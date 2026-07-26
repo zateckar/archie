@@ -30,42 +30,35 @@ import ExternalLink from '@lucide/svelte/icons/external-link';
 </script>
 
 <div class="h-full flex flex-col items-center justify-center p-8">
-    <div class="max-w-2xl w-full">
-        <div class="text-center mb-12">
-            <div class="inline-flex p-3 bg-[#0E3A2F]/30 rounded-2xl border border-[#0E3A2F]/50 mb-6">
-                <BookOpen class="w-8 h-8 text-[#78FAAE]" />
-            </div>
-            <h1 class="text-4xl font-black text-[var(--text-primary)] mb-3">Wiki</h1>
-            <p class="text-[var(--text-muted)] text-lg">Browse and edit markdown documents from your connected repositories.</p>
+    <div class="max-w-xl w-full">
+        <div class="mb-6">
+            <h1 class="page-title">Wiki</h1>
+            <p class="page-subtitle mt-1">Browse and edit markdown from your connected repositories.</p>
         </div>
 
         {#if loading}
             <div class="flex justify-center py-12">
-                <div class="w-6 h-6 border-2 border-[#78FAAE]/20 border-t-[#78FAAE] rounded-full animate-spin"></div>
+                <div class="spinner w-6 h-6"></div>
             </div>
         {:else if repos.length === 0}
-            <div class="text-center py-12 bg-[var(--bg-slate-900)]/50 border border-[var(--border-primary)] rounded-3xl">
-                <GitBranch class="w-12 h-12 text-slate-700 mx-auto mb-4" />
-                <h3 class="text-lg font-bold text-[var(--text-muted)] mb-2">No repositories connected</h3>
-                <p class="text-sm text-[var(--text-faintest)] max-w-md mx-auto">
-                    Connect git repositories in the admin panel to start browsing wiki documents.
+            <div class="card p-8 text-center">
+                <GitBranch class="w-8 h-8 text-ghost mx-auto" />
+                <h2 class="text-sm font-semibold text-body mt-3">No repositories connected</h2>
+                <p class="text-[13px] text-mute mt-1.5 max-w-sm mx-auto">
+                    Connect a git repository in the admin panel to start browsing wiki documents.
                 </p>
+                <a href="/admin/repos" class="btn btn-secondary btn-sm mt-4">Open admin panel</a>
             </div>
         {:else}
-            <div class="space-y-3">
+            <div class="space-y-2">
                 {#each repos as repo}
-                    <a 
-                        href={`/wiki/${repo.id}`}
-                        class="flex items-center gap-4 p-5 bg-[var(--bg-slate-900)]/50 border border-[var(--border-primary)] rounded-2xl hover:border-[var(--border-hover)] hover:bg-[var(--bg-slate-900)]/80 transition-all group"
-                    >
-                        <div class="w-12 h-12 rounded-xl bg-[#0E3A2F]/30 flex items-center justify-center text-[#78FAAE] flex-shrink-0">
-                            <BookOpen class="w-6 h-6" />
-                        </div>
+                    <a href={`/wiki/${repo.id}`} class="card card-hover flex items-center gap-3 p-4 group">
+                        <BookOpen class="w-4 h-4 text-faint flex-shrink-0" />
                         <div class="flex-1 min-w-0">
-                            <h3 class="font-bold text-[var(--text-primary)] text-lg group-hover:text-[#78FAAE] transition-colors truncate">{getRepoName(repo)}</h3>
-                            <p class="text-xs text-[var(--text-faint)] font-mono truncate mt-0.5">{repo.url}</p>
+                            <h2 class="text-sm font-medium text-body truncate">{getRepoName(repo)}</h2>
+                            <p class="text-xs text-faint font-mono truncate mt-0.5">{repo.url}</p>
                         </div>
-                        <ChevronRight class="w-5 h-5 text-[var(--text-faint)] group-hover:text-[#78FAAE] transition-colors flex-shrink-0" />
+                        <ChevronRight class="w-4 h-4 text-ghost group-hover:text-mute transition-colors flex-shrink-0" />
                     </a>
                 {/each}
             </div>
