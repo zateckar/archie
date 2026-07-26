@@ -464,7 +464,7 @@ import Workflow from '@lucide/svelte/icons/workflow';
             {:else if !isEditing}
                 <!-- View mode -->
                 <div class="h-full p-8">
-                    <div bind:this={viewContainerEl} class="prose prose-invert prose-headings:text-[var(--text-primary)] prose-a:text-[var(--code-text)] prose-strong:text-[var(--text-primary)] prose-code:text-[var(--code-text)] prose-pre:bg-[var(--bg-page)] prose-pre:border prose-pre:border-[var(--border-primary)] prose-blockquote:border-[var(--code-text)] prose-blockquote:text-[var(--text-muted)] max-w-none">
+                    <div bind:this={viewContainerEl} class="wiki-prose prose prose-invert prose-headings:text-[var(--text-primary)] prose-a:text-[var(--code-text)] prose-strong:text-[var(--text-primary)] prose-code:text-[var(--code-text)] prose-pre:bg-[var(--bg-page)] prose-pre:border prose-pre:border-[var(--border-primary)] prose-blockquote:border-[var(--code-text)] prose-blockquote:text-[var(--text-muted)] max-w-none">
                         {@html renderedContent}
                     </div>
                 </div>
@@ -492,7 +492,7 @@ import Workflow from '@lucide/svelte/icons/workflow';
             {:else}
                 <!-- WYSIWYG editor -->
                 <div class="h-full p-8">
-                    <div bind:this={editorEl} class="prose prose-invert prose-headings:text-[var(--text-primary)] prose-a:text-[var(--code-text)] prose-strong:text-[var(--text-primary)] prose-code:text-[var(--code-text)] prose-pre:bg-[var(--bg-page)] prose-pre:border prose-pre:border-[var(--border-primary)] prose-blockquote:border-[var(--code-text)] prose-blockquote:text-[var(--text-muted)] max-w-none h-full outline-none"></div>
+                    <div bind:this={editorEl} class="wiki-prose prose prose-invert prose-headings:text-[var(--text-primary)] prose-a:text-[var(--code-text)] prose-strong:text-[var(--text-primary)] prose-code:text-[var(--code-text)] prose-pre:bg-[var(--bg-page)] prose-pre:border prose-pre:border-[var(--border-primary)] prose-blockquote:border-[var(--code-text)] prose-blockquote:text-[var(--text-muted)] max-w-none h-full outline-none"></div>
                 </div>
             {/if}
         </div>
@@ -597,6 +597,26 @@ import Workflow from '@lucide/svelte/icons/workflow';
     :global(.tiptap code) { font-size: 0.875rem; }
     :global(.tiptap blockquote) { border-left: 2px solid var(--accent-quiet); padding-left: 1rem; color: var(--text-muted); margin-bottom: 0.5rem; }
     :global(.tiptap a) { color: var(--accent-quiet); text-decoration: underline; }
+
+    /* Tailwind Typography ships a very airy rhythm (1.75 line-height, 1.25em
+       paragraph gaps) which reads like double-spacing in a wiki document.
+       Tighten it for both the rendered view and the editor so they match.
+       Declared after the .tiptap rules above so it wins on source order. */
+    :global(.wiki-prose.prose) { line-height: 1.55; }
+    :global(.wiki-prose p),
+    :global(.wiki-prose li),
+    :global(.wiki-prose blockquote),
+    :global(.wiki-prose td),
+    :global(.wiki-prose th) { line-height: 1.55; }
+    :global(.wiki-prose p) { margin-top: 0.7em; margin-bottom: 0.7em; }
+    :global(.wiki-prose ul), :global(.wiki-prose ol) { margin-top: 0.7em; margin-bottom: 0.7em; }
+    :global(.wiki-prose li) { margin-top: 0.2em; margin-bottom: 0.2em; }
+    :global(.wiki-prose li > p) { margin-top: 0.2em; margin-bottom: 0.2em; }
+    :global(.wiki-prose h1) { margin-top: 1.2em; margin-bottom: 0.5em; line-height: 1.2; }
+    :global(.wiki-prose h2) { margin-top: 1.1em; margin-bottom: 0.45em; line-height: 1.25; }
+    :global(.wiki-prose h3), :global(.wiki-prose h4) { margin-top: 1em; margin-bottom: 0.4em; line-height: 1.3; }
+    :global(.wiki-prose > :first-child) { margin-top: 0; }
+    :global(.wiki-prose pre) { line-height: 1.5; margin-top: 0.8em; margin-bottom: 0.8em; }
 
     /* Highlight for sentences matching the chat "Find sources" selection. Uses
        the same treatment as the source panel's snippet highlight, so a match

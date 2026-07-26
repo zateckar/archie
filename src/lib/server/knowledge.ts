@@ -2,6 +2,8 @@ import { db } from './db';
 import { extractKnowledge, checkConsistencyBatch, deriveTaxonomyPlacements, deriveTaxonomyFull, getEmbedding } from './llm';
 import { embedTopic, embedClaim, searchTopics, mapWithConcurrency } from './rag';
 import { normalizeTopicName, foldDiacritics } from './topic-normalize';
+import { markVectorIndexDirty } from './vector-index';
+import { inCategory } from './usage';
 import crypto from 'crypto';
 
 export { normalizeTopicName };
@@ -439,7 +441,15 @@ function documentStillExists(ctx: IngestContext): boolean {
     return true;
 }
 
-export async function processDocumentKnowledge(docId: number, chunks: { id: number; content: string }[], documentSummary?: string) {
+/**
+ * Builds the knowledge graph for one document's chunks. Metered under the
+ * 'knowledge' category — per-chunk extraction and consistency checking is the
+ * dominant LLM cost of ingestion, and keeping it apart from the 'documents'
+ * cleaning/chunking work is the whole point of tracking the two separately.
+ */
+export const processDocumentKnowledge = inCategory('knowledge', processDocumentKnowledgeImpl);
+
+async function processDocumentKnowledgeImpl(docId: number, chunks: { id: number; content: string }[], documentSummary?: string) {
     console.log(
         `Processing knowledge for document ${docId} (${chunks.length} chunks, concurrency ${CHUNK_CONCURRENCY})...`
     );
@@ -541,6 +551,67 @@ export async function processDocumentKnowledge(docId: number, chunks: { id: numb
             console.error('[Taxonomy] Incremental placement failed:', err);
         }
     }
+}
+
+/**
+ * Deletes topics no surviving document supports any more, and (by FK cascade)
+ * every graph edge that touched them.
+ *
+ * Why this is needed: a document change is a delete-then-reinsert of the
+ * `documents` row (see addDocument), so `chunks`, `knowledge_claims` and
+ * `document_topics` are cleaned by cascade — but `topics` has no document FK and
+ * `topic_relationships` has no document provenance at all, so both are
+ * append-only without this sweep. The result was that a topic asserted only by
+ * the *old* version of an edited document kept its row, its description and its
+ * embedding, and stayed retrievable: searchTopics filters only on
+ * `embedding IS NOT NULL`, so dead topics were still being injected into chat
+ * context, and edges asserted by since-edited text could never be retracted.
+ *
+ * A topic is orphaned when it has no `document_topics` link AND no claims of any
+ * status. Both conditions matter: the link alone would drop topics whose claims
+ * outlived their link row, and claims alone would keep topics whose claims were
+ * all rejected by an admin. Superseded claims count as support — retiring a
+ * claim is deliberately reversible (see the `restore` action), so a topic still
+ * holding retired history is not garbage.
+ *
+ * Safe to run while another document is mid-ingestion: extractAndUpsertTopics
+ * writes the topic row and its `document_topics` link in the same synchronous
+ * block with no await between them, and nothing else inserts topics — so "no
+ * link" can never mean "not linked yet". (A topic whose claims are still being
+ * extracted is already linked, which is what keeps it.)
+ *
+ * Children of a deleted parent get `parent_topic_id = NULL` (FK ON DELETE SET
+ * NULL) and are re-placed by the next incremental taxonomy pass, which targets
+ * exactly the parentless rows.
+ */
+export function sweepOrphanTopics(): { topics: number; relationships: number } {
+    const ORPHAN_PREDICATE = `
+        NOT EXISTS (SELECT 1 FROM document_topics dt WHERE dt.topic_id = t.id)
+        AND NOT EXISTS (SELECT 1 FROM knowledge_claims kc WHERE kc.topic_id = t.id)
+    `;
+
+    return db.transaction(() => {
+        // Count the edges first: after the DELETE they are gone via cascade, so
+        // there is nothing left to attribute the removal to.
+        const relationships = (db.prepare(`
+            SELECT COUNT(*) AS c FROM topic_relationships r
+            WHERE EXISTS (SELECT 1 FROM topics t WHERE t.id = r.source_topic_id AND ${ORPHAN_PREDICATE})
+               OR EXISTS (SELECT 1 FROM topics t WHERE t.id = r.target_topic_id AND ${ORPHAN_PREDICATE})
+        `).get() as { c: number }).c;
+
+        const result = db.prepare(`
+            DELETE FROM topics WHERE id IN (SELECT t.id FROM topics t WHERE ${ORPHAN_PREDICATE})
+        `).run();
+
+        const topics = result.changes;
+        if (topics > 0) {
+            // Deleted embeddings: the quantized index must not keep serving them.
+            markVectorIndexDirty('topics');
+            console.log(`[KnowledgeGC] Removed ${topics} orphaned topic(s) and ${relationships} stale relationship(s).`);
+        }
+
+        return { topics, relationships };
+    })();
 }
 
 /** Topic created during Phase A, awaiting its embedding in Phase A2. */
@@ -714,6 +785,28 @@ async function extractAndUpsertTopics(
 }
 
 /**
+ * Records that the document being ingested asserts `claimId`, whether or not
+ * this ingestion is the one that created the claim row.
+ *
+ * INSERT OR IGNORE because the same claim text legitimately recurs across chunks
+ * of one document: the first chunk records the assertion, later ones are no-ops
+ * (the (claim_id, doc_id) primary key), so the first chunk to state a fact keeps
+ * the lineage. A foreign-key failure means the document was deleted mid-ingest,
+ * which the surrounding code already handles by aborting — nothing to add here,
+ * so it stays a warning rather than a throw.
+ */
+function recordClaimAssertion(claimId: number, ctx: IngestContext, chunkId: number): void {
+    try {
+        db.prepare(`
+            INSERT OR IGNORE INTO claim_documents (claim_id, doc_id, chunk_id, doc_content_hash)
+            VALUES (?, ?, ?, ?)
+        `).run(claimId, ctx.docId, chunkId, ctx.docContentHash);
+    } catch (err) {
+        console.warn(`[Knowledge] Could not record assertion of claim ${claimId} by document ${ctx.docId}:`, err);
+    }
+}
+
+/**
  * Phase B for one chunk: relationships, then claims.
  *
  * Runs after every topic in the batch has been created *and* embedded, so
@@ -773,12 +866,22 @@ async function processRelationshipsAndClaims(
         const topicId = lookupTopicId(claim.topic, topicIds);
         if (!topicId) continue;
 
-        // Skip exact hash duplicates early
+        // Exact hash duplicate: the claim text already exists corpus-wide, so no
+        // second row is created (see idx_knowledge_claims_hash). Record that THIS
+        // document asserts it too, though — that record is what keeps the fact
+        // alive when the document currently credited with it is edited or
+        // deleted. Dropping the assertion silently, as this used to, is what made
+        // shared facts disappear with whichever document happened to be ingested
+        // first. Still no LLM cost here: alignment and consistency checks are
+        // skipped exactly as before.
         const claimHash = crypto.createHash('sha256').update(claim.claim).digest('hex');
         const existingExact = db
             .prepare('SELECT id FROM knowledge_claims WHERE claim_hash = ?')
-            .get(claimHash);
-        if (existingExact) continue;
+            .get(claimHash) as { id: number } | undefined;
+        if (existingExact) {
+            recordClaimAssertion(existingExact.id, ctx, chunk.id);
+            continue;
+        }
 
         candidates.push({ claim: claim.claim, topic: claim.topic, type: claim.type, topicId });
     }
@@ -895,6 +998,7 @@ async function processRelationshipsAndClaims(
 
                 if (!insertResult) continue;
                 stats.claims++;
+                recordClaimAssertion(insertResult.id, ctx, chunk.id);
 
                 // Retire the claim this one replaces. Only for an aligned
                 // `update` with a target the checker actually identified —
@@ -1008,7 +1112,9 @@ function logIngestSummary(
  * Incremental taxonomy placement: assigns parent_topic_id to topics that don't have one.
  * Called automatically after processDocumentKnowledge() completes.
  */
-export async function placeTaxonomyForNewTopics(): Promise<number> {
+export const placeTaxonomyForNewTopics = inCategory('knowledge', placeTaxonomyForNewTopicsImpl);
+
+async function placeTaxonomyForNewTopicsImpl(): Promise<number> {
     // Find orphan topics (no parent assigned)
     const orphans = db.prepare(
         'SELECT id, name, description, category FROM topics WHERE parent_topic_id IS NULL'
@@ -1058,7 +1164,9 @@ export async function placeTaxonomyForNewTopics(): Promise<number> {
  * Full taxonomy rebuild: LLM reviews ALL topics and produces an optimal hierarchy.
  * Triggered manually from admin UI or after git sync batch.
  */
-export async function rebuildTaxonomy(): Promise<{ total: number; updated: number }> {
+export const rebuildTaxonomy = inCategory('knowledge', rebuildTaxonomyImpl);
+
+async function rebuildTaxonomyImpl(): Promise<{ total: number; updated: number }> {
     const allTopics = db.prepare(`
         SELECT t.id, t.name, t.description, t.category,
                COUNT(kc.id) as claimCount

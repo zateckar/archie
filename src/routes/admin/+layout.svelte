@@ -7,6 +7,7 @@ import LayoutDashboard from '@lucide/svelte/icons/layout-dashboard';
 import ChevronLeft from '@lucide/svelte/icons/chevron-left';
 import LogOut from '@lucide/svelte/icons/log-out';
 import Network from '@lucide/svelte/icons/network';
+import Coins from '@lucide/svelte/icons/coins';
 
     let { children } = $props();
 
@@ -16,6 +17,7 @@ import Network from '@lucide/svelte/icons/network';
         { name: 'Git Repos', href: '/admin/repos', icon: GitBranch },
         { name: 'Users', href: '/admin/users', icon: Users },
         { name: 'Knowledge', href: '/admin/knowledge', icon: Network },
+        { name: 'Token usage', href: '/admin/usage', icon: Coins },
     ];
 </script>
 

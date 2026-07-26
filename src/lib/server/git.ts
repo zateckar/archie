@@ -3,9 +3,10 @@ import http from 'isomorphic-git/http/node';
 import fs from 'fs';
 import crypto from 'crypto';
 import path from 'path';
-import { db } from './db';
+import { db, reattributeSharedClaims } from './db';
+import { isIgnoredPath, CLEAN_FOLDER, LEGACY_CLEAN_FOLDER } from './wiki-ignore';
 import { addDocument } from './rag';
-import { rebuildTaxonomy } from './knowledge';
+import { rebuildTaxonomy, sweepOrphanTopics } from './knowledge';
 import { recomputeCommunities } from './communities';
 import { encrypt, decrypt } from './crypto-utils';
 import { clearWikiTreeCache } from './wiki';
@@ -129,6 +130,18 @@ export async function syncGitRepo(repoId: number) {
         }
     }
 
+    // The pull/clone above has already rewritten the working tree, so anything the
+    // wiki cached about the old file layout is wrong NOW — not at the end of this
+    // function. The clear used to happen only in the sync's last lines, behind the
+    // taxonomy rebuild and community recompute, i.e. minutes of LLM work: rename a
+    // folder to `!Clean` in the remote, sync, and the wiki went on listing the
+    // pre-rename tree for the whole of that window, which looks exactly like the
+    // ignore rule not working. The clear at the end stays — by then ingestion may
+    // have changed things again.
+    try {
+        clearWikiTreeCache(repoId);
+    } catch (_) {}
+
     let head: string;
     try {
         head = await git.resolveRef({ fs, dir, ref: 'HEAD' });
@@ -136,7 +149,7 @@ export async function syncGitRepo(repoId: number) {
         console.warn('Could not resolve HEAD, repo might be empty:', err);
         return;
     }
-    
+
     const hasNewRemoteChanges = head !== repo.last_commit;
 
     if (hasNewRemoteChanges) {
@@ -147,7 +160,21 @@ export async function syncGitRepo(repoId: number) {
         
         // Filter for supported files (e.g., .md, .txt)
         const supportedExtensions = process.env.SUPPORTED_EXTENSIONS ? process.env.SUPPORTED_EXTENSIONS.split(',') : ['.md', '.mdx'];
-        const docFiles = files.filter(f => supportedExtensions.includes(path.extname(f).toLowerCase()) && !f.startsWith('Clean/'));
+        // `!`-prefixed files and folders are excluded from ingestion (see
+        // wiki-ignore), which now covers the cleaned-copies folder itself;
+        // LEGACY_CLEAN_FOLDER stays excluded by name for repositories that still
+        // hold the unprefixed folder written by earlier versions.
+        //
+        // Note what this means for a file that WAS ingested and is now ignored
+        // (a rename to `!Clean/…`, say): it drops out of `docFiles`, so it stays
+        // in `existingPaths` below and the deletion sweep removes it from the
+        // corpus — which is the intended reading of "ignore", not just "stop
+        // updating".
+        const docFiles = files.filter(f =>
+            supportedExtensions.includes(path.extname(f).toLowerCase())
+            && !f.startsWith(LEGACY_CLEAN_FOLDER)
+            && !isIgnoredPath(f)
+        );
 
         // Get existing documents for this repo
         const existingDocs = db.prepare('SELECT id, path, content_hash FROM documents WHERE repo_id = ?').all(repoId) as { id: number, path: string, content_hash: string }[];
@@ -202,10 +229,18 @@ export async function syncGitRepo(repoId: number) {
         }
 
         // Delete documents that are no longer in the repo
+        let removedDocs = 0;
         for (const [filePath, docId] of existingPaths) {
             console.log('Deleting removed document:', filePath);
+            // Facts still asserted by files that remain in the repo are handed
+            // over before the cascade takes them (see reattributeSharedClaims).
+            reattributeSharedClaims(docId);
             db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
+            removedDocs++;
         }
+        // Cascade cleans the removed documents' chunks, claims and topic links,
+        // but not the topics or graph edges they were the only support for.
+        if (removedDocs > 0) sweepOrphanTopics();
 
         if (failedDocs.length > 0) {
             console.warn(
@@ -214,7 +249,7 @@ export async function syncGitRepo(repoId: number) {
             );
         }
     } else {
-        console.log('No new remote changes in repo', url, '- checking for previously staged Clean/ files...');
+        console.log('No new remote changes in repo', url, `- checking for previously staged ${CLEAN_FOLDER} files...`);
     }
 
     // Commit and push all cleaned documents in one batch
@@ -227,14 +262,18 @@ export async function syncGitRepo(repoId: number) {
             // Fallback to 'main' if branch detection fails
         }
 
-        // Use statusMatrix to check for any staged or modified files including Clean/ directory
+        // Use statusMatrix to check for any staged or modified files including the
+        // cleaned-copies directory
         const statusMatrix = await git.statusMatrix({ fs, dir });
-        
-        // Check if Clean/ directory has any files that need committing
+
+        // Check whether the cleaned-copies directory has files that need
+        // committing. Both names are watched: new copies land in CLEAN_FOLDER,
+        // while a repo upgraded mid-flight can still have copies staged under the
+        // legacy folder that would otherwise never get committed.
         const cleanFilesStaged = statusMatrix.some(([filepath, , workdirStatus, stageStatus]) => {
             // stageStatus === 2 means the file is staged (added by git.add)
-            // We specifically want to check the Clean/ directory files
-            return filepath.startsWith('Clean/') && (stageStatus === 2 || stageStatus === 3);
+            return (filepath.startsWith(CLEAN_FOLDER) || filepath.startsWith(LEGACY_CLEAN_FOLDER))
+                && (stageStatus === 2 || stageStatus === 3);
         });
 
         // Also check for any other staged changes
@@ -317,9 +356,11 @@ async function addDocumentFromGit(repoId: number, filePath: string, filename: st
     // The sync tail runs a single unsuppressed recomputeCommunities() instead.
     const { cleanedContent } = await addDocument(filename, content, { repoId, path: filePath, batch: true });
 
-    // Save the cleaned & restructured version to the Clean/ folder in the local repo clone
+    // Save the cleaned & restructured version to the cleaned-copies folder in the
+    // local repo clone (see CLEAN_FOLDER — "!" prefixed, so it is invisible to the
+    // wiki and never re-ingested).
     try {
-        const cleanRelPath = 'Clean/' + filePath;
+        const cleanRelPath = CLEAN_FOLDER + filePath;
         const cleanFullPath = path.join(repoDir, cleanRelPath);
         const cleanDir = path.dirname(cleanFullPath);
         if (!fs.existsSync(cleanDir)) {

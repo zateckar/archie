@@ -17,6 +17,7 @@ import crypto from 'crypto';
 import { summarizeCommunity, getEmbedding } from './llm';
 import { assertStorableEmbedding } from './embedding-dimension';
 import { markVectorIndexDirty } from './vector-index';
+import { inCategory } from './usage';
 
 // ── Edge weight map for relationship types ──────────────────────────
 // Strong structural links (is_part_of, is_a) get higher weight;
@@ -376,7 +377,9 @@ export interface CommunityResult {
  *    to assign to the nearest community, or label as noise (-1)
  * 4. Store in topics.community_id
  */
-export async function recomputeCommunities(
+export const recomputeCommunities = inCategory('knowledge', recomputeCommunitiesImpl);
+
+async function recomputeCommunitiesImpl(
     options: { refreshReports?: boolean } = {}
 ): Promise<{
     method: 'louvain' | 'embeddings' | 'none';
@@ -662,7 +665,9 @@ async function embedCommunityReport(reportId: number, title: string, summary: st
  * community without a report rather than aborting the refresh, and the next run
  * retries it (its hash is still absent from the table).
  */
-export async function refreshCommunityReports(): Promise<{
+export const refreshCommunityReports = inCategory('knowledge', refreshCommunityReportsImpl);
+
+async function refreshCommunityReportsImpl(): Promise<{
     generated: number;
     reused: number;
     skipped: number;

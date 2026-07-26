@@ -388,7 +388,7 @@ export async function cleanDocument(text: string): Promise<CleanResult> {
         prevTailContext?: string
     ): Promise<{ cleaned: string; removals: CleanRemoval[] } | null> => {
         try {
-            const result = await withRetry(() => providers.generateContent(buildPrompt(chunk, isPartial, prevTailContext), { model: TEXT_MODEL }, CLEAN_JSON_CONFIG));
+            const result = await withRetry(() => providers.generateContent(buildPrompt(chunk, isPartial, prevTailContext), { model: TEXT_MODEL }, CLEAN_JSON_CONFIG, { op: 'clean_document' }));
             const parsed = tryParseJSON<CleanChunkResponse>(result.response.text());
             if (parsed === undefined || typeof parsed.cleaned !== 'string') return null;
             const removals = Array.isArray(parsed.removals)
@@ -556,7 +556,7 @@ export async function summarizeDocument(text: string, filename: string): Promise
     // Summaries benefit from whole-document context and require large, slow
     // generation that exceeds the LiteLLM gateway's time cap; route them to
     // Gemini directly (whole-doc, 80K sections) for best quality.
-    const SUMMARY_GEN_OPTS = { preferGemini: true } as const;
+    const SUMMARY_GEN_OPTS = { preferGemini: true, op: 'summarize_document' } as const;
 
     if (text.length <= SUMMARY_SECTION_MAX_CHARS) {
         try {
@@ -608,7 +608,7 @@ export async function summarizeDocument(text: string, filename: string): Promise
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(mergePrompt, { model: TEXT_MODEL }, SUMMARY_CONFIG, SUMMARY_GEN_OPTS));
+        const result = await withRetry(() => providers.generateContent(mergePrompt, { model: TEXT_MODEL }, SUMMARY_CONFIG, { ...SUMMARY_GEN_OPTS, op: 'summarize_document_merge' }));
         const merged = result.response.text().trim();
         return merged || sectionSummaries.join('\n\n');
     } catch (e) {
@@ -623,7 +623,16 @@ async function embedUncached(text: string, taskType: EmbeddingTaskType, title?: 
     // Primary: LiteLLM embeddings; fallback: Gemini EMBEDDING_MODEL. The
     // taskType/title retrieval hints are Gemini-specific and only applied on the
     // fallback path (see providers.embedContent).
-    const result = await withRetry(() => providers.embedContent(text, { model: EMBEDDING_MODEL }, taskType, title));
+    // Query vs. document embeddings are separated in the usage report because
+    // they belong to different budgets — one is per chat turn, the other is per
+    // ingested chunk and dominates document-processing volume.
+    const result = await withRetry(() => providers.embedContent(
+        text,
+        { model: EMBEDDING_MODEL },
+        taskType,
+        title,
+        { op: taskType === 'RETRIEVAL_QUERY' ? 'embed_query' : 'embed_document' }
+    ));
     return result.embedding.values;
 }
 
@@ -863,7 +872,7 @@ ${DUAL_LEVEL_KEYWORD_RULES}
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
+        const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'analyze_query' }));
         const text = result.response.text();
         return normalizeQueryAnalysis(parseJSON<QueryAnalysis>(text, {
             needsClarification: false,
@@ -953,7 +962,7 @@ ${DUAL_LEVEL_KEYWORD_RULES}
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
+        const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'analyze_condense_query' }));
         const text = result.response.text();
         return normalizeQueryAnalysis(parseJSON<QueryAnalysis>(text, {
             needsClarification: false,
@@ -987,7 +996,7 @@ export async function condenseQuery(history: { role: string, content: string }[]
             Standalone Search Query:
         `;
 
-        const result = await withRetry(() => providers.generateContent(condensePrompt, { model: TEXT_MODEL }, { temperature: 0.1 }));
+        const result = await withRetry(() => providers.generateContent(condensePrompt, { model: TEXT_MODEL }, { temperature: 0.1 }, { op: 'condense_query' }));
         const text = result.response.text().trim();
         return text || prompt;
     } catch (e) {
@@ -1105,7 +1114,7 @@ OUTPUT FORMAT:
 Write the briefing as a knowledge document. Use ## headers for major sub-topics only if the briefing covers multiple distinct areas. Otherwise, write flowing prose paragraphs.`;
 
     try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, SYNTHESIS_CONFIG));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, SYNTHESIS_CONFIG, { op: 'synthesize_context' }));
         const synthesized = result.response.text().trim();
         // Safety: if synthesis is suspiciously short vs. input, fall back
         if (synthesized.length < 50 && knowledgeContext.length > 500) {
@@ -1138,7 +1147,7 @@ ${recentHistory.map(m => `${m.role}: ${m.content}`).join('\n\n')}
 Write a concise summary (100-200 words) in factual prose. Do not include pleasantries or meta-commentary.`;
 
     try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, { temperature: 0.2 }));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, { temperature: 0.2 }, { op: 'conversation_briefing' }));
         return result.response.text().trim();
     } catch (e) {
         console.error('[ConversationBriefing] Failed:', e);
@@ -1151,13 +1160,13 @@ export async function chatStream(prompt: string, context: string, history: { rol
     // Gemini fallback) — matching what the chat endpoint's `for await` loop and
     // its `chunk.text()` call already expect.
     return withRetry(() =>
-        providers.startChatStream(prompt, buildSystemPrompt(context), history, { model: TEXT_MODEL }, CHAT_CONFIG)
+        providers.startChatStream(prompt, buildSystemPrompt(context), history, { model: TEXT_MODEL }, CHAT_CONFIG, { op: 'chat_answer' })
     );
 }
 
 export async function chat(prompt: string, context: string, history: { role: string, content: string }[] = []) {
     const stream = await withRetry(() =>
-        providers.startChatStream(prompt, buildSystemPrompt(context), history, { model: TEXT_MODEL }, CHAT_CONFIG)
+        providers.startChatStream(prompt, buildSystemPrompt(context), history, { model: TEXT_MODEL }, CHAT_CONFIG, { op: 'chat_answer' })
     );
     let response = '';
     for await (const chunk of stream) {
@@ -1254,7 +1263,7 @@ export async function semanticChunk(text: string): Promise<string[]> {
         ${text}
     `;
     try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: CHUNK_MODEL }, DETERMINISTIC_JSON_CONFIG));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: CHUNK_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'semantic_chunk' }));
         const responseText = result.response.text();
         const parsed = parseJSON<unknown>(responseText, {});
         const rawBreaks: unknown = Array.isArray(parsed)
@@ -1316,7 +1325,7 @@ export async function assessRelevance(query: string, documents: { content: strin
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: RERANK_MODEL }, DETERMINISTIC_JSON_CONFIG));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: RERANK_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'assess_relevance' }));
         const text = result.response.text();
         return parseJSON<RelevanceAssessment>(text, {
             isRelevant: true,
@@ -1373,7 +1382,7 @@ export async function evaluateContext(
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: RERANK_MODEL }, DETERMINISTIC_JSON_CONFIG));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: RERANK_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'evaluate_context' }));
         const text = result.response.text();
         return parseJSON(text, { sufficient: true, missingAspects: [], refinedQueries: [] });
     } catch (e) {
@@ -1400,7 +1409,11 @@ export async function rerank(query: string, documents: { content: string }[]): P
     // fall back to the LLM-as-reranker prompt below.
     try {
         const nativeRanked = await withRetry(() =>
-            providers.rerankDocuments(query, documents.map(d => d.content.substring(0, RERANK_CONTENT_PREVIEW_CHARS)))
+            providers.rerankDocuments(
+                query,
+                documents.map(d => d.content.substring(0, RERANK_CONTENT_PREVIEW_CHARS)),
+                { op: 'rerank_native' }
+            )
         );
         // Normalised for the same reasons as the LLM path below — a gateway that
         // honours `top_n` partially, or repeats an index, would otherwise silently
@@ -1425,7 +1438,7 @@ export async function rerank(query: string, documents: { content: string }[]): P
 
     const identity = documents.map((_, i) => i);
     try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: RERANK_MODEL }, RERANK_CONFIG));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: RERANK_MODEL }, RERANK_CONFIG, { op: 'rerank_llm' }));
         const text = result.response.text();
         const parsed = parseJSON<unknown>(text, identity);
         // Coerce to an array of indices. OpenAI-compatible gateways in JSON mode
@@ -1647,7 +1660,7 @@ export async function extractKnowledge(text: string, existingTopicNames: string[
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, EXTRACTION_CONFIG));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, EXTRACTION_CONFIG, { op: 'extract_knowledge' }));
         const responseText = result.response.text();
         const parsed = tryParseJSON<ExtractedKnowledge>(responseText);
         if (parsed === undefined) {
@@ -1718,7 +1731,7 @@ Include an entry for every new topic listed above (and ONLY those). Do not inclu
         `;
 
         try {
-            const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
+            const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'taxonomy_placement' }));
             const responseText = result.response.text();
             const batchPlacements = parseJSON<{ topicId: number; parentId: number | null }[]>(responseText, []);
             results.push(...batchPlacements);
@@ -1785,7 +1798,7 @@ Include an entry for EVERY topic in this batch. Do not include markdown formatti
         `;
 
         try {
-            const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
+            const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'taxonomy_rebuild' }));
             const responseText = result.response.text();
             const batchResults = parseJSON<{ topicId: number; parentId: number | null }[]>(responseText, []);
             results.push(...batchResults);
@@ -1883,7 +1896,7 @@ export async function summarizeCommunity(
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'community_report' }));
         const parsed = parseJSON<Partial<CommunityReport>>(result.response.text(), {});
         const title = parsed.title?.trim();
         const summary = parsed.summary?.trim();
@@ -1923,7 +1936,7 @@ export async function checkConsistency(newClaim: string, existingClaims: string[
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'consistency_check' }));
         const responseText = result.response.text();
         return parseJSON<{ status: 'unique' | 'duplicate' | 'conflict' | 'update', reason?: string }>(responseText, { status: 'unique' });
     } catch (e) {
@@ -1994,7 +2007,7 @@ export async function checkConsistencyBatch(
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG));
+        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'consistency_check_batch' }));
         const responseText = result.response.text();
         const parsed = parseJSON<ConsistencyResult[]>(
             responseText,

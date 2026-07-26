@@ -9,6 +9,7 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
     import { renderMermaidBlocksIn } from '$lib/utils/mermaidRender';
     import { theme } from '$lib/stores/theme';
     import Search from '@lucide/svelte/icons/search';
+    import ExternalLink from '@lucide/svelte/icons/external-link';
     import SourceResultsPanel from '$lib/components/SourceResultsPanel.svelte';
 
     type Message = { role: 'user' | 'assistant', content: string, sources?: any[] };
@@ -30,6 +31,50 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
             ? sanitizeHtml(marked.parse(msg.content.replace(/\$\\rightarrow\$/g, '→')) as string)
             : msg.content
     );
+
+    /**
+     * Wiki URL for a cited source, or null when there is no page to open.
+     *
+     * Both halves are required: `repo_id` identifies the repository the wiki route
+     * is scoped to, and `path` is the file within it. A document uploaded directly
+     * (rather than synced from a repository) has no repo_id and no wiki page, so
+     * its chip stays plain text instead of becoming a link to nowhere.
+     *
+     * Segments are encoded individually so the separators survive — this corpus
+     * has filenames with spaces ("ID.FI.005 IT Product shutdown management.md"),
+     * which `encodeURIComponent` on the whole path would turn into %2F-mangled
+     * nonsense. Same construction as SourceResultsPanel's deep link.
+     */
+    function wikiHref(source: any): string | null {
+        const repoId = source?.repo_id;
+        const path = source?.path;
+        if (repoId == null || typeof path !== 'string' || path === '') return null;
+        return `/wiki/${repoId}/${path.split('/').map(encodeURIComponent).join('/')}`;
+    }
+
+    /**
+     * The source chips to show under an answer: one per document, in the order the
+     * retriever ranked them.
+     *
+     * Deduplicated by path — a live answer streams one source entry per retrieved
+     * *chunk*, so two passages from the same document used to render the same file
+     * twice (the copy saved to history was already deduplicated, which made an
+     * answer's chips change when you reopened the conversation). An entry carrying
+     * a wiki link wins over one that doesn't, since the same document can arrive
+     * both ways when a second retrieval pass merges in extra chunks.
+     */
+    let sourceLinks = $derived.by(() => {
+        const byKey = new Map<string, { label: string; href: string | null }>();
+        for (const source of msg.sources ?? []) {
+            const label = source?.path || source?.filename;
+            if (typeof label !== 'string' || label === '') continue;
+            const href = wikiHref(source);
+            const existing = byKey.get(label);
+            if (existing && (existing.href || !href)) continue;
+            byKey.set(label, { label, href });
+        }
+        return Array.from(byKey.values());
+    });
 
     // Render mermaid blocks in the assistant message.
     // Suppress during streaming to avoid render-thrashing on partial blocks;
@@ -172,7 +217,9 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
     class="group flex {msg.role === 'user' ? 'justify-end' : 'justify-start'}"
     in:fly={{ y: 8, duration: 200 }}
 >
-    <div class="flex max-w-[80ch] gap-3 {msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'}">
+    <!-- Assistant answers fill the chat column (tables, code and citations need
+         the room); user messages stay narrow so they still read as a bubble. -->
+    <div class="flex gap-3 {msg.role === 'user' ? 'flex-row-reverse max-w-[70ch]' : 'flex-row w-full'}">
         <div class="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0
             {msg.role === 'user' ? 'bg-accent-solid text-on-accent' : 'bg-surface border border-line text-accent'}">
             {#if msg.role === 'user'}
@@ -181,7 +228,7 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
                 <Bot class="w-4 h-4" />
             {/if}
         </div>
-        <div class="min-w-0 space-y-2">
+        <div class="min-w-0 space-y-2 {msg.role === 'assistant' ? 'flex-1' : ''}">
             <div class="px-4 py-3 rounded-2xl text-sm leading-relaxed
                 {msg.role === 'user'
                     ? 'bg-accent-solid text-on-accent-body rounded-tr-sm whitespace-pre-wrap'
@@ -201,13 +248,27 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
                     {msg.content}
                 {/if}
             </div>
-            {#if msg.sources && msg.sources.length > 0}
+            {#if sourceLinks.length > 0}
                 <div class="flex flex-wrap items-center gap-1.5">
                     <span class="eyebrow">Sources</span>
-                    {#each msg.sources as source}
-                        <span class="chip font-mono text-[11px]" title={source.path || source.filename}>
-                            {source.path || source.filename}
-                        </span>
+                    {#each sourceLinks as source (source.label)}
+                        {#if source.href}
+                            <a
+                                href={source.href}
+                                class="chip chip-link font-mono text-[11px]"
+                                title={`Open ${source.label} in the wiki`}
+                            >
+                                {source.label}
+                                <ExternalLink class="w-3 h-3 flex-shrink-0 opacity-60" />
+                            </a>
+                        {:else}
+                            <span
+                                class="chip font-mono text-[11px]"
+                                title={`${source.label} — no wiki page for this document`}
+                            >
+                                {source.label}
+                            </span>
+                        {/if}
                     {/each}
                 </div>
             {/if}

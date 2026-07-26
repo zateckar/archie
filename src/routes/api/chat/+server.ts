@@ -3,6 +3,8 @@ import { searchChunks, buildKnowledgeContext, type QueryKeywords } from '$lib/se
 import { chatStream, condenseQuery, analyzeAndCondenseQuery, evaluateContext, synthesizeContext, buildConversationBriefing } from '$lib/server/llm';
 import { db } from '$lib/server/db';
 import { checkRateLimit, CHAT_RATE_LIMIT } from '$lib/server/rate-limit';
+import { withUsageCategory } from '$lib/server/usage';
+import type { RequestEvent, RequestHandler } from './$types';
 
 /** A turn as the LLM helpers expect it. Anything else in `history` is dropped. */
 function sanitizeHistory(raw: unknown): { role: string; content: string }[] {
@@ -13,7 +15,21 @@ function sanitizeHistory(raw: unknown): { role: string; content: string }[] {
         .map(m => ({ role: m.role as string, content: m.content as string }));
 }
 
-export async function POST({ request, locals }) {
+/**
+ * Charges everything this endpoint triggers to the 'chat' token budget: query
+ * analysis, the retrieval embeddings, context evaluation, synthesis, the
+ * conversation briefing, and the streamed answer itself.
+ *
+ * The wrapper sits around the whole handler rather than around individual LLM
+ * calls because the answer's own token cost is not knowable until after the
+ * handler has returned — it arrives in the stream's final frame. The
+ * `ReadableStream` below is constructed inside this context, so its `start`
+ * callback and the provider generator it drains both inherit the category and the
+ * streamed answer still lands in the right bucket.
+ */
+export const POST: RequestHandler = async (event) => withUsageCategory('chat', () => handleChat(event));
+
+async function handleChat({ request, locals }: RequestEvent) {
     const user = locals.user;
     if (!user) {
         return json({ error: 'Unauthorized' }, { status: 401 });
@@ -231,7 +247,10 @@ export async function POST({ request, locals }) {
                 if (fullResponse) {
                     const seen = new Set<string>();
                     const sourceIds = relevantChunks
-                        .map((c: any) => ({ filename: c.filename, path: c.path ?? null }))
+                        // repo_id is stored too, so reopening an old conversation
+                        // can still link each cited source to its wiki page
+                        // without re-deriving it from the path.
+                        .map((c: any) => ({ filename: c.filename, path: c.path ?? null, repo_id: c.repo_id ?? null }))
                         .filter((s: any) => {
                             const key = s.path || s.filename;
                             if (!key || seen.has(key)) return false;

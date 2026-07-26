@@ -7,6 +7,7 @@ import { db } from './db';
 import { decrypt } from './crypto-utils';
 import { diffLines } from 'diff';
 import { addDocument } from './rag';
+import { isIgnoredName, isIgnoredPath, CLEAN_FOLDER } from './wiki-ignore';
 
 export interface FileTreeItem {
     name: string;
@@ -64,7 +65,24 @@ export function getRepo(repoId: number) {
     return db.prepare('SELECT * FROM git_repos WHERE id = ?').get(repoId) as { id: number; url: string; pat: string; local_path: string; last_commit: string | null } | undefined;
 }
 
-const treeCache = new Map<number, FileTreeItem[]>();
+/**
+ * Cached directory listings, with the time each was built.
+ *
+ * The cache is invalidated explicitly by every in-app write (save, revert, sync),
+ * but the working tree can also change underneath it — an external `git pull`, a
+ * file dropped in by hand, or an in-app sync whose invalidation is still minutes
+ * away behind the LLM tail of ingestion. That last case was a real symptom: after
+ * renaming a folder to `!Clean` in the remote and syncing, the wiki kept listing
+ * the pre-rename tree for as long as the taxonomy rebuild took, which reads as
+ * "the ignore rule doesn't work".
+ *
+ * So the entries also expire. Building a tree is a `readdir` walk over a few dozen
+ * markdown files — a couple of milliseconds — so a short TTL costs nothing and
+ * bounds how wrong the wiki can be, whatever changed the files.
+ */
+const TREE_CACHE_TTL_MS = 15_000;
+
+const treeCache = new Map<number, { items: FileTreeItem[]; builtAt: number }>();
 
 export function clearWikiTreeCache(repoId?: number) {
     if (repoId !== undefined) {
@@ -76,8 +94,8 @@ export function clearWikiTreeCache(repoId?: number) {
 
 export function getFileTree(repoId: number): FileTreeItem[] {
     const cached = treeCache.get(repoId);
-    if (cached) {
-        return cached;
+    if (cached && Date.now() - cached.builtAt < TREE_CACHE_TTL_MS) {
+        return cached.items;
     }
     const repo = getRepo(repoId);
     if (!repo) return [];
@@ -91,6 +109,8 @@ export function getFileTree(repoId: number): FileTreeItem[] {
         const entries = fs.readdirSync(dir, { withFileTypes: true });
         for (const entry of entries) {
             if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+            // "!"-prefixed entries are hidden from the wiki entirely (see wiki-ignore).
+            if (isIgnoredName(entry.name)) continue;
 
             if (entry.isDirectory()) {
                 const children = getDirTree(path.join(dir, entry.name), entry.name);
@@ -120,7 +140,7 @@ export function getFileTree(repoId: number): FileTreeItem[] {
         return a.name.localeCompare(b.name);
     });
 
-    treeCache.set(repoId, items);
+    treeCache.set(repoId, { items, builtAt: Date.now() });
     return items;
 }
 
@@ -131,6 +151,9 @@ function getDirTree(dirPath: string, relativePath: string): FileTreeItem[] {
         const entries = fs.readdirSync(dirPath, { withFileTypes: true });
         for (const entry of entries) {
             if (entry.name.startsWith('.')) continue;
+            // Hiding the entry here also hides everything beneath it — the
+            // recursion never descends into an ignored directory.
+            if (isIgnoredName(entry.name)) continue;
 
             const fullPath = path.join(dirPath, entry.name);
             const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
@@ -170,6 +193,11 @@ export function readWikiFile(repoId: number, filePath: string): string | null {
     const repo = getRepo(repoId);
     if (!repo) return null;
 
+    // An ignored path is absent as far as the wiki is concerned. Filtering the
+    // tree alone would leave the content one hand-written URL away, so the read
+    // itself refuses — same answer a genuinely missing file gets (404).
+    if (isIgnoredPath(filePath)) return null;
+
     const resolvedPath = resolveRepoPath(repo.local_path, filePath);
     if (!resolvedPath) return null;
 
@@ -181,6 +209,9 @@ export function readWikiFile(repoId: number, filePath: string): string | null {
 export async function readWikiFileAtCommit(repoId: number, filePath: string, oid: string): Promise<string | null> {
     const repo = getRepo(repoId);
     if (!repo) return null;
+    // Hidden now means hidden in history too — otherwise the current content of
+    // an ignored file is readable by asking for it at HEAD.
+    if (isIgnoredPath(filePath)) return null;
 
     try {
         const readResult = await git.readBlob({
@@ -514,6 +545,13 @@ export async function saveWikiFile(repoId: number, filePath: string, content: st
     const repo = getRepo(repoId);
     if (!repo) throw new Error('Repo not found');
 
+    // Writing through the wiki would commit, push and ingest — none of which
+    // should happen for a path the wiki does not acknowledge. This also stops the
+    // editor creating a file it would immediately be unable to open.
+    if (isIgnoredPath(filePath)) {
+        throw new Error(`Path is ignored (a "!" prefix hides it from the wiki): ${filePath}`);
+    }
+
     const normalizedFilePath = filePath.replace(/\\/g, '/');
     const resolvedPath = resolveRepoPath(repo.local_path, normalizedFilePath);
     if (!resolvedPath) throw new Error('Invalid path');
@@ -600,11 +638,11 @@ export async function saveWikiFile(repoId: number, filePath: string, content: st
     clearWikiTreeCache(repoId);
 
     // Asynchronously call addDocument to ingest the new/updated file content into the RAG database.
-    // Also stage the cleaned file version generated by addDocument in the 'Clean/' folder.
+    // Also stage the cleaned file version generated by addDocument in the cleaned-copies folder.
     addDocument(path.basename(normalizedFilePath), content, { repoId, path: normalizedFilePath })
         .then(({ cleanedContent }) => {
             try {
-                const cleanRelPath = 'Clean/' + normalizedFilePath;
+                const cleanRelPath = CLEAN_FOLDER + normalizedFilePath;
                 const cleanFullPath = path.join(repo.local_path, cleanRelPath);
                 const cleanDir = path.dirname(cleanFullPath);
                 if (!fs.existsSync(cleanDir)) {
@@ -633,6 +671,9 @@ export async function createWikiFile(repoId: number, filePath: string, content: 
 export async function getFileHistory(repoId: number, filePath: string, maxCount: number = 50): Promise<FileHistoryItem[]> {
     const repo = getRepo(repoId);
     if (!repo) return [];
+    // No history for a file the wiki does not serve — commit messages and author
+    // names are content too.
+    if (isIgnoredPath(filePath)) return [];
 
     // Check if HEAD exists before trying to get history
     try {
@@ -664,6 +705,12 @@ export async function getFileHistory(repoId: number, filePath: string, maxCount:
 }
 
 export async function revertToCommit(repoId: number, filePath: string, oid: string): Promise<void> {
+    // Checked explicitly rather than relying on the read below failing, so the
+    // caller gets the real reason instead of "could not read file at commit".
+    if (isIgnoredPath(filePath)) {
+        throw new Error(`Path is ignored (a "!" prefix hides it from the wiki): ${filePath}`);
+    }
+
     const normalizedFilePath = filePath.replace(/\\/g, '/');
     const oldContent = await readWikiFileAtCommit(repoId, normalizedFilePath, oid);
     if (oldContent === null) throw new Error('Could not read file at specified commit');
@@ -752,11 +799,11 @@ export async function revertToCommit(repoId: number, filePath: string, oid: stri
     clearWikiTreeCache(repoId);
 
     // Asynchronously call addDocument to ingest the reverted content into the RAG database,
-    // and stage the cleaned file version in the 'Clean/' folder.
+    // and stage the cleaned file version in the cleaned-copies folder.
     addDocument(path.basename(normalizedFilePath), oldContent, { repoId, path: normalizedFilePath })
         .then(({ cleanedContent }) => {
             try {
-                const cleanRelPath = 'Clean/' + normalizedFilePath;
+                const cleanRelPath = CLEAN_FOLDER + normalizedFilePath;
                 const cleanFullPath = path.join(repo.local_path, cleanRelPath);
                 const cleanDir = path.dirname(cleanFullPath);
                 if (!fs.existsSync(cleanDir)) {

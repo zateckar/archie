@@ -1,5 +1,5 @@
-import { db, recordCleanLog } from './db';
-import { processDocumentKnowledge } from './knowledge';
+import { db, recordCleanLog, reattributeSharedClaims } from './db';
+import { processDocumentKnowledge, sweepOrphanTopics } from './knowledge';
 import {
     recomputeCommunities,
     getCommunityReportTopics,
@@ -11,6 +11,7 @@ import { getEmbedding, rerank, semanticChunk, cleanDocument, summarizeDocument, 
 import { buildKeywordProbe, mergeByIdKeepingBestScore } from './retrieval-probe';
 import { buildFtsMatchQuery, tokenizeForFts } from './fts-query';
 import { foldDiacritics } from './topic-normalize';
+import { isIgnoredPath } from './wiki-ignore';
 import {
     storedDimension,
     distinctDimensions,
@@ -24,6 +25,7 @@ import {
     markAllVectorIndexesDirty,
     warmVectorIndexes
 } from './vector-index';
+import { inCategory } from './usage';
 
 /**
  * Escapes the LIKE metacharacters `%` and `_` (and the escape character itself)
@@ -127,7 +129,16 @@ const EMBEDDING_DIMENSION = Number(process.env.EMBEDDING_DIMENSION) || 768;
 // imports communities.ts, so the reverse direction would be a cycle).
 const detectStoredDimension = storedDimension;
 
-export async function addDocument(
+/**
+ * Ingests a document. Metered under the 'documents' token-usage category, so its
+ * cleaning, summarization, semantic-chunking and chunk-embedding passes are
+ * charged there. The `processDocumentKnowledge` call inside re-enters as
+ * 'knowledge' — which is precisely what separates "preparing this document" from
+ * "building the graph out of it" in the usage report.
+ */
+export const addDocument = inCategory('documents', addDocumentImpl);
+
+async function addDocumentImpl(
     filename: string,
     content: string,
     /**
@@ -141,6 +152,56 @@ export async function addDocument(
     metadata: { repoId?: number, path?: string, batch?: boolean } = {}
 ) {
     const contentHash = crypto.createHash('sha256').update(content).digest('hex');
+
+    // ── Phase 0b: honour the "!" ignore convention ────────────────────────────
+    // Enforced here as well as at each caller because this is the single door
+    // into the corpus: a `!`-prefixed path cannot be ingested by any route, now
+    // or later. Anything already indexed under that path is removed, so renaming
+    // a folder to `!Clean` takes its content out of retrieval rather than
+    // freezing a stale copy in the index.
+    if (metadata.path && isIgnoredPath(metadata.path)) {
+        const existing = metadata.repoId
+            ? db.prepare('SELECT id FROM documents WHERE repo_id = ? AND path = ?')
+                .get(metadata.repoId, metadata.path) as { id: number } | undefined
+            : undefined;
+
+        if (existing) {
+            reattributeSharedClaims(existing.id);
+            db.prepare('DELETE FROM documents WHERE id = ?').run(existing.id);
+            sweepOrphanTopics();
+            console.log(`[DocPreprocess] "${metadata.path}" is ignored ("!" prefix) — removed its previously indexed copy.`);
+        } else {
+            console.log(`[DocPreprocess] "${metadata.path}" is ignored ("!" prefix) — skipping ingestion.`);
+        }
+
+        return { docId: existing?.id ?? 0, cleanedContent: content };
+    }
+
+    // ── Phase 0a: skip work that would change nothing ─────────────────────────
+    // A wiki save re-ingests unconditionally, so saving a file whose bytes did
+    // not change (a no-op edit, or a save of the same text from two tabs) paid a
+    // full clean → summarize → chunk → embed → extract cycle AND churned every
+    // claim row for that document, because the path below deletes the document
+    // and rebuilds its knowledge from scratch. Git sync has always hash-gated
+    // this (see syncRepo); doing it here covers wiki save, create and revert too.
+    //
+    // Requires chunks to exist: a document row whose ingestion failed part-way
+    // has the right hash but nothing indexed, and must not be skipped.
+    if (metadata.repoId && metadata.path) {
+        const unchanged = db.prepare(`
+            SELECT d.id, d.content FROM documents d
+            WHERE d.repo_id = ? AND d.path = ? AND d.content_hash = ?
+              AND EXISTS (SELECT 1 FROM chunks c WHERE c.doc_id = d.id)
+        `).get(metadata.repoId, metadata.path, contentHash) as { id: number; content: string } | undefined;
+
+        if (unchanged) {
+            console.log(`[DocPreprocess] "${filename}": content unchanged (hash match) — skipping re-ingestion.`);
+            // `documents.content` holds the cleaned text (see the INSERT below),
+            // which is exactly what the caller would have received from a real
+            // ingestion — so the cleaned-copy staging in saveWikiFile still works.
+            return { docId: unchanged.id, cleanedContent: unchanged.content };
+        }
+    }
 
     // ── Phase 0: Document preprocessing ──────────────────────────────────────
     // Clean the document to remove noise, then generate a comprehensive summary.
@@ -194,6 +255,14 @@ export async function addDocument(
     const { docId, chunkRecords } = db.transaction(() => {
         // Explicitly delete to avoid unique constraint issues with partial indexes
         if (metadata.repoId && metadata.path) {
+            // Facts this document shares with others must not go down with it:
+            // hand them to a document that still asserts them BEFORE the cascade
+            // fires. Anything this document alone supported is deleted here and
+            // re-extracted below from the new content, which is the point.
+            const previous = db.prepare('SELECT id FROM documents WHERE repo_id = ? AND path = ?')
+                .get(metadata.repoId, metadata.path) as { id: number } | undefined;
+            if (previous) reattributeSharedClaims(previous.id);
+
             db.prepare('DELETE FROM documents WHERE repo_id = ? AND path = ?').run(metadata.repoId, metadata.path);
         }
 
@@ -247,6 +316,13 @@ export async function addDocument(
 
     // ── Phase 3: async knowledge processing (outside any transaction) ─────────
     await processDocumentKnowledge(Number(docId), chunkRecords, summary);
+
+    // Re-ingestion replaced this document's claims and topic links (cascade on
+    // the DELETE above), but topics and graph edges have no document FK, so
+    // anything the previous version of this document solely supported is now
+    // dangling — and still retrievable. Sweep before community detection so the
+    // partition and its reports describe the surviving graph.
+    sweepOrphanTopics();
 
     // ── Phase 4: Community detection (outside any transaction) ─────────────────
     // Recompute communities after knowledge extraction. Full recompute is fast
@@ -324,7 +400,9 @@ export async function embedClaim(claimId: number, claimText: string, topicName: 
  * Backfill embeddings for all topics and claims that don't have them yet.
  * Run this after adding embedding columns to migrate existing data.
  */
-export async function backfillAllEmbeddings(): Promise<{ topicsEmbedded: number; claimsEmbedded: number }> {
+export const backfillAllEmbeddings = inCategory('knowledge', backfillAllEmbeddingsImpl);
+
+async function backfillAllEmbeddingsImpl(): Promise<{ topicsEmbedded: number; claimsEmbedded: number }> {
     console.log('Starting embedding backfill...');
 
     // Backfill topics
@@ -385,7 +463,9 @@ export async function backfillAllEmbeddings(): Promise<{ topicsEmbedded: number;
  * auto-detection can't re-lock the old size) and then re-initializes each index
  * from the first new embedding's length.
  */
-export async function reembedAll(): Promise<{ chunks: number; topics: number; claims: number; communityReports: number; dimension: number | null }> {
+export const reembedAll = inCategory('knowledge', reembedAllImpl);
+
+async function reembedAllImpl(): Promise<{ chunks: number; topics: number; claims: number; communityReports: number; dimension: number | null }> {
     console.log('[Reembed] Starting full corpus re-embedding...');
 
     // Flush the query-embedding cache on the way in AND on the way out. A vector
@@ -601,7 +681,9 @@ function mixedDimensionTables(): { table: EmbeddedTable; dimensions: number[] }[
  *
  * Concurrent callers share one in-flight run via `migrationPromise`.
  */
-export function ensureEmbeddingsMigrated(): Promise<void> {
+export const ensureEmbeddingsMigrated = inCategory('knowledge', ensureEmbeddingsMigratedImpl);
+
+function ensureEmbeddingsMigratedImpl(): Promise<void> {
     if (migrationPromise) return migrationPromise;
     migrationPromise = (async () => {
         try {
@@ -711,7 +793,12 @@ export async function searchChunks(query: string, limit = 5) {
 
     // Hybrid Search using Reciprocal Rank Fusion (RRF)
     // We fetch more results initially to allow for better reranking
-    let results: { content: string, filename: string, path: string | null, score: number }[] = [];
+    //
+    // `repo_id` travels with each hit so the chat UI can link a cited source
+    // straight to its wiki page — `/wiki/<repo_id>/<path>` needs both halves, and
+    // a document uploaded outside a repository has no repo_id, which is exactly
+    // what tells the UI there is no page to link to.
+    let results: { content: string, filename: string, path: string | null, repo_id: number | null, score: number }[] = [];
     try {
         if (ftsQuery === null) {
             // No token survived tokenisation (e.g. a query of only very short
@@ -732,6 +819,7 @@ export async function searchChunks(query: string, limit = 5) {
                 SELECT c.content,
                        d.filename,
                        d.path,
+                       d.repo_id,
                        (1.0 / (60 + v.rank)) as score
                 FROM chunks c
                 JOIN documents d ON c.doc_id = d.id
@@ -740,7 +828,7 @@ export async function searchChunks(query: string, limit = 5) {
                 LIMIT 20
             `,
                 sql => db.prepare(sql).all(JSON.stringify(queryEmbedding))
-            ) as { content: string, filename: string, path: string | null, score: number }[];
+            ) as { content: string, filename: string, path: string | null, repo_id: number | null, score: number }[];
         } else {
             results = runVectorScan(
                 'chunks',
@@ -758,6 +846,7 @@ export async function searchChunks(query: string, limit = 5) {
                 SELECT c.content,
                        d.filename,
                        d.path,
+                       d.repo_id,
                        (COALESCE(1.0 / (60 + v.rank), 0) + COALESCE(1.0 / (60 + f.rank), 0)) as score
                 FROM chunks c
                 JOIN documents d ON c.doc_id = d.id
@@ -768,7 +857,7 @@ export async function searchChunks(query: string, limit = 5) {
                 LIMIT 20
             `,
                 sql => db.prepare(sql).all(JSON.stringify(queryEmbedding), ftsQuery)
-            ) as { content: string, filename: string, path: string | null, score: number }[];
+            ) as { content: string, filename: string, path: string | null, repo_id: number | null, score: number }[];
         }
     } catch (e) {
         console.warn('searchChunks: hybrid search failed (vector extension unavailable or no indexed data):', (e as Error).message);
@@ -795,23 +884,34 @@ export async function searchChunks(query: string, limit = 5) {
  * Use this after ingestion-pipeline fixes to back-fill the corpus without
  * re-embedding everything (which is expensive and rate-limited).
  */
-export async function reprocessKnowledge(
+export const reprocessKnowledge = inCategory('knowledge', reprocessKnowledgeImpl);
+
+async function reprocessKnowledgeImpl(
     options: { docId?: number; wipeAll?: boolean; rechunk?: boolean } = {}
 ): Promise<{ processed: number; topicsBefore: number; topicsAfter: number; claimsBefore: number; claimsAfter: number }> {
     const topicsBefore = (db.prepare('SELECT COUNT(*) AS c FROM topics').get() as { c: number }).c;
     const claimsBefore = (db.prepare('SELECT COUNT(*) AS c FROM knowledge_claims').get() as { c: number }).c;
 
     if (options.wipeAll) {
-        // Wipe knowledge tables but keep chunks/embeddings/documents.
+        // Wipe knowledge tables but keep chunks/embeddings/documents. Every
+        // document is re-extracted below, so the assertion records are rebuilt
+        // too; they are listed explicitly rather than left to the FK cascade so
+        // this reads as the complete set of knowledge state being reset.
         db.exec(`
+            DELETE FROM claim_documents;
             DELETE FROM knowledge_claims;
             DELETE FROM document_topics;
             DELETE FROM topic_relationships;
             DELETE FROM topics;
         `);
     } else if (options.docId) {
-        // Wipe only this document's knowledge links; topics/claims it solely
-        // owned will be left orphaned (cleaned up on next full wipe).
+        // Wipe only this document's knowledge links. Claims other documents also
+        // assert are handed over first, so re-processing one document cannot
+        // delete a fact that a different, untouched document still supports —
+        // exactly as on the document-delete path. Topics left unsupported by the
+        // wipe are collected by the sweep after re-extraction.
+        reattributeSharedClaims(options.docId);
+        db.prepare('DELETE FROM claim_documents WHERE doc_id = ?').run(options.docId);
         db.prepare('DELETE FROM knowledge_claims WHERE doc_id = ?').run(options.docId);
         db.prepare('DELETE FROM document_topics WHERE doc_id = ?').run(options.docId);
     }
@@ -864,6 +964,12 @@ export async function reprocessKnowledge(
             failed.map(f => `${f.filename} (${f.reason})`).join('; ')
         );
     }
+
+    // Single-document reprocessing wipes that document's claims and topic links
+    // and rebuilds them; topics it solely supported are left dangling by that
+    // wipe (topics has no document FK), so collect them before the recompute
+    // below clusters a graph that still contains them.
+    sweepOrphanTopics();
 
     // Reprocessing rewrites the topic set wholesale (and with `wipeAll` deletes
     // every topic first), so the community partition it was clustered from no

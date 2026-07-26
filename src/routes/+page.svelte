@@ -451,6 +451,9 @@ import BookOpen from '@lucide/svelte/icons/book-open';
                 </div>
             {/if}
 
+            <!-- Messages share the composer's width cap so answers can use the
+                 full column instead of a narrow bubble. -->
+            <div class="chat-column space-y-6">
             {#each messages as msg, i}
                 <MessageBubble
                     {msg}
@@ -477,10 +480,11 @@ import BookOpen from '@lucide/svelte/icons/book-open';
                     </div>
                 </div>
             {/if}
+            </div>
         </div>
 
         <footer class="px-4 pb-5 pt-2 bg-page">
-            <div class="max-w-3xl mx-auto">
+            <div class="chat-column">
                 <div class="composer">
                     <textarea
                         bind:this={textareaEl}
@@ -545,6 +549,16 @@ import BookOpen from '@lucide/svelte/icons/book-open';
         opacity: 0;
         position: absolute;
         height: 100%;
+    }
+
+    /* Single width cap for the whole chat column — messages and composer stay
+       aligned, and answers get the width instead of being boxed into a narrow
+       bubble. Wide enough to use a maximised window, capped so long lines of
+       body text stay readable. */
+    .chat-column {
+        width: 100%;
+        max-width: 68rem;
+        margin-inline: auto;
     }
 
     /* The composer is one field: the textarea and its buttons share a single

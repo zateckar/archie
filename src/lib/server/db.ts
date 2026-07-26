@@ -636,6 +636,64 @@ try {
     console.error('[Migration] Failed to create knowledge_claims.claim_hash unique index:', e);
 }
 
+// ── Migration: claim_documents — which documents assert each claim ──────────
+// `idx_knowledge_claims_hash` makes a claim text exist at most ONCE corpus-wide,
+// and ingestion skips a claim whose hash is already present. That dedup is worth
+// keeping (it is what stops the same sentence being stored dozens of times), but
+// on its own it loses information: when document B re-asserts a fact document A
+// already stated, B's assertion was silently dropped, so the only record of that
+// fact was a single row owned by A. Deleting or editing A then removed a fact
+// that B still asserts — and B would not re-assert it until B was itself
+// reprocessed. Worse, nothing could even detect the situation: "is this the last
+// document making this claim?" was unanswerable, because B's support was never
+// written down anywhere.
+//
+// This table is that record: one row per (claim, document) assertion. It makes
+// the dedup non-destructive — the claim row stays single, and the extra
+// supporters are remembered — which is what lets `reattributeSharedClaims` hand
+// a shared claim to a surviving document instead of letting the FK cascade take
+// it (see that function).
+//
+// `chunk_id` keeps per-document lineage: two documents asserting the same fact
+// each point at their own chunk, so "where does this come from in *that*
+// document" survives too. ON DELETE SET NULL matches knowledge_claims.chunk_id —
+// re-chunking must not destroy the assertion record.
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS claim_documents (
+            claim_id INTEGER NOT NULL,
+            doc_id INTEGER NOT NULL,
+            chunk_id INTEGER,
+            doc_content_hash TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (claim_id, doc_id),
+            FOREIGN KEY (claim_id) REFERENCES knowledge_claims(id) ON DELETE CASCADE,
+            FOREIGN KEY (doc_id) REFERENCES documents(id) ON DELETE CASCADE,
+            FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE SET NULL
+        );
+    `);
+    // "Which documents support claim X" is covered by the PK's leading column;
+    // this index serves the other direction ("this document's assertions"),
+    // which every delete/reprocess path uses.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_claim_documents_doc_id ON claim_documents(doc_id)');
+
+    // Backfill: every existing claim is supported by (at least) the document it
+    // is attributed to. Assertions that were dropped by the old dedup are NOT
+    // recoverable here — they were never written down — so a corpus ingested
+    // before this migration under-reports shared support until those documents
+    // are reprocessed. One row per existing claim is still the correct floor:
+    // it makes "no supporting documents" mean genuinely unsupported.
+    const backfilled = db.prepare(`
+        INSERT OR IGNORE INTO claim_documents (claim_id, doc_id, chunk_id, doc_content_hash)
+        SELECT id, doc_id, chunk_id, doc_content_hash FROM knowledge_claims WHERE doc_id IS NOT NULL
+    `).run();
+    if (backfilled.changes > 0) {
+        console.log(`[Migration] Recorded ${backfilled.changes} claim-document assertion(s) in claim_documents.`);
+    }
+} catch (e) {
+    console.error('[Migration] Failed to create/backfill claim_documents:', e);
+}
+
 // ── Missing hot-path indexes ─────────────────────────────────────────────
 // These four columns are queried constantly (every chat turn and every
 // ingestion chunk) but had no supporting index, forcing full table scans
@@ -786,6 +844,60 @@ try {
     db.exec('ALTER TABLE chat_history ADD COLUMN sources TEXT');
 } catch (e) {}
 
+// ── Migration: token_usage — per-call LLM token accounting ──────────────────
+// Every model call in this app funnels through ./providers, and until now none
+// of it was measured: there was no way to answer "how much of our spend is
+// answering user questions vs. ingesting documents vs. building and maintaining
+// the knowledge graph?" — which matters here because the three are wildly
+// asymmetric (one chat turn is a dozen-plus calls, but one document ingest is a
+// clean + summarize + chunk pass plus an extraction and consistency check for
+// EVERY chunk).
+//
+// One row per provider call, written by ./usage. Deliberately raw rather than
+// pre-aggregated: rollup tables would have to commit up front to a bucket size,
+// and the dashboard needs hourly resolution for a 1-day span and daily for 30
+// days off the same data. Aggregation is done in SQL at read time instead.
+//
+// `category` is the coarse bucket the dashboard charts (chat | documents |
+// knowledge | other) and comes from the AsyncLocalStorage context that ./usage
+// sets at each pipeline entry point; `operation` is the fine-grained label of
+// the specific LLM task (clean_document, extract_knowledge, chat_answer, …).
+//
+// `estimated` marks rows whose token counts were derived from character length
+// because the provider reported no usage numbers (Gemini's embedding endpoint
+// returns none, and a gateway that ignores stream_options gives none for a
+// streamed answer). Kept as a column rather than silently mixing the two, so
+// the dashboard can say how much of a total is measured vs. approximated.
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS token_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            category TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER,
+            failed INTEGER NOT NULL DEFAULT 0
+        );
+    `);
+} catch (e) {
+    console.error('[Migration] Failed to create token_usage:', e);
+}
+try {
+    // Every dashboard query is a range scan over created_at; the composite index
+    // also covers the per-category GROUP BY that builds the stacked series.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_token_usage_created_at ON token_usage(created_at)');
+} catch (e) {}
+try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_token_usage_category_created ON token_usage(category, created_at)');
+} catch (e) {}
+
 
 export function getDocuments() {
     return db.prepare(`
@@ -796,7 +908,65 @@ export function getDocuments() {
     `).all();
 }
 
+/**
+ * Hands every claim currently attributed to `docId` that ANOTHER document also
+ * asserts over to one of those other documents, and reports how many moved.
+ *
+ * This is the "is this the last document making this claim?" check, done at the
+ * only moment it can be done: `knowledge_claims.doc_id` cascades on document
+ * delete, so once the document row is gone the claim is gone with it and there is
+ * nothing left to inspect. Run this FIRST and the cascade then removes exactly
+ * the claims that really were solely supported by `docId`, while shared facts
+ * survive under a document that still asserts them.
+ *
+ * MUST be called before any path that deletes a document row or bulk-deletes a
+ * document's claims. There are four such paths (re-ingest, git file removal,
+ * deleteDocument, single-document reprocess); a fifth that forgets to call this
+ * silently reintroduces the data loss this exists to prevent.
+ *
+ * `chunk_id` and `doc_content_hash` move with the attribution — the claim's
+ * lineage must point into the document it is now credited to, not into chunks
+ * that are about to be deleted.
+ *
+ * Returns the number of claims re-attributed (0 is the common case).
+ */
+export function reattributeSharedClaims(docId: number): number {
+    const result = db.prepare(`
+        UPDATE knowledge_claims AS kc
+        SET doc_id = (
+                SELECT cd.doc_id FROM claim_documents cd
+                WHERE cd.claim_id = kc.id AND cd.doc_id != ? ORDER BY cd.doc_id LIMIT 1
+            ),
+            chunk_id = (
+                SELECT cd.chunk_id FROM claim_documents cd
+                WHERE cd.claim_id = kc.id AND cd.doc_id != ? ORDER BY cd.doc_id LIMIT 1
+            ),
+            doc_content_hash = (
+                SELECT d.content_hash FROM claim_documents cd
+                JOIN documents d ON d.id = cd.doc_id
+                WHERE cd.claim_id = kc.id AND cd.doc_id != ? ORDER BY cd.doc_id LIMIT 1
+            )
+        WHERE kc.doc_id = ?
+          AND EXISTS (
+                SELECT 1 FROM claim_documents cd
+                WHERE cd.claim_id = kc.id AND cd.doc_id != ?
+            )
+    `).run(docId, docId, docId, docId, docId);
+
+    if (result.changes > 0) {
+        console.log(
+            `[KnowledgeGC] Re-attributed ${result.changes} claim(s) away from document ${docId} — ` +
+            `other documents still assert them, so they are kept.`
+        );
+    }
+    return result.changes;
+}
+
 export function deleteDocument(id: number) {
+    // Keep facts other documents also assert (see reattributeSharedClaims). Must
+    // happen before the delete below, while claim_documents still has this
+    // document's rows to compare against.
+    reattributeSharedClaims(id);
     // Delete from chunks first (cascading normally handled by FK, but let's be explicit)
     db.prepare('DELETE FROM chunks WHERE doc_id = ?').run(id);
     return db.prepare('DELETE FROM documents WHERE id = ?').run(id);
