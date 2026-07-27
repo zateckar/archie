@@ -206,10 +206,18 @@
   --color-cat-norm: var(--cat-norm);
   --color-cat-other: var(--cat-other);
 
-  --font-sans: 'Segoe UI Variable Text', 'Segoe UI', Inter, system-ui,
-    -apple-system, sans-serif;
-  --font-mono: 'Cascadia Code', 'JetBrains Mono', ui-monospace,
-    SFMono-Regular, Consolas, monospace;
+  /* Only fonts a browser will actually hand out are named here.
+     Firefox gates local fonts behind `layout.css.font-visibility`: at the
+     default level for private windows / resistFingerprinting (1 = base system
+     fonts), anything outside the OS's shipped set is refused and each refusal
+     logs "Request for font X blocked at visibility level 1 (requires 3)" — the
+     stacks previously led with 'Segoe UI Variable Text' and 'Cascadia Code',
+     neither of which is in that base set, so every text node produced a
+     console warning before falling through to the next entry anyway.
+     'Segoe UI' and Consolas are base-visible on Windows and render the same
+     way the fallbacks already did. */
+  --font-sans: 'Segoe UI', Inter, system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, monospace;
 
   --radius-sm: 0.25rem;    /* 4px  */
   --radius-md: 0.3125rem;  /* 5px  */

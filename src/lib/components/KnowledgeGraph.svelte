@@ -43,6 +43,8 @@
     import { onMount, tick } from 'svelte';
     import Search from '@lucide/svelte/icons/search';
     import Maximize2 from '@lucide/svelte/icons/maximize-2';
+    import Expand from '@lucide/svelte/icons/expand';
+    import Shrink from '@lucide/svelte/icons/shrink';
     import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
     import Crosshair from '@lucide/svelte/icons/crosshair';
     import X from '@lucide/svelte/icons/x';
@@ -143,6 +145,21 @@
     let canvas = $state<HTMLCanvasElement | undefined>(undefined);
     let wrapper = $state<HTMLDivElement | undefined>(undefined);
 
+    /**
+     * Expanded mode: the card leaves the page flow and covers the viewport.
+     *
+     * At the in-page height the canvas is a few hundred pixels tall, which is
+     * not enough room for a clustered graph — reading it meant zooming in and
+     * then panning around a viewport smaller than the layout. Expanding gives
+     * the same layout the whole screen, and the size change is what triggers the
+     * automatic re-layout and re-fit (see `toggleExpanded`).
+     *
+     * A fixed overlay rather than the Fullscreen API: the browser's own
+     * fullscreen escapes the app shell (and its theme surface), and this needs
+     * to stay an app view.
+     */
+    let expanded = $state(false);
+
     // The simulation arrays are deliberately NOT `$state`: every tick mutates
     // x/y/vx/vy on every node, and a deep reactive proxy would put a signal write
     // in the hot loop for values only the canvas reads. What the markup needs is
@@ -185,7 +202,15 @@
     function categorySlug(cat: string | null | undefined): string {
         return (cat && CATEGORY_SLUGS[cat]) || 'other';
     }
-    const SANS = "'Segoe UI Variable Text', 'Segoe UI', Inter, system-ui, sans-serif";
+    /**
+     * Canvas font stack. Resolved from `--font-sans` rather than restated, so a
+     * change to the CSS token cannot leave the canvas asking for a font the rest
+     * of the app no longer names — the hardcoded copy here kept requesting
+     * 'Segoe UI Variable Text' after the token dropped it, and Firefox logs a
+     * console warning for every blocked local-font request.
+     * Assigned in onMount: `token()` needs the document.
+     */
+    let SANS = 'system-ui, sans-serif';
 
     function token(name: string): string {
         return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#8a9a94';
@@ -1078,7 +1103,45 @@
         resizeTimer = setTimeout(() => layout(true), 150);
     }
 
+    /**
+     * Enter or leave expanded mode, then re-fit the graph to whatever area it
+     * now has.
+     *
+     * The ResizeObserver on the wrapper catches the size change on its own, but
+     * only after its 150 ms debounce — so the backing canvas is resized and the
+     * view re-fitted here first, or the intervening frames show the old bitmap
+     * stretched across the new box. The observer's `layout(true)` that follows
+     * is wanted rather than redundant: it re-runs the cluster layout at the new
+     * dimensions, spreading the graph into the space that just appeared, and
+     * ends in `fitToView()` itself.
+     */
+    async function toggleExpanded() {
+        expanded = !expanded;
+        await tick();
+        resize();
+        if (nodes.length > 0) fitToView(); else draw();
+    }
+
+    function onKeydown(event: KeyboardEvent) {
+        if (event.key === 'Escape' && expanded) {
+            event.preventDefault();
+            toggleExpanded();
+        }
+    }
+
+    // A fixed overlay does not stop the page underneath from scrolling, so
+    // without this the document slides around behind the graph whenever the
+    // pointer leaves the canvas.
+    $effect(() => {
+        if (!expanded) return;
+        const previous = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        return () => { document.body.style.overflow = previous; };
+    });
+
     onMount(() => {
+        // Needs the document, so it cannot be a module-level initialiser.
+        SANS = token('--font-sans') || SANS;
         load();
         const observer = new ResizeObserver(onResize);
         if (wrapper) observer.observe(wrapper);
@@ -1093,9 +1156,9 @@
     const detailTarget = $derived(selected ?? null);
 </script>
 
-<svelte:window onresize={onResize} />
+<svelte:window onresize={onResize} onkeydown={onKeydown} />
 
-<div class="card overflow-hidden flex flex-col">
+<div class="card graph-card overflow-hidden flex flex-col" class:expanded>
     <!-- Controls -->
     <div class="border-b border-line-subtle p-3 flex flex-wrap items-center gap-2">
         <div class="relative min-w-[210px] flex-1 max-w-xs">
@@ -1178,11 +1241,29 @@
             <button onclick={() => layout(true)} class="btn btn-secondary btn-icon" aria-label="Re-run layout" title="Re-run layout">
                 <RotateCcw class="w-3.5 h-3.5" />
             </button>
+            <button
+                onclick={toggleExpanded}
+                class="btn btn-secondary btn-icon"
+                aria-pressed={expanded}
+                aria-label={expanded ? 'Exit full screen' : 'Expand to full screen'}
+                title={expanded ? 'Exit full screen (Esc)' : 'Expand to full screen'}
+            >
+                {#if expanded}
+                    <Shrink class="w-3.5 h-3.5" />
+                {:else}
+                    <Expand class="w-3.5 h-3.5" />
+                {/if}
+            </button>
         </div>
     </div>
 
-    <!-- Canvas -->
-    <div class="relative bg-well" bind:this={wrapper} style="height: {height};">
+    <!-- Canvas. Fixed height in page flow; in expanded mode it takes whatever
+         the viewport leaves after the controls and status line. -->
+    <div
+        class="relative bg-well canvas-area"
+        bind:this={wrapper}
+        style={expanded ? '' : `height: ${height};`}
+    >
         <canvas
             bind:this={canvas}
             class="absolute inset-0 cursor-grab touch-none"
@@ -1309,3 +1390,26 @@
         </div>
     {/if}
 </div>
+
+<style>
+    /* Expanded mode.
+       `100dvh` rather than `100vh` so mobile browser chrome cannot crop the
+       status line off the bottom, and the border radius is dropped because a
+       rounded card against the viewport edge reads as a rendering fault. */
+    .graph-card.expanded {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        width: 100vw;
+        height: 100dvh;
+        border-radius: 0;
+    }
+
+    /* `min-height: 0` is load-bearing: without it the flex item refuses to
+       shrink below the canvas's intrinsic size and the status line is pushed
+       off the bottom of the viewport. */
+    .graph-card.expanded .canvas-area {
+        flex: 1 1 auto;
+        min-height: 0;
+    }
+</style>

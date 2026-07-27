@@ -23,6 +23,50 @@ export interface FileHistoryItem {
     date: string;
 }
 
+/** Git identity written into the author/committer fields of a wiki commit. */
+export interface WikiAuthor {
+    name: string;
+    email: string;
+}
+
+/**
+ * Used only when there is genuinely no signed-in user behind a write — a CLI or
+ * background caller. Every request-driven edit goes through `commitAuthorFor`
+ * and carries the real account.
+ */
+const FALLBACK_AUTHOR: WikiAuthor = { name: 'Wiki Editor', email: 'wiki@local' };
+
+/**
+ * A commit object is line-oriented and delimits the identity with `<`/`>`, so a
+ * name or address containing either — or a newline — produces a commit git
+ * cannot parse. IdP-supplied claims are not trusted to be free of them.
+ */
+function sanitizeIdentity(value: string): string {
+    return value.replace(/[<>\n\r]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Turns the signed-in user into a git commit identity.
+ *
+ * Wiki commits were all attributed to a literal "Wiki Editor <wiki@local>", so
+ * the repository history — and the per-file history panel that reads it — could
+ * not say who changed a page. OIDC accounts carry the `name` and `email` claims
+ * (see routes/api/auth/callback), and local accounts at least have a username,
+ * so there is always something better than the placeholder to write.
+ */
+export function commitAuthorFor(
+    user: { username: string; display_name?: string | null; email?: string | null } | null | undefined
+): WikiAuthor {
+    if (!user) return FALLBACK_AUTHOR;
+    const name = sanitizeIdentity(user.display_name || '') || sanitizeIdentity(user.username) || FALLBACK_AUTHOR.name;
+    // Synthesised addresses keep the local part to characters an address may
+    // hold: an OIDC username can itself be an email, or carry the
+    // `@oidc-<sub>` collision suffix the callback appends.
+    const localPart = user.username.replace(/[^A-Za-z0-9._+-]/g, '-') || 'user';
+    const email = sanitizeIdentity(user.email || '') || `${localPart}@wiki.local`;
+    return { name, email };
+}
+
 /**
  * Resolves `filePath` inside `repoRoot` and returns the absolute path, or null if
  * it escapes the repository.
@@ -407,7 +451,8 @@ async function fetchModifyCommitPush(
     currentBranch: string,
     filePath: string,
     content: string,
-    message: string
+    message: string,
+    commitAuthor: WikiAuthor = FALLBACK_AUTHOR
 ): Promise<void> {
     const onAuth = () => ({ username: 'token', password: pat });
     const normalizedFilePath = filePath.replace(/\\/g, '/');
@@ -492,7 +537,7 @@ async function fetchModifyCommitPush(
     // 6. Write commit object (index is NOT used — we build the tree directly)
     const now = Math.floor(Date.now() / 1000);
     const tz = new Date().getTimezoneOffset();
-    const author = { name: 'Wiki Editor', email: 'wiki@local', timestamp: now, timezoneOffset: tz };
+    const author = { ...commitAuthor, timestamp: now, timezoneOffset: tz };
     const newCommitOid = await git.writeCommit({
         fs,
         dir,
@@ -541,7 +586,12 @@ async function fetchModifyCommitPush(
     }
 }
 
-export async function saveWikiFile(repoId: number, filePath: string, content: string): Promise<void> {
+export async function saveWikiFile(
+    repoId: number,
+    filePath: string,
+    content: string,
+    commitAuthor: WikiAuthor = FALLBACK_AUTHOR
+): Promise<void> {
     const repo = getRepo(repoId);
     if (!repo) throw new Error('Repo not found');
 
@@ -597,7 +647,8 @@ export async function saveWikiFile(repoId: number, filePath: string, content: st
         await fetchModifyCommitPush(
             repo.local_path, repo.url, pat, currentBranch,
             normalizedFilePath, content,
-            `[Wiki] Updated ${normalizedFilePath}`
+            `[Wiki] Updated ${normalizedFilePath}`,
+            commitAuthor
         );
     } catch (err) {
         console.warn('[Wiki] Push failed (remote may not be reachable):', err);
@@ -660,12 +711,17 @@ export async function saveWikiFile(repoId: number, filePath: string, content: st
         });
 }
 
-export async function createWikiFile(repoId: number, filePath: string, content: string): Promise<void> {
+export async function createWikiFile(
+    repoId: number,
+    filePath: string,
+    content: string,
+    commitAuthor: WikiAuthor = FALLBACK_AUTHOR
+): Promise<void> {
     // saveWikiFile handles path validation, parent-directory creation, the disk
     // write, staging, commit/push, DB upsert and RAG ingestion — so creating a
     // file is just a save of new content. (Avoids a redundant, unvalidated
     // pre-write and a duplicate commit.)
-    await saveWikiFile(repoId, filePath, content);
+    await saveWikiFile(repoId, filePath, content, commitAuthor);
 }
 
 export async function getFileHistory(repoId: number, filePath: string, maxCount: number = 50): Promise<FileHistoryItem[]> {
@@ -704,7 +760,12 @@ export async function getFileHistory(repoId: number, filePath: string, maxCount:
     }
 }
 
-export async function revertToCommit(repoId: number, filePath: string, oid: string): Promise<void> {
+export async function revertToCommit(
+    repoId: number,
+    filePath: string,
+    oid: string,
+    commitAuthor: WikiAuthor = FALLBACK_AUTHOR
+): Promise<void> {
     // Checked explicitly rather than relying on the read below failing, so the
     // caller gets the real reason instead of "could not read file at commit".
     if (isIgnoredPath(filePath)) {
@@ -757,7 +818,8 @@ export async function revertToCommit(repoId: number, filePath: string, oid: stri
         await fetchModifyCommitPush(
             repo.local_path, repo.url, pat, currentBranch,
             normalizedFilePath, oldContent,
-            `[Wiki] Reverted ${normalizedFilePath} to ${oid.slice(0, 7)}`
+            `[Wiki] Reverted ${normalizedFilePath} to ${oid.slice(0, 7)}`,
+            commitAuthor
         );
     } catch (err) {
         console.warn('[Wiki] Revert push failed:', err);

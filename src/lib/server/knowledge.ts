@@ -1,9 +1,17 @@
-import { db } from './db';
+import { db, getAppStateNumber, setAppState } from './db';
 import { extractKnowledge, checkConsistencyBatch, deriveTaxonomyPlacements, deriveTaxonomyFull, getEmbedding } from './llm';
 import { embedTopic, embedClaim, searchTopics, mapWithConcurrency } from './rag';
 import { normalizeTopicName, foldDiacritics } from './topic-normalize';
 import { markVectorIndexDirty } from './vector-index';
 import { inCategory } from './usage';
+import {
+    TAXONOMY_FULL_REBUILD_KEY,
+    TAXONOMY_FULL_REBUILD_INTERVAL_KEY,
+    isFullRebuildDue,
+    nextFullRebuildDueAt,
+    resolveFullRebuildInterval,
+    type IntervalSource
+} from './taxonomy-schedule';
 import crypto from 'crypto';
 
 export { normalizeTopicName };
@@ -1109,18 +1117,47 @@ function logIngestSummary(
 }
 
 /**
+ * Outcome of one incremental placement pass.
+ *
+ * Returned as an object rather than the old bare "placed" count because that
+ * count conflated three outcomes a caller has to tell apart: there was nothing
+ * to place, the pass DECLINED because there is no hierarchy to place into, or it
+ * ran and every candidate was rejected as invalid. Only the middle case is a
+ * reason to fall back to the full rebuild, and from `0` alone it is
+ * indistinguishable from a plain no-op — which is how the git sync ended up
+ * running the expensive rebuild unconditionally instead.
+ */
+export interface TaxonomyPlacement {
+    status: 'no-orphans' | 'placed' | 'needs-full-rebuild';
+    /** Parentless topics found at the start of the pass. */
+    orphans: number;
+    /** How many of them came back with a valid parent and were updated. */
+    placed: number;
+}
+
+/**
+ * Whether the corpus has topics but effectively no hierarchy, leaving incremental
+ * placement nothing to attach new topics to (the first-import case).
+ *
+ * Pure and exported so the threshold is testable without a database.
+ */
+export function taxonomyNeedsFullRebuild(topicCount: number, topicsWithParents: number): boolean {
+    return topicsWithParents < 3 && topicCount > 5;
+}
+
+/**
  * Incremental taxonomy placement: assigns parent_topic_id to topics that don't have one.
  * Called automatically after processDocumentKnowledge() completes.
  */
 export const placeTaxonomyForNewTopics = inCategory('knowledge', placeTaxonomyForNewTopicsImpl);
 
-async function placeTaxonomyForNewTopicsImpl(): Promise<number> {
+async function placeTaxonomyForNewTopicsImpl(): Promise<TaxonomyPlacement> {
     // Find orphan topics (no parent assigned)
     const orphans = db.prepare(
         'SELECT id, name, description, category FROM topics WHERE parent_topic_id IS NULL'
     ).all() as { id: number; name: string; description: string; category: string }[];
 
-    if (orphans.length === 0) return 0;
+    if (orphans.length === 0) return { status: 'no-orphans', orphans: 0, placed: 0 };
 
     // Get existing taxonomy (topics that already have parents, plus roots for context)
     const existingTaxonomy = db.prepare(
@@ -1130,9 +1167,9 @@ async function placeTaxonomyForNewTopicsImpl(): Promise<number> {
     // Only place orphans that are "new" — if ALL topics are orphans (first import), skip incremental
     // and let the full rebuild handle it. Threshold: at least 3 topics must already have parents.
     const withParents = existingTaxonomy.filter(t => t.parent_topic_id !== null);
-    if (withParents.length < 3 && existingTaxonomy.length > 5) {
+    if (taxonomyNeedsFullRebuild(existingTaxonomy.length, withParents.length)) {
         console.log('[Taxonomy] Skipping incremental placement — not enough existing taxonomy structure. Use full rebuild.');
-        return 0;
+        return { status: 'needs-full-rebuild', orphans: orphans.length, placed: 0 };
     }
 
     console.log(`[Taxonomy] Placing ${orphans.length} orphan topics into existing taxonomy...`);
@@ -1157,12 +1194,88 @@ async function placeTaxonomyForNewTopicsImpl(): Promise<number> {
     }
 
     console.log(`[Taxonomy] Placed ${placed}/${orphans.length} topics into taxonomy.`);
-    return placed;
+    return { status: 'placed', orphans: orphans.length, placed };
+}
+
+/**
+ * Gap between automatic full rebuilds and where that number came from; 0 when
+ * disabled. Admin override (app_state) beats TAXONOMY_FULL_REBUILD_INTERVAL_MS
+ * beats the built-in default — see ./taxonomy-schedule.
+ */
+export function fullRebuildInterval(): { intervalMs: number; source: IntervalSource } {
+    return resolveFullRebuildInterval(
+        getAppStateNumber(TAXONOMY_FULL_REBUILD_INTERVAL_KEY),
+        process.env.TAXONOMY_FULL_REBUILD_INTERVAL_MS
+    );
+}
+
+/** Epoch ms of the last completed full rebuild, or null if none was ever recorded. */
+export function lastFullRebuildAt(): number | null {
+    return getAppStateNumber(TAXONOMY_FULL_REBUILD_KEY);
+}
+
+/**
+ * Whether enough time has passed to justify a corpus-wide rebuild.
+ *
+ * Asked by the git sync tail BEFORE it runs incremental placement, so a sync that
+ * is going to rebuild everything anyway doesn't pay for placements the rebuild is
+ * about to overwrite.
+ */
+export function isFullTaxonomyRebuildDue(nowMs: number = Date.now()): boolean {
+    return isFullRebuildDue(lastFullRebuildAt(), nowMs, fullRebuildInterval().intervalMs);
+}
+
+/** Everything the admin schedule panel renders, in one read. */
+export interface TaxonomyScheduleStatus {
+    intervalMs: number;
+    source: IntervalSource;
+    /** True when TAXONOMY_FULL_REBUILD_INTERVAL_MS is set, so the UI can say an override is shadowing it. */
+    envConfigured: boolean;
+    lastRebuildAt: number | null;
+    /** Epoch ms; null when the schedule is off or nothing has been rebuilt yet. */
+    nextDueAt: number | null;
+    /** Would the next corpus-changing sync rebuild? */
+    due: boolean;
+    /** Parentless topics right now — what an incremental pass would work on instead. */
+    orphanTopics: number;
+}
+
+export function taxonomyScheduleStatus(nowMs: number = Date.now()): TaxonomyScheduleStatus {
+    const { intervalMs, source } = fullRebuildInterval();
+    const lastRebuildAt = lastFullRebuildAt();
+    const orphanTopics = (db
+        .prepare('SELECT COUNT(*) AS c FROM topics WHERE parent_topic_id IS NULL')
+        .get() as { c: number }).c;
+
+    return {
+        intervalMs,
+        source,
+        envConfigured: (process.env.TAXONOMY_FULL_REBUILD_INTERVAL_MS ?? '').trim() !== '',
+        lastRebuildAt,
+        nextDueAt: nextFullRebuildDueAt(lastRebuildAt, intervalMs),
+        due: isFullRebuildDue(lastRebuildAt, nowMs, intervalMs),
+        orphanTopics
+    };
+}
+
+/**
+ * Persists an admin-set interval. `0` disables automatic rebuilds.
+ *
+ * Expects an already-validated value (see validateFullRebuildInterval); the API
+ * route validates so it can return the reason with a 400.
+ */
+export function setFullRebuildIntervalMs(intervalMs: number): void {
+    setAppState(TAXONOMY_FULL_REBUILD_INTERVAL_KEY, String(intervalMs));
 }
 
 /**
  * Full taxonomy rebuild: LLM reviews ALL topics and produces an optimal hierarchy.
- * Triggered manually from admin UI or after git sync batch.
+ *
+ * Runs on three paths: the admin UI's explicit trigger, the periodic schedule at
+ * the git sync tail (see isFullTaxonomyRebuildDue), and a corpus that has no
+ * hierarchy for incremental placement to attach to. All three stamp the schedule
+ * — a manual rebuild is a rebuild, and charging the operator for another one an
+ * hour later because the clock didn't notice would be pointless.
  */
 export const rebuildTaxonomy = inCategory('knowledge', rebuildTaxonomyImpl);
 
@@ -1226,6 +1339,22 @@ async function rebuildTaxonomyImpl(): Promise<{ total: number; updated: number }
                 console.error(`[Taxonomy] Failed to update topic ${topicId}:`, err);
             }
         }
+    }
+
+    // Stamp the schedule only now, on a rebuild that actually re-derived the tree.
+    // The empty-corpus early return above deliberately does NOT stamp: it made no
+    // model call and decided nothing, so recording it would start a week-long
+    // cooldown on the strength of no work at all. Retrying it next sync is free,
+    // because an empty topic set returns before deriveTaxonomyFull.
+    //
+    // A throw before this point also leaves the stamp untouched, so a failed
+    // rebuild is retried rather than counted as done.
+    try {
+        setAppState(TAXONOMY_FULL_REBUILD_KEY, String(Date.now()));
+    } catch (err) {
+        // The rebuild itself succeeded and is already persisted in `topics`.
+        // Losing the stamp only costs an earlier-than-necessary next rebuild.
+        console.error('[Taxonomy] Failed to record full rebuild timestamp:', err);
     }
 
     console.log(`[Taxonomy] Full rebuild complete: ${updated}/${allTopics.length} topics assigned parents.`);

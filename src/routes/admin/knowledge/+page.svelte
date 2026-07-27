@@ -107,6 +107,124 @@
     let backfillingEmbeddings = $state(false);
     let backfillResult = $state<{ topicsEmbedded: number; claimsEmbedded: number } | null>(null);
 
+    // ── Automatic rebuild schedule ──
+    /** Mirrors TaxonomyScheduleStatus in $lib/server/knowledge. */
+    interface TaxonomySchedule {
+        intervalMs: number;
+        source: 'ui' | 'env' | 'default';
+        envConfigured: boolean;
+        lastRebuildAt: number | null;
+        nextDueAt: number | null;
+        due: boolean;
+        orphanTopics: number;
+    }
+    let schedule = $state<TaxonomySchedule | null>(null);
+    let scheduleLoading = $state(false);
+    let savingSchedule = $state(false);
+    let scheduleError = $state<string | null>(null);
+
+    const HOUR_MS = 3600000;
+    const DAY_MS = 24 * HOUR_MS;
+
+    /**
+     * Offered intervals. Days, not milliseconds: the stored unit is ms because
+     * that is what the scheduler compares against, but nobody reasons about a
+     * rebuild cadence in milliseconds.
+     *
+     * The floor the server enforces is 1 hour; the shortest option here is a day,
+     * because anything tighter re-approaches the per-sync rebuild this schedule
+     * replaced. An operator who genuinely wants hourly can still set the env var.
+     */
+    const INTERVAL_PRESETS = [
+        { ms: 0, label: 'Off — manual rebuilds only' },
+        { ms: 1 * DAY_MS, label: 'Every day' },
+        { ms: 3 * DAY_MS, label: 'Every 3 days' },
+        { ms: 7 * DAY_MS, label: 'Every 7 days (default)' },
+        { ms: 14 * DAY_MS, label: 'Every 14 days' },
+        { ms: 30 * DAY_MS, label: 'Every 30 days' }
+    ];
+
+    /**
+     * Presets plus, when the value in force is not one of them, the actual value.
+     *
+     * Without this the select would silently snap an env-configured or
+     * hand-edited interval to the nearest option and misreport what is running.
+     */
+    let intervalOptions = $derived.by(() => {
+        const current = schedule?.intervalMs;
+        if (current === undefined || INTERVAL_PRESETS.some(p => p.ms === current)) return INTERVAL_PRESETS;
+        return [...INTERVAL_PRESETS, { ms: current, label: `${formatDuration(current)} (current)` }]
+            .sort((a, b) => a.ms - b.ms);
+    });
+
+    function formatDuration(ms: number): string {
+        if (ms <= 0) return 'Off';
+        if (ms % DAY_MS === 0) {
+            const days = ms / DAY_MS;
+            return days === 1 ? 'Every day' : `Every ${days} days`;
+        }
+        if (ms % HOUR_MS === 0) {
+            const hours = ms / HOUR_MS;
+            return hours === 1 ? 'Every hour' : `Every ${hours} hours`;
+        }
+        return `Every ${ms} ms`;
+    }
+
+    /** "3 days ago" / "in 4 days". Coarse on purpose — this is a weekly-ish cadence. */
+    function formatRelative(epochMs: number): string {
+        const diff = epochMs - Date.now();
+        const future = diff > 0;
+        const abs = Math.abs(diff);
+        const unit = abs < HOUR_MS ? 'minute' : abs < DAY_MS ? 'hour' : 'day';
+        const size = unit === 'minute' ? 60000 : unit === 'hour' ? HOUR_MS : DAY_MS;
+        const n = Math.max(1, Math.round(abs / size));
+        const plural = n === 1 ? unit : `${unit}s`;
+        return future ? `in ${n} ${plural}` : `${n} ${plural} ago`;
+    }
+
+    async function loadSchedule() {
+        scheduleLoading = true;
+        scheduleError = null;
+        try {
+            const res = await fetch('/api/knowledge/taxonomy-schedule');
+            if (res.ok) {
+                schedule = await res.json();
+            } else {
+                scheduleError = 'Could not load the rebuild schedule.';
+            }
+        } catch (err) {
+            console.error(err);
+            scheduleError = 'Could not load the rebuild schedule.';
+        } finally {
+            scheduleLoading = false;
+        }
+    }
+
+    async function saveInterval(intervalMs: number) {
+        savingSchedule = true;
+        scheduleError = null;
+        try {
+            const res = await fetch('/api/knowledge/taxonomy-schedule', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ intervalMs })
+            });
+            const result = await res.json().catch(() => null);
+            if (res.ok) {
+                // Render what the server stored, not what was submitted.
+                schedule = result;
+            } else {
+                scheduleError = result?.error ?? 'Could not save the interval.';
+                await loadSchedule(); // put the control back in sync with reality
+            }
+        } catch (err) {
+            console.error(err);
+            scheduleError = 'Could not save the interval.';
+        } finally {
+            savingSchedule = false;
+        }
+    }
+
     onMount(() => {
         loadStats();
     });
@@ -171,6 +289,9 @@
         if (tab === 'flagged' && !flagged.loaded) loadReview('flagged');
         if (tab === 'superseded' && !superseded.loaded) loadReview('superseded');
         if (tab === 'hierarchy' && !treeLoaded) loadTree();
+        // The schedule panel lives on this tab; it is cheap and its "due in N days"
+        // reading goes stale, so it is refetched on every visit rather than cached.
+        if (tab === 'hierarchy') loadSchedule();
     }
 
     /** Groups the claims on the current page by topic — a page, not a corpus. */
@@ -252,6 +373,9 @@
                 taxonomyResult = { total: result.total, updated: result.updated };
                 await loadStats();
                 if (treeLoaded) await loadTree();
+                // A manual rebuild stamps the schedule, so "last rebuilt" and
+                // "next due" both just changed.
+                if (schedule) await loadSchedule();
             }
         } catch (err) {
             console.error(err);
@@ -809,14 +933,104 @@
                         </div>
                     {/if}
 
+                    <!-- Automatic rebuild schedule.
+                         Surfaced here rather than buried in deployment config because
+                         this interval is the app's largest single lever on token spend:
+                         a full rebuild sends every topic back to the model, and it used
+                         to run after every git sync. -->
+                    <div class="well p-3 mt-4">
+                        <div class="flex items-center justify-between gap-2">
+                            <p class="eyebrow">Automatic rebuild</p>
+                            {#if schedule}
+                                {#if schedule.intervalMs === 0}
+                                    <span class="badge badge-neutral">Off</span>
+                                {:else if schedule.due}
+                                    <span class="badge badge-warning">Due</span>
+                                {:else}
+                                    <span class="badge badge-success">Scheduled</span>
+                                {/if}
+                            {/if}
+                        </div>
+
+                        {#if scheduleLoading && !schedule}
+                            <p class="text-xs text-mute mt-2">Loading…</p>
+                        {:else if schedule}
+                            <label for="rebuild-interval" class="block text-xs text-mute mt-2 mb-1.5">
+                                How often the model re-derives the whole hierarchy
+                            </label>
+                            <select
+                                id="rebuild-interval"
+                                class="field"
+                                disabled={savingSchedule}
+                                value={schedule.intervalMs}
+                                onchange={(e) => saveInterval(Number(e.currentTarget.value))}
+                            >
+                                {#each intervalOptions as opt (opt.ms)}
+                                    <option value={opt.ms}>{opt.label}</option>
+                                {/each}
+                            </select>
+
+                            <dl class="mt-2.5 space-y-1 text-xs">
+                                <div class="flex items-baseline justify-between gap-2">
+                                    <dt class="text-mute">Last full rebuild</dt>
+                                    <dd class="text-dim text-right">
+                                        {#if schedule.lastRebuildAt}
+                                            {new Date(schedule.lastRebuildAt).toLocaleString()}
+                                            <span class="text-faint">({formatRelative(schedule.lastRebuildAt)})</span>
+                                        {:else}
+                                            <span class="text-faint">Never recorded</span>
+                                        {/if}
+                                    </dd>
+                                </div>
+                                <div class="flex items-baseline justify-between gap-2">
+                                    <dt class="text-mute">Next</dt>
+                                    <dd class="text-dim text-right">
+                                        {#if schedule.intervalMs === 0}
+                                            <span class="text-faint">Disabled</span>
+                                        {:else if schedule.due}
+                                            On the next repo sync that changes a document
+                                        {:else if schedule.nextDueAt}
+                                            {formatRelative(schedule.nextDueAt)}
+                                            <span class="text-faint">({new Date(schedule.nextDueAt).toLocaleDateString()})</span>
+                                        {/if}
+                                    </dd>
+                                </div>
+                                <div class="flex items-baseline justify-between gap-2">
+                                    <dt class="text-mute">Parentless topics</dt>
+                                    <dd class="text-dim tabular-nums">{schedule.orphanTopics}</dd>
+                                </div>
+                            </dl>
+
+                            {#if schedule.source === 'ui' && schedule.envConfigured}
+                                <!-- Otherwise an operator stares at TAXONOMY_FULL_REBUILD_INTERVAL_MS
+                                     in their config and concludes the variable is broken. -->
+                                <p class="text-xs text-mute mt-2 leading-relaxed">
+                                    This setting overrides <code class="text-faint">TAXONOMY_FULL_REBUILD_INTERVAL_MS</code>
+                                    from the server environment.
+                                </p>
+                            {:else if schedule.source === 'env'}
+                                <p class="text-xs text-mute mt-2 leading-relaxed">
+                                    Currently set by <code class="text-faint">TAXONOMY_FULL_REBUILD_INTERVAL_MS</code>.
+                                    Changing it here overrides that.
+                                </p>
+                            {/if}
+                        {/if}
+
+                        {#if scheduleError}
+                            <p class="text-xs text-danger mt-2" transition:slide>{scheduleError}</p>
+                        {/if}
+                    </div>
+
                     <div class="well p-3 mt-4">
                         <p class="eyebrow">How it works</p>
                         <p class="text-xs text-mute mt-1 leading-relaxed">
                             <strong class="text-body">Incremental:</strong> after each document import, new topics are
-                            placed into the existing hierarchy automatically.
+                            placed into the existing hierarchy automatically. Cheap, but it never revisits an earlier
+                            placement, so the hierarchy slowly drifts toward the order documents arrived in.
                             <br />
-                            <strong class="text-body">Full rebuild:</strong> “Rebuild taxonomy” has the model review all
-                            topics and build the hierarchy from scratch. It also runs after each git repo sync.
+                            <strong class="text-body">Full rebuild:</strong> the model reviews every topic and rebuilds
+                            the hierarchy from scratch, correcting that drift. It sends the whole topic set to the model,
+                            so it runs on the schedule above — or on demand via “Rebuild taxonomy”.
                         </p>
                     </div>
                 </div>

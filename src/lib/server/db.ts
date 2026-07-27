@@ -269,6 +269,22 @@ try {
     db.exec('ALTER TABLE chat_history ADD COLUMN conversation_id TEXT');
 } catch (e) {}
 
+// Migration: pinned conversations. Pinned rows are listed in their own section
+// above the rest and are refused by DELETE until they are unpinned.
+try {
+    db.exec('ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+} catch (e) {}
+try {
+    // The sidebar's only ordering: pinned first, most recently touched first.
+    db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_conversations_user_pinned_updated ON conversations(user_id, pinned DESC, updated_at DESC)'
+    );
+} catch (e) {}
+try {
+    // Sidebar search scans a user's own messages by conversation.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_chat_history_conversation ON chat_history(conversation_id)');
+} catch (e) {}
+
 // Migration: Add doc_content_hash to knowledge_claims for version attribution
 try {
     db.exec('ALTER TABLE knowledge_claims ADD COLUMN doc_content_hash TEXT');
@@ -898,6 +914,97 @@ try {
     db.exec('CREATE INDEX IF NOT EXISTS idx_token_usage_category_created ON token_usage(category, created_at)');
 } catch (e) {}
 
+// ── app_state ───────────────────────────────────────────────────────────────
+//
+// Scalar bookkeeping the app needs to survive a restart but that belongs to no
+// entity table: "when did the periodic taxonomy rebuild last run", and whatever
+// joins it later. A generic key/value table rather than a column bolted onto an
+// unrelated row, because the alternative on offer was `git_repos` — and the
+// rebuild is corpus-wide, so hanging its timestamp off one repo would make the
+// answer depend on which repo happened to sync first.
+//
+// Values are TEXT and callers own the encoding (see appStateNumber for the
+// epoch-ms case). Distinct from `schema_migrations`, which records one-shot
+// applied/not-applied facts about the schema and must never be rewritten.
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS app_state (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+} catch (e) {
+    console.error('[Migration] Failed to create app_state:', e);
+}
+
+/** Reads an app_state value, or null when the key was never written. */
+export function getAppState(key: string): string | null {
+    const row = db.prepare('SELECT value FROM app_state WHERE key = ?').get(key) as
+        | { value: string | null }
+        | undefined;
+    return row?.value ?? null;
+}
+
+/** Writes (or overwrites) an app_state value and stamps updated_at. */
+export function setAppState(key: string, value: string): void {
+    db.prepare(`
+        INSERT INTO app_state (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+    `).run(key, value);
+}
+
+/**
+ * An app_state value read as a finite number, or null.
+ *
+ * Returns null rather than NaN or 0 for a missing/garbled value, because callers
+ * use it for "have we ever done this?" checks where NaN comparisons silently
+ * answer "no" and 0 answers "yes, in 1970" — two different wrong answers.
+ */
+export function getAppStateNumber(key: string): number | null {
+    const raw = getAppState(key);
+    if (raw === null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+}
+
+// ── user_preferences ────────────────────────────────────────────────────────
+//
+// Per-user UI state that must survive a browser change, so localStorage is not
+// enough: currently just the recents panel width. Keyed like app_state — TEXT
+// values, callers own the encoding — but scoped to a user and cascading with
+// them, which is why it is a separate table rather than namespaced keys in
+// app_state.
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, key),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+    `);
+} catch (e) {
+    console.error('[Migration] Failed to create user_preferences:', e);
+}
+
+/** Reads one user's preference, or null when they never set it. */
+export function getUserPreference(userId: number, key: string): string | null {
+    const row = db
+        .prepare('SELECT value FROM user_preferences WHERE user_id = ? AND key = ?')
+        .get(userId, key) as { value: string | null } | undefined;
+    return row?.value ?? null;
+}
+
+/** Writes (or overwrites) one user's preference and stamps updated_at. */
+export function setUserPreference(userId: number, key: string, value: string): void {
+    db.prepare(`
+        INSERT INTO user_preferences (user_id, key, value) VALUES (?, ?, ?)
+        ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+    `).run(userId, key, value);
+}
 
 export function getDocuments() {
     return db.prepare(`

@@ -4,6 +4,7 @@ import { chatStream, condenseQuery, analyzeAndCondenseQuery, evaluateContext, sy
 import { db } from '$lib/server/db';
 import { checkRateLimit, CHAT_RATE_LIMIT } from '$lib/server/rate-limit';
 import { withUsageCategory } from '$lib/server/usage';
+import { conversationTitle } from '$lib/conversation-title';
 import type { RequestEvent, RequestHandler } from './$types';
 
 /** A turn as the LLM helpers expect it. Anything else in `history` is dropped. */
@@ -216,7 +217,7 @@ async function handleChat({ request, locals }: RequestEvent) {
         db.prepare(`
             INSERT INTO conversations (id, user_id, title)
             VALUES (?, ?, ?)
-        `).run(currentConversationId, user.id, prompt.slice(0, 50));
+        `).run(currentConversationId, user.id, conversationTitle(prompt));
     }
 
     // Save user prompt to history

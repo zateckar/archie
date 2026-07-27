@@ -6,7 +6,12 @@ import path from 'path';
 import { db, reattributeSharedClaims } from './db';
 import { isIgnoredPath, CLEAN_FOLDER, LEGACY_CLEAN_FOLDER } from './wiki-ignore';
 import { addDocument } from './rag';
-import { rebuildTaxonomy, sweepOrphanTopics } from './knowledge';
+import {
+    rebuildTaxonomy,
+    placeTaxonomyForNewTopics,
+    isFullTaxonomyRebuildDue,
+    sweepOrphanTopics
+} from './knowledge';
 import { recomputeCommunities } from './communities';
 import { encrypt, decrypt } from './crypto-utils';
 import { clearWikiTreeCache } from './wiki';
@@ -152,6 +157,12 @@ export async function syncGitRepo(repoId: number) {
 
     const hasNewRemoteChanges = head !== repo.last_commit;
 
+    // Did this sync actually change the corpus? A new HEAD is NOT the same question:
+    // a commit can touch only unsupported extensions, only ignored paths, or only
+    // the `!Clean` copies this sync itself pushed, and every doc hash still matches.
+    // The post-sync graph work below keys off this rather than off `head`.
+    let corpusChanged = false;
+
     if (hasNewRemoteChanges) {
         console.log('New commits found in repo', url, '- processing documents...');
 
@@ -221,6 +232,7 @@ export async function syncGitRepo(repoId: number) {
             // stored content_hash still doesn't match the file.
             try {
                 await addDocumentFromGit(repoId, filePath, filename, content, dir);
+                corpusChanged = true;
             } catch (err) {
                 const reason = (err as Error)?.message ?? String(err);
                 failedDocs.push({ path: filePath, reason });
@@ -240,7 +252,10 @@ export async function syncGitRepo(repoId: number) {
         }
         // Cascade cleans the removed documents' chunks, claims and topic links,
         // but not the topics or graph edges they were the only support for.
-        if (removedDocs > 0) sweepOrphanTopics();
+        if (removedDocs > 0) {
+            sweepOrphanTopics();
+            corpusChanged = true;
+        }
 
         if (failedDocs.length > 0) {
             console.warn(
@@ -321,12 +336,63 @@ export async function syncGitRepo(repoId: number) {
     // Update last commit and last sync time
     db.prepare('UPDATE git_repos SET last_commit = ?, last_sync_at = CURRENT_TIMESTAMP WHERE id = ?').run(head, repoId);
 
-    // After a full sync, rebuild taxonomy holistically
-    console.log(`[Git Sync] Triggering full taxonomy rebuild after sync of repo ${repoId}...`);
-    try {
-        await rebuildTaxonomy();
-    } catch (err) {
-        console.error('[Git Sync] Taxonomy rebuild failed:', err);
+    // Taxonomy: only when this sync changed something, and incrementally.
+    //
+    // Both halves of that were previously wrong, and together they were the single
+    // largest source of token spend in the app. The rebuild sat outside the
+    // `hasNewRemoteChanges` branch, so an idle repo on the default one-hour
+    // sync_interval paid for 24 full rebuilds a day to reproduce the hierarchy it
+    // already had. And the full rebuild is the expensive shape by construction: it
+    // re-sends EVERY topic to the model in batches of 40 (see deriveTaxonomyFull,
+    // whose per-batch prior-roots context grows as it goes), then clears and
+    // rewrites every parent_topic_id — while new topics have already been placed
+    // per-document during ingestion (see processDocumentKnowledge), leaving the
+    // holistic pass almost nothing to decide.
+    //
+    // What genuinely remains for the sync tail is the case per-document placement
+    // cannot cover: sweepOrphanTopics() deletes topics and `parent_topic_id` is
+    // ON DELETE SET NULL, so removing a parent orphans its children after the last
+    // document was ingested. Incremental placement targets exactly those rows and
+    // makes no model call at all when there are none.
+    //
+    // The full rebuild is not dead. It still runs on three paths: a corpus with no
+    // hierarchy to place into (first import), which placeTaxonomyForNewTopics now
+    // reports back instead of silently returning 0; the periodic schedule below,
+    // which bounds the drift incremental placement accumulates; and on demand via
+    // POST /api/knowledge {action:'rebuild-taxonomy'}.
+    //
+    // Note the schedule is consulted BEFORE placement, not after: a sync that is
+    // about to re-derive every parent gains nothing from first paying the model to
+    // place orphans it is going to overwrite seconds later.
+    //
+    // Both the schedule and the placement pass hang off `corpusChanged`, so an
+    // idle repo stays at zero model calls no matter how overdue the rebuild is.
+    // That is the intended reading of the schedule: it exists to correct drift
+    // caused by incremental placements, and a corpus that has not changed since
+    // the last rebuild has not drifted.
+    if (!corpusChanged) {
+        console.log(`[Git Sync] Repo ${repoId}: no document changes — skipping taxonomy pass.`);
+    } else {
+        try {
+            const scheduled = isFullTaxonomyRebuildDue();
+            const placement = scheduled ? null : await placeTaxonomyForNewTopics();
+
+            if (scheduled || placement?.status === 'needs-full-rebuild') {
+                console.log(
+                    `[Git Sync] Running full taxonomy rebuild for repo ${repoId} ` +
+                    `(${scheduled ? 'periodic schedule due' : 'no existing hierarchy to place into'})...`
+                );
+                const result = await rebuildTaxonomy();
+                console.log(`[Git Sync] Taxonomy rebuilt: ${result.updated}/${result.total} topics assigned parents.`);
+            } else {
+                console.log(
+                    `[Git Sync] Taxonomy: placed ${placement!.placed}/${placement!.orphans} ` +
+                    `orphan topic(s) after sync of repo ${repoId}.`
+                );
+            }
+        } catch (err) {
+            console.error('[Git Sync] Taxonomy pass failed:', err);
+        }
     }
 
     // ...then the community partition and its reports, once, over the final
