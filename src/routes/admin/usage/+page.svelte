@@ -4,6 +4,7 @@
     import MessageSquare from '@lucide/svelte/icons/message-square';
     import FileText from '@lucide/svelte/icons/file-text';
     import Network from '@lucide/svelte/icons/network';
+    import Globe from '@lucide/svelte/icons/globe';
     import CircleDashed from '@lucide/svelte/icons/circle-dashed';
     import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
     import Table from '@lucide/svelte/icons/table';
@@ -12,7 +13,7 @@
     // Types mirror the /api/usage response. Declared locally rather than imported
     // from $lib/server/usage because that module opens the database — SvelteKit
     // must never pull it into the client bundle.
-    type Category = 'chat' | 'documents' | 'knowledge' | 'other';
+    type Category = 'chat' | 'documents' | 'knowledge' | 'market' | 'other';
     type Span = '1d' | '7d' | '30d';
 
     interface Totals {
@@ -70,6 +71,7 @@
         { key: 'chat', label: 'Chat', hint: 'Answering user questions', icon: MessageSquare },
         { key: 'documents', label: 'Document processing', hint: 'Cleaning, summarizing, chunking, embedding', icon: FileText },
         { key: 'knowledge', label: 'Knowledge base', hint: 'Extraction, taxonomy, communities, consistency', icon: Network },
+        { key: 'market', label: 'Market research', hint: 'Web search and assessment of the portfolio', icon: Globe },
         { key: 'other', label: 'Other', hint: 'Calls outside a tracked pipeline', icon: CircleDashed }
     ];
 
@@ -692,11 +694,21 @@
          dark  — worst adjacent CVD ΔE 8.4, normal-vision 19.8  → PASS
        Light mode WARNs on contrast for aqua/yellow (2.82/2.17 vs white), so the
        relief rule applies: the legend carries each series' value and the chart has
-       a table view, both shipped above. */
+       a table view, both shipped above.
+
+       --series-market (slot 5, violet) was added later for the market research
+       category and has NOT been through that validator, so the pairlist result
+       above describes the original four only. It sits between knowledge (aqua)
+       and other (yellow) in stack order, neither of which it is close to in hue;
+       the pair to re-check if this is ever validated is violet against chat's
+       blue, which CVD simulation pulls in the same direction. The relief rule
+       already in place — labelled legend values plus the table view — is what
+       carries it until then. */
     .usage-root {
         --series-chat: #3987e5;
         --series-documents: #d95926;
         --series-knowledge: #199e70;
+        --series-market: #a563d8;
         --series-other: #c98500;
         --chart-grid: var(--line-subtle);
         --chart-baseline: var(--line);
@@ -706,6 +718,7 @@
         --series-chat: #2a78d6;
         --series-documents: #eb6834;
         --series-knowledge: #1baf7a;
+        --series-market: #9450cc;
         --series-other: #eda100;
     }
 

@@ -812,6 +812,100 @@ export async function embedContent(
     return { embedding: { values } };
 }
 
+// ── Grounded generation (web search) ────────────────────────────────────────
+
+/** One web page the model actually consulted, as reported by the provider. */
+export interface GroundedSource {
+    title: string;
+    url: string;
+}
+
+export interface GroundedResult {
+    text: string;
+    /**
+     * Sources the provider attached to this answer. These are REPORTED, not
+     * parsed out of the text — which is what makes them usable as the only
+     * citations the rest of the pipeline will accept (see market-format).
+     */
+    sources: GroundedSource[];
+    /** The searches the model chose to run. Kept for diagnosability. */
+    queries: string[];
+}
+
+/** Whether grounded generation can run at all. */
+export const groundedSearchConfigured = Boolean(geminiApiKey);
+
+/**
+ * Text generation with live web search.
+ *
+ * Gemini-only, deliberately and with no fallback: the LiteLLM gateway exposes no
+ * search tool, so there is nothing to fall back TO — and quietly answering from
+ * model memory when the search tool is unavailable would be the worst possible
+ * failure here, producing confident, uncited, and potentially years-stale claims
+ * that read exactly like grounded ones. An unconfigured or failing provider
+ * throws, and the caller records the failure.
+ *
+ * Two provider constraints shape the signature:
+ *   - `responseMimeType` is NOT forwarded. Gemini rejects JSON mode combined
+ *     with a tool, so a grounded call cannot also be a structured-output call;
+ *     callers that need JSON run a second, unGROUNDED call over this one's text.
+ *   - Search is billed per grounded request on top of tokens, so the token
+ *     meter below understates this call's true cost. The request COUNT is what
+ *     that spend tracks, which is why market-research reports it separately
+ *     rather than leaving the usage dashboard to imply it is only tokens.
+ */
+export async function generateGrounded(
+    prompt: string,
+    model: string,
+    config?: GenerationConfig,
+    options?: MeteredOptions
+): Promise<GroundedResult> {
+    if (!geminiApiKey) {
+        throw new Error('Grounded search requires GEMINI_API_KEY; no other configured provider offers web search.');
+    }
+
+    const startedAt = Date.now();
+    let result: Awaited<ReturnType<typeof genAI.models.generateContent>>;
+    try {
+        result = await genAI.models.generateContent({
+            model,
+            contents: prompt,
+            config: {
+                temperature: config?.temperature,
+                maxOutputTokens: config?.maxOutputTokens,
+                tools: [{ googleSearch: {} }]
+            }
+        });
+    } catch (e) {
+        meterFailure(options?.op, 'gemini', model, 'generate', prompt, startedAt);
+        throw e;
+    }
+
+    const text = result.text ?? '';
+    meter({
+        op: options?.op,
+        provider: 'gemini',
+        model,
+        kind: 'generate',
+        reported: readGeminiUsage((result as { usageMetadata?: unknown }).usageMetadata),
+        inputText: prompt,
+        outputText: text,
+        startedAt
+    });
+
+    const metadata = result.candidates?.[0]?.groundingMetadata;
+    const seen = new Set<string>();
+    const sources: GroundedSource[] = [];
+    for (const chunk of metadata?.groundingChunks ?? []) {
+        const url = chunk.web?.uri;
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        sources.push({ title: chunk.web?.title?.trim() || url, url });
+    }
+
+    return { text, sources, queries: metadata?.webSearchQueries ?? [] };
+}
+
 /**
  * Native document reranking via the LiteLLM /rerank endpoint. Returns indices
  * ordered most→least relevant, or `null` when the primary reranker is

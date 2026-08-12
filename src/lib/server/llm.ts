@@ -1,6 +1,14 @@
 import 'dotenv/config';
 import crypto from 'crypto';
 import * as providers from './providers';
+import {
+    buildAssessmentPrompt,
+    buildResearchPrompt,
+    normalizeAssessment,
+    type MarketAssessment,
+    type MarketSubject,
+    type PortfolioContext
+} from './market-format';
 
 /**
  * High-level LLM task layer (provider-agnostic).
@@ -2059,6 +2067,62 @@ export function normalizeConsistencyResult(r: ConsistencyResult): ConsistencyRes
     return { ...r, supersedesIndex: idx };
 }
 
+// ── Market research ─────────────────────────────────────────────────────────
+//
+// Two calls, and the split between them is deliberate rather than incidental.
+//
+// researchProduct is the only outward-facing call in the application: it runs
+// with a live search tool, and its prompt is built exclusively from public
+// product identity (see ./market-format). assessProduct reads that brief
+// alongside our internal record — criticality, dependencies, our own fitness
+// ratings — and runs with NO tool, so there is no mechanism by which anything it
+// reads could become a search query.
+//
+// The second call also buys back structured output: a grounded Gemini call
+// cannot use JSON mode, so a single-call design would mean parsing JSON out of
+// free text produced by the one call least able to follow a format.
+
+/** Free-text brief plus the sources the provider says it consulted. */
+export async function researchProduct(
+    subject: MarketSubject
+): Promise<{ brief: string; sources: providers.GroundedSource[]; queries: string[] }> {
+    const result = await withRetry(() =>
+        providers.generateGrounded(
+            buildResearchPrompt(subject),
+            TEXT_MODEL,
+            // Low but not zero: the model is choosing search queries here, and a
+            // fully greedy decode makes it settle for one phrasing of them.
+            { temperature: 0.2, maxOutputTokens: 4096 },
+            { op: 'market_research_search' }
+        )
+    );
+    return { brief: result.text, sources: result.sources, queries: result.queries };
+}
+
+/**
+ * Structures a brief into the stored assessment.
+ *
+ * Returns the normalized "not identified" assessment rather than throwing when
+ * the model returns nothing parseable — an unreadable answer and an answer of
+ * "the web knows nothing about this" have the same correct outcome here, which
+ * is a row that makes no claims.
+ */
+export async function assessProduct(
+    subject: MarketSubject,
+    brief: string,
+    sources: providers.GroundedSource[],
+    context: PortfolioContext
+): Promise<MarketAssessment> {
+    const result = await withRetry(() =>
+        providers.generateContent(
+            buildAssessmentPrompt(subject, brief, sources, context),
+            { model: TEXT_MODEL },
+            DETERMINISTIC_JSON_CONFIG,
+            { op: 'market_research_assess' }
+        )
+    );
+    return normalizeAssessment(tryParseJSON(result.response.text()), sources);
+}
 
 /** HTTP statuses worth a retry: rate limiting and transient server/gateway faults. */
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);

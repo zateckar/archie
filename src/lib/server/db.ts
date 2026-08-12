@@ -1094,6 +1094,80 @@ try {
     console.error('[Migration] Failed to create LeanIX tables:', e);
 }
 
+// ── Market research: what the open web says about the portfolio ──────────────
+//
+// LeanIX records what we decided; these two tables record what the market did
+// about it since. Filled by ./market-research, which searches the web for each
+// factsheet's PRODUCT (see ./market-format for why only the public identity is
+// ever sent outward) and writes back an assessment plus any risk events found.
+//
+// Kept apart from leanix_factsheets rather than added as columns because the two
+// have different lifetimes and different truth conditions: a factsheet row is a
+// faithful copy of a record we own and is replaced wholesale on every sync, while
+// an assessment is a dated, model-authored reading of external sources that must
+// survive that sync, carry its own staleness, and be discardable without touching
+// the copy. ON DELETE CASCADE still ties them: research about a factsheet that
+// left the portfolio is not research about anything.
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS leanix_market_research (
+            factsheet_id TEXT PRIMARY KEY,
+            -- What was actually searched for, stored verbatim so a surprising
+            -- assessment can be traced back to the question that produced it.
+            subject TEXT NOT NULL,
+            -- 0 when the web had nothing credible about this product. A distinct
+            -- state from "not researched yet" (no row) and from "researched and
+            -- found problems" — an in-house application is unresearchable, not
+            -- risky, and the page must not imply otherwise.
+            identified INTEGER NOT NULL DEFAULT 0,
+            verdict TEXT,
+            confidence REAL,
+            headline TEXT,
+            rationale TEXT,
+            market_position TEXT,
+            strengths TEXT,
+            concerns TEXT,
+            alternatives TEXT,
+            sources TEXT,
+            model TEXT,
+            -- Hash of the factsheet fields that define WHAT is being researched.
+            -- A change here invalidates the assessment before its TTL expires;
+            -- everything else about a factsheet can change without doing so.
+            input_hash TEXT,
+            researched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            error TEXT,
+            FOREIGN KEY (factsheet_id) REFERENCES leanix_factsheets(id) ON DELETE CASCADE
+        );
+
+        -- One row per risk event. Rewritten on every refresh, but keyed on a
+        -- fingerprint of (category, normalised title) so a story that is still
+        -- being reported keeps its original first_seen_at across refreshes —
+        -- that is what makes "new since Tuesday" answerable, and it is the whole
+        -- reason these are not simply a JSON column on the row above.
+        CREATE TABLE IF NOT EXISTS leanix_market_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            factsheet_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            category TEXT NOT NULL,
+            title TEXT NOT NULL,
+            detail TEXT,
+            event_date TEXT,
+            source_url TEXT,
+            source_title TEXT,
+            first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (factsheet_id, fingerprint),
+            FOREIGN KEY (factsheet_id) REFERENCES leanix_factsheets(id) ON DELETE CASCADE
+        );
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_leanix_market_alerts_fs ON leanix_market_alerts(factsheet_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_leanix_market_alerts_severity ON leanix_market_alerts(severity)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_leanix_market_research_at ON leanix_market_research(researched_at)');
+} catch (e) {
+    console.error('[Migration] Failed to create LeanIX market research tables:', e);
+}
+
 // ── documents: where a document came from ───────────────────────────────────
 //
 // Until now a document's identity for re-ingestion was (repo_id, path), which

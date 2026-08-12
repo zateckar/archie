@@ -6,6 +6,7 @@ import Users from '@lucide/svelte/icons/users';
 import Activity from '@lucide/svelte/icons/activity';
 import Coins from '@lucide/svelte/icons/coins';
 import Network from '@lucide/svelte/icons/network';
+import Globe from '@lucide/svelte/icons/globe';
 import RefreshCw from '@lucide/svelte/icons/refresh-cw';
 
     let stats = $state({
@@ -26,6 +27,22 @@ import RefreshCw from '@lucide/svelte/icons/refresh-cw';
     let leanix = $state<LeanixStatus | null>(null);
     let syncing = $state(false);
     let syncMessage = $state('');
+
+    interface MarketStatus {
+        configured: boolean;
+        total: number;
+        researched: number;
+        identified: number;
+        errored: number;
+        alerts: number;
+        urgentAlerts: number;
+        lastRunAt: number | null;
+        batchLimit: number;
+        running: boolean;
+    }
+    let market = $state<MarketStatus | null>(null);
+    let researching = $state(false);
+    let researchMessage = $state('');
 
     function ago(ms: number | null): string {
         if (!ms) return 'never';
@@ -65,6 +82,41 @@ import RefreshCw from '@lucide/svelte/icons/refresh-cw';
         }
     }
 
+    async function loadMarket() {
+        const res = await fetch('/api/leanix/market-research');
+        if (res.ok) market = await res.json();
+    }
+
+    /**
+     * Runs the next batch. Deliberately NOT forced: this button exists to move
+     * the backlog along, and forcing would re-buy assessments that are still
+     * fresh — every one of which costs a billed web search plus tokens.
+     */
+    async function runResearch() {
+        researching = true;
+        researchMessage = '';
+        try {
+            const res = await fetch('/api/leanix/market-research', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const result = await res.json();
+            researchMessage = res.ok
+                ? (result.status === 'skipped'
+                    ? `Skipped — ${result.reason}`
+                    : `${result.researched} researched · ${result.identified} identified · ${result.unidentified} not found · ${result.alerts} alert(s)` +
+                      (result.due > result.researched ? ` · ${result.due - result.researched} still queued` : '') +
+                      (result.failed.length ? ` · ${result.failed.length} failed` : ''))
+                : (result.error ?? 'Research failed');
+            await loadMarket();
+        } catch (err) {
+            researchMessage = (err as Error).message;
+        } finally {
+            researching = false;
+        }
+    }
+
     /** Compact form so a multi-million token count still fits the tile. */
     function compact(n: number): string {
         if (n < 1000) return String(Math.round(n));
@@ -86,7 +138,7 @@ import RefreshCw from '@lucide/svelte/icons/refresh-cw';
         if (usersRes.ok) stats.users = (await usersRes.json()).length;
         if (usageRes.ok) stats.tokens = (await usageRes.json()).cumulative.total.totalTokens;
 
-        await loadLeanix();
+        await Promise.all([loadLeanix(), loadMarket()]);
     });
 </script>
 
@@ -150,6 +202,59 @@ import RefreshCw from '@lucide/svelte/icons/refresh-cw';
                 <p class="text-xs text-mute mt-3">{syncMessage}</p>
             {/if}
             <a href="/leanix" class="btn btn-ghost btn-sm mt-3 -ml-2.5">View portfolio analytics</a>
+        </div>
+    {/if}
+
+    {#if market}
+        <div class="card p-5 mt-6">
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <h2 class="flex items-center gap-2 text-sm font-semibold text-body">
+                        <Globe class="w-4 h-4 text-faint" />
+                        Market research
+                    </h2>
+                    <p class="text-xs text-faint mt-1">
+                        Searches the web about each portfolio product. Billed per search and per token, so it
+                        runs {market.batchLimit} at a time and re-checks each factsheet weekly.
+                    </p>
+                </div>
+                <button class="btn btn-secondary btn-sm shrink-0" onclick={runResearch}
+                        disabled={researching || !market.configured}>
+                    <RefreshCw class="w-3.5 h-3.5 {researching ? 'animate-spin' : ''}" />
+                    {researching ? 'Researching…' : 'Research next batch'}
+                </button>
+            </div>
+
+            <dl class="mt-4 divide-y divide-[var(--line-subtle)]">
+                {#each [
+                    { name: 'Status', value: market.configured ? 'Configured' : 'Not configured', ok: market.configured },
+                    { name: 'Coverage', value: `${market.researched} of ${market.total} factsheets`, ok: market.researched > 0 },
+                    { name: 'Identified on the web', value: `${market.identified}`, ok: market.identified > 0 },
+                    { name: 'Open alerts', value: `${market.alerts}${market.urgentAlerts ? ` (${market.urgentAlerts} critical or high)` : ''}`, ok: market.alerts === 0 },
+                    { name: 'Last run', value: ago(market.lastRunAt), ok: !!market.lastRunAt }
+                ] as row}
+                    <div class="flex items-center justify-between py-2.5">
+                        <dt class="text-[13px] text-dim">{row.name}</dt>
+                        <dd class="badge {row.ok ? 'badge-success' : 'badge-neutral'}">{row.value}</dd>
+                    </div>
+                {/each}
+                {#if market.errored > 0}
+                    <div class="flex items-center justify-between py-2.5">
+                        <dt class="text-[13px] text-dim">Failed</dt>
+                        <dd class="badge badge-warning">{market.errored} — retried automatically</dd>
+                    </div>
+                {/if}
+            </dl>
+
+            {#if researchMessage}
+                <p class="text-xs text-mute mt-3">{researchMessage}</p>
+            {/if}
+            {#if !market.configured}
+                <p class="text-xs text-faint mt-3">
+                    Requires <code>GEMINI_API_KEY</code> — web search is the one capability the LiteLLM gateway
+                    does not provide. Set <code>MARKET_RESEARCH_ENABLED=false</code> to switch it off.
+                </p>
+            {/if}
         </div>
     {/if}
 

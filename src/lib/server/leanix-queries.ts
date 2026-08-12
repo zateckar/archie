@@ -56,11 +56,26 @@ export function getPortfolioSummary() {
         WHERE rel_type = 'relITComponentToProvider' AND to_name IS NOT NULL
     `).get() as { c: number };
 
+    const businessCapabilities = db.prepare(`
+        SELECT COUNT(DISTINCT to_name) AS c FROM leanix_relations
+        WHERE rel_type = 'relApplicationToBusinessCapability' AND to_name IS NOT NULL
+    `).get() as { c: number };
+
+    // Applications carrying at least one business capability. Reported alongside
+    // the total because the panel's headline claim ("57 capabilities") is only
+    // meaningful next to how much of the portfolio it was drawn from.
+    const mappedApplications = db.prepare(`
+        SELECT COUNT(DISTINCT from_id) AS c FROM leanix_relations
+        WHERE rel_type = 'relApplicationToBusinessCapability'
+    `).get() as { c: number };
+
     return {
         ...row,
         avg_completion: row.avg_completion ?? 0,
         distinct_capabilities: capabilities.c,
-        distinct_vendors: vendors.c
+        distinct_vendors: vendors.c,
+        distinct_business_capabilities: businessCapabilities.c,
+        applications_with_business_capability: mappedApplications.c
     };
 }
 
@@ -180,7 +195,12 @@ export function getCriticalityMatrix() {
         rows: criticalities.map(c => ({
             key: c ?? '',
             label: label(c),
+            // Each cell carries BOTH raw keys, not just its label: drilling a cell
+            // is a two-dimensional question, and a label ("Not set") cannot be
+            // turned back into the NULL it came from.
             cells: dataclasses.map(d => ({
+                key: d ?? '',
+                criticalityKey: c ?? '',
                 label: label(d),
                 count: rows.find(r => r.criticality === c && r.dataclass === d)?.count ?? 0
             }))

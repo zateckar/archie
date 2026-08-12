@@ -7,6 +7,7 @@ Archie is a sophisticated Retrieval-Augmented Generation (RAG) chatbot built wit
 - **Document Management:** Sync documents from Git repositories or upload them manually.
 - **LeanIX Portfolio (read-only):** Tagged factsheets are pulled from LeanIX once a day into both the knowledge base and a dedicated portfolio analytics page for domain and enterprise architects. The integration cannot write to LeanIX, and costs two API requests on a day when nothing changed.
 - **Capability Map:** The portfolio drawn as a landscape — factsheet names in the cells, coloured by lifecycle, clickable for detail — across a consistent technology tower model and the Škoda Auto business capability map, with uncovered capabilities left visible as gaps rather than omitted.
+- **Market Research:** Each portfolio product is researched on the open web — is it still the right choice, what are the alternatives, and has anything happened to it (breaches, acquisitions, end-of-life, strategy changes). Alerts and assessments land on the portfolio page, every claim carries a provider-reported source, and only the product's public identity is ever sent to a search engine.
 - **Advanced RAG Pipeline:** Uses hybrid search (Vector + Keyword) with LLM-based reranking.
 - **Document Preprocessing:** LLM-powered cleaning removes boilerplate, fixes formatting, and restructures content before ingestion.
 - **Semantic Knowledge Layer:** Automatically extracts a knowledge graph (topics, relationships, claims) from documents with cross-chunk context awareness.
@@ -484,13 +485,48 @@ Manager" — are architectural information and are included in both.
 #### The portfolio page (`/leanix`)
 
 Available to any signed-in user; loads entirely from SQLite. Platform load,
-vendor concentration, technology capability coverage, lifecycle and technical-fit
-distributions, TIME classification, end-of-life runway, ownership by organisation
-and role, business criticality against data classification, record gaps, and a
-searchable/sortable table of every factsheet.
+vendor concentration, technology capability coverage, business capability
+coverage, lifecycle and technical-fit distributions, TIME classification,
+end-of-life runway, ownership by organisation and role, business criticality
+against data classification, record gaps, and a searchable/sortable table of
+every factsheet.
+
+The two capability panels are deliberate siblings: technology capability coverage
+is what the estate is built *from* (components), business capability coverage is
+what it is *for* (applications). The business one states its own shape rather
+than letting the chart imply one — in the reference workspace 57 capabilities are
+supported by 14 of 14 applications, but the distribution is near-flat, so almost
+every capability is served by a single application and the ranking below the top
+few is nominal. The panel says so, and links to the full 57.
 
 Admins get a status card and a "Sync now" button on `/admin`
 (`POST /api/leanix`, admin-gated in `hooks.server.ts`).
+
+**Every number drills.** Each aggregate answers "how many"; clicking it asks
+"which ones" and opens the list beside the chart — the 974 applications on Power
+Platform, the components behind a vendor, the factsheets in a lifecycle bucket,
+one cell of the criticality matrix, the twelve factsheets with no responsible
+owner. Served on demand from `GET /api/portfolio/drill` rather than shipped with
+the page: the relation table holds ~5200 edges, and precomputing every drill
+would weigh down a page load to answer a question most visitors never ask.
+
+Two properties are worth knowing, because both are easy to get wrong:
+
+- **The drill and the number are written against the same filters.** Where an
+  aggregate restricts by type (component category is components-only, TIME is
+  applications-only), so does its drill. A verification pass asserts every drill
+  total equals the figure rendered next to it — 103 checks across every metric on
+  the page. A drill that disagrees with its own bar is worse than no drill, since
+  the number on screen is the one an architect would quote in a meeting.
+- **"Not set" drills to `IS NULL`, not `= ''`.** The breakdowns group on nullable
+  columns and hand the page a bucket keyed `''`; matching that literally would
+  make the most interesting bucket on a sparsely-filled portfolio silently return
+  nothing.
+
+The endpoint deliberately sits outside `/api/leanix`, which is admin-only because
+everything under it spends budget. This is the read side of a page any signed-in
+user can already open, so it requires a session and no more. Lists are capped at
+500 rows with the true total still reported, and the panel says when it truncated.
 
 #### The capability map (`/leanix/capabilities`)
 
@@ -567,6 +603,122 @@ what the page can show:
   fields back to `FACTSHEET_QUERIES` to light them up.
 - **Sparse fields.** `technicalSuitability` is set on 11 of 64 components. The page
   reports "Not set" explicitly rather than letting an empty bar read as zero.
+
+---
+
+### 8. Market Research (Web Search over the Portfolio)
+
+LeanIX records what we decided. Market research records what the market did about
+it since: for each factsheet it searches the open web for that **product**, then
+writes back an assessment — is it still the right choice, what would a team
+evaluate instead — plus any risk events found (security incidents, breaches,
+acquisitions, financial distress, strategy changes, end-of-life announcements).
+
+Results appear on the same `/leanix` page: an alert feed at the top, a verdict
+distribution, a "where we disagree with the market" panel, and a Market column in
+the factsheet table that opens the full assessment.
+
+#### Two calls, and why they are separate
+
+| Call | Tool | Sees | Produces |
+|---|---|---|---|
+| 1. Research | Google Search grounding | Public product identity only | Free-text brief + provider-reported sources |
+| 2. Assess | **none** | The brief + our internal record | Strict JSON verdict, alternatives, alerts |
+
+The split is a containment boundary, not an implementation detail:
+
+- **The grounded call is the only outward-facing request in this application**, and
+  a search query is more exposed than a model prompt — it reaches a search index.
+  Its prompt is built from an explicit allowlist (`PUBLIC_IDENTITY_FIELDS` in
+  `lib/server/market-format.ts`): product name, alias, vendor, category. Business
+  criticality, ownership, dependency counts, TIME posture and free-text
+  descriptions never leave.
+- **The assessment call has no search tool attached.** It is the only call that
+  sees the internal record, and without a tool there is no mechanism by which
+  anything it reads could become a query.
+- The second call also buys back structured output: a grounded Gemini call cannot
+  use JSON mode, so a one-call design would mean parsing JSON out of free text
+  produced by the call least able to follow a format.
+
+Gemini is used directly and with **no fallback**. The LiteLLM gateway exposes no
+search tool, so there is nothing to fall back to — and quietly answering from model
+memory when search is unavailable is the worst failure mode here, producing
+confident, uncited, years-stale claims that read exactly like grounded ones. An
+unconfigured or failing provider records the failure instead.
+
+#### Citations cannot be invented
+
+The model never returns a URL. It cites a **1-based index** into the source list
+the provider reported for the grounded call, and the index is resolved to a real
+URL server-side. An index that does not resolve yields no source rather than a
+plausible-looking link, so a fabricated citation is unrepresentable.
+
+Everything else the model returns is treated as hostile input: every enum is
+folded to a known value, confidence is clamped to 0–1, dates are rejected unless
+they are real calendar dates (`2026-02-31` does not survive), and every array and
+string is length-capped before it reaches the database.
+
+#### "Not found" is a first-class answer
+
+An in-house system has no market to research. The research prompt gives the model
+an explicit way to say so (`NO_PUBLIC_INFORMATION`), which short-circuits the
+second call — so an unresearchable factsheet costs one call, not two — and stores
+a row that makes no claims. This is deliberately distinct from both "not yet
+researched" and "researched and fine": in the reference workspace, `AWS Cloud
+Škoda` and `Azure Cloud Škoda` correctly return not-found rather than an invented
+assessment of generic AWS or Azure.
+
+If a factsheet is not identified, its verdict, alternatives and alerts are all
+discarded — a model that says "not identified" and then lists a breach is
+describing something it did not find.
+
+#### The cost budget
+
+This is the only scheduled job in the app billed **per item** (a grounded search
+fee on top of tokens), so work is gated three ways, each answering a different
+question:
+
+| Gate | Question | Default | Override |
+|---|---|---|---|
+| TTL | Has enough time passed for the answer to differ? | 7 days | `MARKET_RESEARCH_TTL_DAYS` |
+| Input hash | Is this still the same product? | name/alias/vendor/category | — |
+| Batch cap | How much can one run spend? | 10 factsheets | `MARKET_RESEARCH_BATCH` |
+
+The input hash invalidates immediately on a rename or a vendor change; every other
+edit (description, owner, criticality) does not, because none of them change what
+a search would return. A failed attempt is retried on a short clock
+(`MARKET_RESEARCH_ERROR_RETRY_HOURS`, default 6) rather than either looping or
+waiting out the full TTL. A first run over 78 factsheets therefore spreads across
+about a week; the admin card reports how many are still queued so a partly-filled
+page never reads as a finished one.
+
+Measured on the reference workspace: ~45s and 6–8 underlying searches per
+identified factsheet, one grounded request each.
+
+#### Where the data lands
+
+- `leanix_market_research` — one row per factsheet: verdict, confidence, headline,
+  rationale, strengths, concerns, alternatives, sources, input hash, error.
+- `leanix_market_alerts` — one row per risk event, keyed on a fingerprint of
+  (category, normalised title). Alerts are **upserted** on that fingerprint rather
+  than replaced, so a story still being reported next week keeps its original
+  `first_seen_at` — which is what makes the "New" badge meaningful. Alerts absent
+  from a refresh are deleted, so the set is self-cleaning and never accumulates.
+
+Token spend is metered under its own `market` category, so the usage dashboard
+separates it from ingestion and chat. Note that the per-search fee is **not** a
+token cost and so is not in that figure; the run result reports the search count
+separately.
+
+Unlike ingestion, assessments are **not** written into the RAG corpus. They are
+dated, model-authored readings of external sources, and turning them into
+retrievable claims would let "Confluence should be replaced" come back as a
+documented fact months after the underlying story changed.
+
+#### Configuration
+
+Requires `GEMINI_API_KEY`. Set `MARKET_RESEARCH_ENABLED=false` to switch it off;
+with it off, every field degrades to empty and the portfolio page is unchanged.
 
 ---
 
@@ -669,6 +821,11 @@ what the page can show:
 | `LEANIX_FULL_REFRESH_DAYS` | No | `7` | Force a full fetch this often, to catch renamed *related* factsheets that do not bump `updatedAt` |
 | `LEANIX_REQUEST_TIMEOUT_MS` | No | `120000` | Per-request timeout; the ITComponent query returns thousands of relation edges |
 | `LEANIX_WORKSPACE_URL` | No | derived from the access token | Base for "open in LeanIX" links. Normally leave unset — the token carries `instanceUrl` and the workspace name, so the first sync derives it at no request cost. Set only to override |
+| `MARKET_RESEARCH_ENABLED` | No | `true` | Set `false` to disable web research entirely. Also inert without `GEMINI_API_KEY`, since no other configured provider offers web search |
+| `MARKET_RESEARCH_TTL_DAYS` | No | `7` | How long an assessment stays fresh. A rename or vendor change invalidates it sooner regardless |
+| `MARKET_RESEARCH_BATCH` | No | `10` | Factsheets researched per run — the ceiling on what one run can spend |
+| `MARKET_RESEARCH_INTERVAL_HOURS` | No | `24` | How often a run may start |
+| `MARKET_RESEARCH_ERROR_RETRY_HOURS` | No | `6` | How soon a failed attempt is retried, instead of waiting out the full TTL |
 
 ---
 

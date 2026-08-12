@@ -12,13 +12,14 @@
  * throw — it silently yields an all-zero chart.
  */
 
-export type UsageCategory = 'chat' | 'documents' | 'knowledge' | 'other';
+export type UsageCategory = 'chat' | 'documents' | 'knowledge' | 'market' | 'other';
 
 /** Stable order used by the API response and the dashboard's stacked chart. */
 export const USAGE_CATEGORIES: readonly UsageCategory[] = [
     'chat',
     'documents',
     'knowledge',
+    'market',
     'other'
 ] as const;
 
@@ -27,6 +28,7 @@ export const USAGE_CATEGORY_LABELS: Record<UsageCategory, string> = {
     chat: 'Chat',
     documents: 'Document processing',
     knowledge: 'Knowledge base',
+    market: 'Market research',
     other: 'Other'
 };
 
@@ -184,6 +186,7 @@ export function emptyByCategory(): Record<UsageCategory, UsageTotals> {
         chat: emptyTotals(),
         documents: emptyTotals(),
         knowledge: emptyTotals(),
+        market: emptyTotals(),
         other: emptyTotals()
     };
 }

@@ -2,6 +2,7 @@ import 'dotenv/config';
 
 import { initAutoSync } from '$lib/server/git';
 import { initLeanixSync } from '$lib/server/leanix';
+import { initMarketResearch } from '$lib/server/market-research';
 
 import { db } from '$lib/server/db';
 import { hashPassword, purgeExpiredSessions } from '$lib/server/auth';
@@ -68,6 +69,12 @@ initAutoSync();
 // Deliberately not on the git timer: that one ticks every minute to serve
 // hour-scale intervals, and this one guards a day.
 initLeanixSync();
+
+// Market research reads the web about what that sync brought in. Separate timer
+// because it answers a different question on a different clock — and because it
+// is the one scheduled job here billed per item, so its first run is held back
+// until well after boot rather than competing with ingestion.
+initMarketResearch();
 
 // ── Expired-session collection ───────────────────────────────────────────────
 // validateSession only removes the single expired row it happens to be handed,
