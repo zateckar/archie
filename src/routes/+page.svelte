@@ -15,6 +15,7 @@ import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
 import Network from '@lucide/svelte/icons/network';
 import Info from '@lucide/svelte/icons/info';
 import BookOpen from '@lucide/svelte/icons/book-open';
+import Layers from '@lucide/svelte/icons/layers';
 import Search from '@lucide/svelte/icons/search';
 import X from '@lucide/svelte/icons/x';
 import Pin from '@lucide/svelte/icons/pin';
@@ -760,6 +761,10 @@ import Plug from '@lucide/svelte/icons/plug';
                                 <BookOpen class="w-4 h-4 text-faint" />
                                 Wiki
                             </a>
+                            <a href="/leanix" class="nav-item">
+                                <Layers class="w-4 h-4 text-faint" />
+                                IT platform portfolio
+                            </a>
                             <a href="/settings" class="nav-item">
                                 <Plug class="w-4 h-4 text-faint" />
                                 Connect apps (MCP)
@@ -808,6 +813,10 @@ import Plug from '@lucide/svelte/icons/plug';
                 <a href="/knowledge" class="btn btn-ghost btn-sm">
                     <Network class="w-4 h-4" />
                     Knowledge graph
+                </a>
+                <a href="/leanix" class="btn btn-ghost btn-sm">
+                    <Layers class="w-4 h-4" />
+                    Portfolio
                 </a>
             </div>
 

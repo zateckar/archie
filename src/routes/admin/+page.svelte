@@ -5,6 +5,8 @@ import GitBranch from '@lucide/svelte/icons/git-branch';
 import Users from '@lucide/svelte/icons/users';
 import Activity from '@lucide/svelte/icons/activity';
 import Coins from '@lucide/svelte/icons/coins';
+import Network from '@lucide/svelte/icons/network';
+import RefreshCw from '@lucide/svelte/icons/refresh-cw';
 
     let stats = $state({
         documents: 0,
@@ -12,6 +14,56 @@ import Coins from '@lucide/svelte/icons/coins';
         users: 0,
         tokens: 0
     });
+
+    interface LeanixStatus {
+        configured: boolean;
+        total: number;
+        byType: Record<string, number>;
+        lastSyncAt: number | null;
+        lastFullFetchAt: number | null;
+        syncing: boolean;
+    }
+    let leanix = $state<LeanixStatus | null>(null);
+    let syncing = $state(false);
+    let syncMessage = $state('');
+
+    function ago(ms: number | null): string {
+        if (!ms) return 'never';
+        const hours = Math.floor((Date.now() - ms) / 3_600_000);
+        if (hours < 1) return 'just now';
+        if (hours < 24) return `${hours}h ago`;
+        return `${Math.floor(hours / 24)}d ago`;
+    }
+
+    async function loadLeanix() {
+        const res = await fetch('/api/leanix');
+        if (res.ok) leanix = await res.json();
+    }
+
+    /**
+     * Forces a full fetch. Ingestion stays hash-gated on the other side, so this
+     * costs two LeanIX requests and only re-processes factsheets that changed.
+     */
+    async function syncLeanix() {
+        syncing = true;
+        syncMessage = '';
+        try {
+            const res = await fetch('/api/leanix', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ force: true })
+            });
+            const result = await res.json();
+            syncMessage = res.ok
+                ? `${result.factsheets} factsheets · ${result.ingested} re-ingested · ${result.unchanged} unchanged · ${result.removed} removed`
+                : (result.error ?? 'Sync failed');
+            await loadLeanix();
+        } catch (err) {
+            syncMessage = (err as Error).message;
+        } finally {
+            syncing = false;
+        }
+    }
 
     /** Compact form so a multi-million token count still fits the tile. */
     function compact(n: number): string {
@@ -33,6 +85,8 @@ import Coins from '@lucide/svelte/icons/coins';
         if (reposRes.ok) stats.repos = (await reposRes.json()).length;
         if (usersRes.ok) stats.users = (await usersRes.json()).length;
         if (usageRes.ok) stats.tokens = (await usageRes.json()).cumulative.total.totalTokens;
+
+        await loadLeanix();
     });
 </script>
 
@@ -59,6 +113,45 @@ import Coins from '@lucide/svelte/icons/coins';
             </a>
         {/each}
     </div>
+
+    {#if leanix}
+        <div class="card p-5 mt-6">
+            <div class="flex items-start justify-between gap-4">
+                <div>
+                    <h2 class="flex items-center gap-2 text-sm font-semibold text-body">
+                        <Network class="w-4 h-4 text-faint" />
+                        LeanIX portfolio
+                    </h2>
+                    <p class="text-xs text-faint mt-1">
+                        Read-only. Syncs once a day and costs two API requests when nothing changed.
+                    </p>
+                </div>
+                <button class="btn btn-secondary btn-sm shrink-0" onclick={syncLeanix} disabled={syncing || !leanix.configured}>
+                    <RefreshCw class="w-3.5 h-3.5 {syncing ? 'animate-spin' : ''}" />
+                    {syncing ? 'Syncing…' : 'Sync now'}
+                </button>
+            </div>
+
+            <dl class="mt-4 divide-y divide-[var(--line-subtle)]">
+                {#each [
+                    { name: 'Status', value: leanix.configured ? 'Configured' : 'Not configured', ok: leanix.configured },
+                    { name: 'Factsheets', value: `${leanix.total}${Object.keys(leanix.byType).length ? ` (${Object.entries(leanix.byType).map(([t, c]) => `${c} ${t}`).join(', ')})` : ''}`, ok: leanix.total > 0 },
+                    { name: 'Last sync', value: ago(leanix.lastSyncAt), ok: !!leanix.lastSyncAt },
+                    { name: 'Last full fetch', value: ago(leanix.lastFullFetchAt), ok: !!leanix.lastFullFetchAt }
+                ] as row}
+                    <div class="flex items-center justify-between py-2.5">
+                        <dt class="text-[13px] text-dim">{row.name}</dt>
+                        <dd class="badge {row.ok ? 'badge-success' : 'badge-neutral'}">{row.value}</dd>
+                    </div>
+                {/each}
+            </dl>
+
+            {#if syncMessage}
+                <p class="text-xs text-mute mt-3">{syncMessage}</p>
+            {/if}
+            <a href="/leanix" class="btn btn-ghost btn-sm mt-3 -ml-2.5">View portfolio analytics</a>
+        </div>
+    {/if}
 
     <div class="card p-5 mt-6">
         <h2 class="flex items-center gap-2 text-sm font-semibold text-body">

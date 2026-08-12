@@ -1006,6 +1006,122 @@ export function setUserPreference(userId: number, key: string, value: string): v
     `).run(userId, key, value);
 }
 
+// ── LeanIX: a read-only external datasource ─────────────────────────────────
+//
+// Factsheets are pulled from LeanIX once a day (see ./leanix) and land in TWO
+// places, deliberately:
+//
+//   1. These tables — the structured record, which is what the /leanix analytics
+//      page reads. No LLM is involved and no text is re-parsed: "how many
+//      applications sit on Power Platform" is a COUNT, not a retrieval problem.
+//   2. `documents` — one synthesized markdown document per factsheet, so the
+//      portfolio is answerable in chat through the same RAG pipeline as
+//      everything else.
+//
+// The split exists because the two questions have different shapes. Relation
+// fan-out is the reason it is not optional: `relITComponentToApplication` totals
+// ~4500 edges across 64 components, and a single platform (Power Platform SaaS
+// Hosting) carries 974 of them. Writing those into the markdown would shred
+// chunking and fill the knowledge graph with application names that say nothing
+// about the platform; the document therefore carries the COUNT plus a handful of
+// examples, while every edge is preserved here for the analytics page.
+//
+// Nothing in this app ever writes to LeanIX. See the `assertQueryOnly` guard in
+// ./leanix — the client refuses to send a GraphQL document containing a mutation.
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS leanix_factsheets (
+            id TEXT PRIMARY KEY,
+            fs_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            display_name TEXT,
+            alias TEXT,
+            description TEXT,
+            leanix_id TEXT,
+            level INTEGER,
+            category TEXT,
+            release TEXT,
+            lifecycle_state TEXT,
+            lifecycle_phases TEXT,
+            end_of_life_date TEXT,
+            technical_fit TEXT,
+            functional_fit TEXT,
+            business_criticality TEXT,
+            data_class TEXT,
+            time_classification TEXT,
+            time_recommendation TEXT,
+            completion REAL,
+            documents TEXT,
+            tags TEXT,
+            updated_at_remote TEXT,
+            content_hash TEXT,
+            doc_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+            synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Every relation edge, including the ones the markdown only summarises.
+        -- to_id frequently points at a factsheet OUTSIDE the synced set (the 974
+        -- applications on Power Platform are not themselves tagged), which is why
+        -- to_name/to_type are denormalised here rather than joined: the target row
+        -- does not exist locally and fetching it would multiply the request count
+        -- this integration is built to keep at two per day.
+        CREATE TABLE IF NOT EXISTS leanix_relations (
+            from_id TEXT NOT NULL,
+            rel_type TEXT NOT NULL,
+            to_id TEXT NOT NULL,
+            to_name TEXT,
+            to_type TEXT,
+            PRIMARY KEY (from_id, rel_type, to_id),
+            FOREIGN KEY (from_id) REFERENCES leanix_factsheets(id) ON DELETE CASCADE
+        );
+
+        -- Ownership. Deliberately NO email column: the API returns one, and an
+        -- internal directory of staff addresses is not something this corpus needs
+        -- in order to answer "who owns this platform". Display name + role is.
+        CREATE TABLE IF NOT EXISTS leanix_subscriptions (
+            factsheet_id TEXT NOT NULL,
+            subscription_type TEXT,
+            role_name TEXT,
+            display_name TEXT,
+            PRIMARY KEY (factsheet_id, subscription_type, role_name, display_name),
+            FOREIGN KEY (factsheet_id) REFERENCES leanix_factsheets(id) ON DELETE CASCADE
+        );
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_leanix_relations_type ON leanix_relations(rel_type)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_leanix_relations_to ON leanix_relations(to_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_leanix_factsheets_type ON leanix_factsheets(fs_type)');
+} catch (e) {
+    console.error('[Migration] Failed to create LeanIX tables:', e);
+}
+
+// ── documents: where a document came from ───────────────────────────────────
+//
+// Until now a document's identity for re-ingestion was (repo_id, path), which
+// only works for git. LeanIX factsheets have no repository and must NOT borrow
+// one: `repo_id` is what makes the chat UI render a `/wiki/<repo_id>/<path>`
+// link on a citation (see MessageBubble), so a fake repo id would produce
+// citations linking to wiki pages that do not exist. They keep repo_id NULL —
+// exactly like an uploaded file — and are identified by (source, source_ref)
+// instead, source_ref being the LeanIX factsheet UUID.
+try {
+    db.exec('ALTER TABLE documents ADD COLUMN source TEXT');
+} catch (e) {}
+try {
+    db.exec('ALTER TABLE documents ADD COLUMN source_ref TEXT');
+} catch (e) {}
+try {
+    // Backfill is unambiguous: every pre-existing document is either a git sync
+    // (it has a repo) or a manual upload (it does not).
+    db.exec(
+        "UPDATE documents SET source = CASE WHEN repo_id IS NOT NULL THEN 'git' ELSE 'upload' END WHERE source IS NULL"
+    );
+    db.exec(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_source_ref ON documents(source, source_ref) WHERE source_ref IS NOT NULL'
+    );
+} catch (e) {
+    console.error('[Migration] Failed to backfill documents.source:', e);
+}
+
 // ── api_tokens: removed ─────────────────────────────────────────────────────
 //
 // A short-lived experiment in bespoke personal access tokens for the MCP server,

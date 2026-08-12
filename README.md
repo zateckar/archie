@@ -5,6 +5,8 @@ Archie is a sophisticated Retrieval-Augmented Generation (RAG) chatbot built wit
 ## 🚀 Features
 
 - **Document Management:** Sync documents from Git repositories or upload them manually.
+- **LeanIX Portfolio (read-only):** Tagged factsheets are pulled from LeanIX once a day into both the knowledge base and a dedicated portfolio analytics page for domain and enterprise architects. The integration cannot write to LeanIX, and costs two API requests on a day when nothing changed.
+- **Capability Map:** The portfolio drawn as a landscape — factsheet names in the cells, coloured by lifecycle, clickable for detail — across a consistent technology tower model and the Škoda Auto business capability map, with uncovered capabilities left visible as gaps rather than omitted.
 - **Advanced RAG Pipeline:** Uses hybrid search (Vector + Keyword) with LLM-based reranking.
 - **Document Preprocessing:** LLM-powered cleaning removes boilerplate, fixes formatting, and restructures content before ingestion.
 - **Semantic Knowledge Layer:** Automatically extracts a knowledge graph (topics, relationships, claims) from documents with cross-chunk context awareness.
@@ -391,6 +393,183 @@ connect can be diagnosed without reading logs.
 See `lib/server/mcp/` for the tool definitions and `routes/api/mcp/` for the transport.
 
 
+### 7. LeanIX (Read-Only Portfolio Datasource)
+
+Alongside git repositories, Archie syncs **factsheets from LeanIX** — the enterprise
+architecture repository — into the same corpus, and renders them as a portfolio
+overview at `/leanix`.
+
+**It is read-only by construction.** Every call goes through one function, which
+throws on any GraphQL document containing a `mutation` or `subscription`
+(`assertQueryOnly` in `lib/server/leanix.ts`). There is no other network exit in
+the module, no REST client, and no equivalent of the git sync's commit-and-push.
+
+#### What is synced
+
+Factsheets carrying a configured tag (`LEANIX_TAG_ID`, default *SKODA Strategic IT
+Product: Enterprise*), restricted to the types in `LEANIX_FACTSHEET_TYPES` —
+78 factsheets in the reference workspace: 64 IT components and 14 applications.
+
+| Captured | Source field |
+|---|---|
+| Name, description, alias, LeanIX id | `name`, `description`, `alias`, `leanixId` |
+| Lifecycle state **and dated phases** | `lifecycle { asString phases }` — plan → phase-in → active → phase-out → end-of-life |
+| Technical / functional fit | `technicalSuitability`, `functionalSuitability` |
+| Business criticality, data classification | `businessCriticality`, `dataclass` |
+| TIME classification | `lxTimeClassification`, `TIMERecommendation` |
+| Category, release, completeness | `category`, `release`, `completion` |
+| Tech capabilities | `relITComponentToTechnologyStack` |
+| Business capabilities | `relApplicationToBusinessCapability` |
+| Vendor | `relITComponentToProvider` |
+| Dependent applications | `relITComponentToApplication` |
+| Owning organisation | `rel*ToUserGroup` |
+| Ownership roles | `subscriptions` — role and person, **never email** |
+| Tags, linked documents, hierarchy, succession | `tags`, `documents`, `relToParent/Child/Predecessor/Successor` |
+
+#### The request budget
+
+Requests to LeanIX are treated as the scarce resource:
+
+| Day | Requests |
+|---|---|
+| Nothing changed | **2** — one token, one probe query returning only `id, type, updatedAt` |
+| Something changed | **4** — the above plus one full query *per factsheet type* |
+| Weekly full refresh | 3 — token plus the two full queries |
+
+The bearer token is cached for its full hour, so a manual "Sync now" minutes after
+a scheduled run spends none. Nothing else in the app ever calls LeanIX: the
+portfolio page and the chat pipeline read SQLite.
+
+Two full queries rather than one is not a choice — `Application.lifecycle` and
+`ITComponent.lifecycle` are different GraphQL types that share a name, so a
+combined selection fails validation with `FieldsConflict`. The *probe* can be a
+single query because `id`, `type` and `updatedAt` are declared on `BaseFactSheet`.
+
+The weekly full refresh (`LEANIX_FULL_REFRESH_DAYS`) exists because the probe has
+one blind spot: renaming a *related* factsheet does not bump `updatedAt` on the
+factsheets pointing at it.
+
+#### Where the data lands
+
+Each factsheet is written **twice**, deliberately:
+
+1. **`leanix_factsheets` / `leanix_relations` / `leanix_subscriptions`** — the
+   structured record the `/leanix` page reads. "Which platforms carry the most
+   applications" is a `COUNT`, not a retrieval problem.
+2. **`documents`** — one synthesized markdown document per factsheet, so the
+   portfolio is answerable in chat through the normal RAG pipeline. These carry
+   `repo_id = NULL` and are identified by `(source, source_ref)`; they deliberately
+   do **not** borrow a repo id, which would make the chat UI render citations
+   linking to wiki pages that do not exist.
+
+The split is what makes relation fan-out survivable. `relITComponentToApplication`
+totals ~4500 edges and a single platform accounts for 974 of them; the document
+carries the *count* plus a dozen examples, while every edge is kept for the
+analytics page. Inlining them would swamp chunking and fill the knowledge graph
+with application names that say nothing about the platform.
+
+Ingestion is **hash-gated on the rendered markdown**, so a factsheet edited in a
+field Archie does not read produces the same document and costs nothing. Factsheets
+are ingested as `preformatted`, which skips the LLM cleaning and summarization
+passes — the content is generated from structured fields, and a cleaner asked to
+strip boilerplate from a 300-character field list has nothing to strip but the
+field list.
+
+**Personal data:** subscriptions carry names and emails. The email is dropped at
+parse time rather than stored and filtered, and person names are kept out of the
+ingested document (they would become retrievable claims about individuals) while
+remaining available on the analytics page. Roles — "Product Manager", "Service
+Manager" — are architectural information and are included in both.
+
+#### The portfolio page (`/leanix`)
+
+Available to any signed-in user; loads entirely from SQLite. Platform load,
+vendor concentration, technology capability coverage, lifecycle and technical-fit
+distributions, TIME classification, end-of-life runway, ownership by organisation
+and role, business criticality against data classification, record gaps, and a
+searchable/sortable table of every factsheet.
+
+Admins get a status card and a "Sync now" button on `/admin`
+(`POST /api/leanix`, admin-gated in `hooks.server.ts`).
+
+#### The capability map (`/leanix/capabilities`)
+
+The same factsheets projected onto two capability frames, so an architect can ask
+"where is nothing" rather than only "what do we have". Empty tiles are drawn, not
+omitted — a map that showed only what is covered would answer the easy question.
+
+**Technical — the technology tower model.** 10 towers, 40 sub-towers, **61 of 61**
+LeanIX technology-stack values placed, 0 unmapped. Cells contain the factsheet
+*names*, coloured by lifecycle; clicking one opens its detail (lifecycle,
+technical fit, criticality, vendor, owning organisation, dependent applications,
+completeness) and highlights every other cell it appears in.
+
+Adapted from the TBM Technology Resource Towers layer, and deliberately not
+identical to it. Stock TBM mixes two axes — server virtualization sits under
+Compute (a way of delivering a resource) while databases sit under Platform (a
+shared service), so "Platform" ends up meaning *the platform layer of the other
+towers*: Compute owned its full execution stack while Storage owned only raw
+capacity. The rule here is one axis:
+
+> **A tower is a kind of technology capability and owns it end to end**, from raw
+> resource to the abstraction an application consumes. No tower is the platform
+> layer of another.
+
+So **Compute** holds servers, virtualization, containers *and* language runtimes;
+**Data & Storage** holds raw storage, database platforms *and* caches,
+symmetrically — a database is to storage what a container platform is to a
+server. **Network** carries endpoint-to-endpoint connectivity, **Integration &
+APIs** the system-to-system counterpart. Unit tests assert both the symmetry and
+the absence of a catch-all "Platform" tower, so the model cannot quietly drift
+back. Reconciling with a TBM cost model is mechanical: Compute's runtime and
+container sub-towers and all of Data & Storage's database sub-towers roll up to
+TBM's Platform tower.
+
+Sub-tower naming is ours, not TBM's, and lives in `capability-taxonomy.ts`.
+
+**Business — the Škoda Auto capability map**, generated from
+`BusCap_DM to SA mapping.xlsx` by `scripts/import-capability-map.py` into
+`src/lib/server/data/sa-capability-map.json` (17 domains, 35 groups, 218 level-3
+capabilities). Re-run the script and commit the JSON when the workbook changes;
+the app has no spreadsheet dependency and a committed JSON keeps the taxonomy
+reviewable in a diff.
+
+> **Known limitation, visible on the page itself.** The workbook's detail covers
+> the commercial domains. **IT, Finance, HR & General Affairs, Manufacturing, R&D,
+> Procurement and Supply Chain are level-1 stubs with no capabilities beneath
+> them** — and that is where almost every Enterprise-tagged application lands.
+> None of the 57 capability names LeanIX uses appears in the workbook at any
+> level, so those placements are to the **domain only** and were assigned by hand
+> in `BUSINESS_CAPABILITY_ALIASES`. They are the weakest data in the map and are
+> labelled as such. Supply the missing branches and the map deepens with no code
+> change: resolution tries the alias table first, then the taxonomy's own names at
+> level 3, 2 and 1, so names that need an alias today will match directly once
+> they exist.
+
+Nothing here calls an LLM and nothing is inferred at runtime — a capability map
+that silently re-classifies itself between page loads is worse than one that is
+wrong in a way you can see and fix in a diff. A name that cannot be placed is
+listed in an "unmapped" panel with its factsheet count, never dropped and never
+guessed into the nearest-looking tile. Unit tests assert that every alias points
+at a taxonomy node that actually exists, so a typo in those tables fails the build
+rather than quietly emptying a tile.
+
+#### Field availability
+
+Two things are worth knowing about the reference workspace, because they shape
+what the page can show:
+
+- **Scoped-out fields.** The API token has no read permission for
+  `aggregatedObsolescenceRisk`, `lxSixRClassification`, `lxHostingType` and
+  `lxTransformationStatus`. LeanIX returns these as field-level
+  `NO_READ_PERMISSION` errors alongside an otherwise complete payload, so the sync
+  logs them and continues rather than failing. Grant those permissions and add the
+  fields back to `FACTSHEET_QUERIES` to light them up.
+- **Sparse fields.** `technicalSuitability` is set on 11 of 64 components. The page
+  reports "Not set" explicitly rather than letting an empty bar read as zero.
+
+---
+
 ## 💻 Tech Stack
 
 - **Frontend/Backend:** [SvelteKit](https://kit.svelte.dev/)
@@ -480,6 +659,16 @@ See `lib/server/mcp/` for the tool definitions and `routes/api/mcp/` for the tra
 | `MCP_OAUTH_AUDIENCE` | No | the resource URI `<PUBLIC_URL>/api/mcp` | Comma-separated audience values a token may carry to be accepted on `/api/mcp`. Set this when the provider stamps a fixed audience instead of honouring RFC 8707 `resource` |
 | `MCP_OAUTH_REQUIRED_SCOPE` | No | — | Scope(s) a token must carry, e.g. `mcp:access`. Missing scopes give `403 insufficient_scope` |
 | `MCP_OAUTH_INTROSPECT` | No | `false` | Force RFC 7662 introspection even for JWTs (immediate revocation, one round trip per token, cached 60s) |
+| `LEANIX_TOKEN_URL` | No | — | LeanIX OAuth2 client-credentials token endpoint. The datasource is disabled unless this, `LEANIX_TOKEN_CREDENTIALS` and `LEANIX_API_URL` are all set |
+| `LEANIX_TOKEN_CREDENTIALS` | No | — | Base64 of `apitoken:<api-token>`, sent as HTTP Basic |
+| `LEANIX_API_URL` | No | — | GraphQL API base; `/graphql` is appended |
+| `LEANIX_API_EXTRA_HEADER_KEY` / `_VALUE` | No | — | Extra header a gateway requires (e.g. `Ocp-Apim-Subscription-Key`) |
+| `LEANIX_TAG_ID` | No | *SKODA Strategic IT Product: Enterprise* | Tag whose factsheets are synced, by id (resolving by name would cost an extra query per boot) |
+| `LEANIX_FACTSHEET_TYPES` | No | `ITComponent,Application` | Factsheet types to sync; each needs a field selection in `lib/server/leanix.ts` |
+| `LEANIX_SYNC_INTERVAL_MS` | No | `86400000` | Sync cadence (24h) |
+| `LEANIX_FULL_REFRESH_DAYS` | No | `7` | Force a full fetch this often, to catch renamed *related* factsheets that do not bump `updatedAt` |
+| `LEANIX_REQUEST_TIMEOUT_MS` | No | `120000` | Per-request timeout; the ITComponent query returns thousands of relation edges |
+| `LEANIX_WORKSPACE_URL` | No | derived from the access token | Base for "open in LeanIX" links. Normally leave unset — the token carries `instanceUrl` and the workspace name, so the first sync derives it at no request cost. Set only to override |
 
 ---
 

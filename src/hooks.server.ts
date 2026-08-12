@@ -1,6 +1,7 @@
 import 'dotenv/config';
 
 import { initAutoSync } from '$lib/server/git';
+import { initLeanixSync } from '$lib/server/leanix';
 
 import { db } from '$lib/server/db';
 import { hashPassword, purgeExpiredSessions } from '$lib/server/auth';
@@ -62,6 +63,11 @@ ensureEmbeddingsMigrated().then(() => warmVectorIndexes());
 
 // Initialize auto-sync on server start
 initAutoSync();
+
+// The LeanIX datasource syncs once a day and is a no-op when unconfigured.
+// Deliberately not on the git timer: that one ticks every minute to serve
+// hour-scale intervals, and this one guards a day.
+initLeanixSync();
 
 // ── Expired-session collection ───────────────────────────────────────────────
 // validateSession only removes the single expired row it happens to be handed,
@@ -233,7 +239,11 @@ export async function handle({ event, resolve }) {
         '/api/documents',
         '/api/users',
         '/api/knowledge/reprocess',
-        '/api/knowledge/backfill'
+        '/api/knowledge/backfill',
+        // Triggering a LeanIX sync is an operator action (it spends LLM budget on
+        // whatever changed). Reading the portfolio is not: the /leanix page loads
+        // its data server-side and is available to any signed-in user.
+        '/api/leanix'
     ];
     if (adminRoutes.some(route => matchesRoute(pathname, route))) {
         if (event.locals.user!.role !== 'admin') {
