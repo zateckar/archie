@@ -83,6 +83,41 @@
         Plan: 'bg-accent'
     };
 
+    // ── End-of-life runway ───────────────────────────────────────────────────
+    // A date is not a runway. These turn one into the other, and grade it, so the
+    // question "how long have we got" is answered rather than implied.
+
+    /** "in 5 months" / "in 4 years" / "overdue" — the figure the row leads with. */
+    function runway(months: number | null): string {
+        if (months == null) return 'unknown';
+        if (months < 0) return 'overdue';
+        if (months < 1) return 'this month';
+        if (months < 24) return `in ${Math.round(months)} months`;
+        return `in ${Math.round(months / 12)} years`;
+    }
+
+    // Thresholds chosen against how long the work actually takes, not round
+    // numbers: replacing a platform is a budget-cycle problem, so anything inside
+    // a year is late to start and anything inside two years is this year's plan.
+    function urgencyTone(months: number | null): string {
+        if (months == null) return 'bg-muted';
+        if (months < 12) return 'bg-danger';
+        if (months < 24) return 'bg-warning';
+        return 'bg-accent';
+    }
+
+    function urgencyText(months: number | null): string {
+        if (months == null) return 'text-faint';
+        if (months < 12) return 'text-danger';
+        if (months < 24) return 'text-warning';
+        return 'text-mute';
+    }
+
+    /** Timeline marker → the matching row, so a dot is not a dead end. */
+    function scrollToRoadmap(id: string) {
+        document.getElementById(`eol-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
     // ── Market research ──────────────────────────────────────────────────────
     // Assessments and alerts arrive with the page (see +page.server.ts), so
     // opening one costs nothing — no fetch, no spinner, no second round trip.
@@ -447,7 +482,38 @@
                         <Building2 class="w-4 h-4 text-faint" />
                         <h2 class="text-sm font-semibold text-strong">Vendor concentration</h2>
                     </div>
-                    <p class="text-xs text-faint mb-4">IT components per supplier.</p>
+                    <p class="text-xs text-faint mb-3">IT components per supplier.</p>
+
+                    <!-- A ranking looks equally dramatic whether the leader holds
+                         80% of the estate or 17%, so the panel's own claim —
+                         concentration — needs a share, not an order. -->
+                    {#if data.vendorStats.componentsWithVendor > 0}
+                        <div class="mb-2 flex h-2.5 rounded-full overflow-hidden bg-well">
+                            {#each data.vendorStats.segments as seg, i}
+                                <div
+                                    class="h-full {['bg-accent', 'bg-info', 'bg-success', 'bg-warning', 'bg-danger'][i] ?? 'bg-muted'}"
+                                    style="width: {(seg.count / data.vendorStats.componentsWithVendor) * 100}%"
+                                    title="{seg.label}: {seg.count} of {data.vendorStats.componentsWithVendor} vendored components"
+                                ></div>
+                            {/each}
+                            {#if data.vendorStats.remainder > 0}
+                                <div
+                                    class="h-full bg-muted"
+                                    style="width: {(data.vendorStats.remainder / data.vendorStats.componentsWithVendor) * 100}%"
+                                    title="{data.vendorStats.remainderVendors} other suppliers: {data.vendorStats.remainder} components"
+                                ></div>
+                            {/if}
+                        </div>
+                        <p class="text-[11px] text-faint mb-4">
+                            {#if data.vendorStats.top}
+                                {data.vendorStats.top.vendor} carries {Math.round(data.vendorStats.topShare * 100)}%
+                                of the {data.vendorStats.componentsWithVendor} components with a recorded supplier;
+                                it takes {data.vendorStats.vendorsForHalf} of
+                                {@render drillCount(data.vendorStats.distinct, 'vendors')} suppliers to reach half.
+                            {/if}
+                        </p>
+                    {/if}
+
                     {@render bars(
                         data.vendors.map((v) => ({
                             label: v.vendor, count: v.component_count, dim: 'vendor', key: v.vendor
@@ -470,6 +536,18 @@
                         })),
                         'components'
                     )}
+
+                    <!-- The panel claims to show thin coverage as well as
+                         duplication, but a list ranked by component count can only
+                         ever show the duplicated end — the thin ones sit below the
+                         cut by construction. So the thin end is counted, not drawn. -->
+                    {#if data.capabilityStats.singleComponent > 0}
+                        <p class="text-[11px] text-faint mt-4">
+                            The bars show the duplicated end. At the other end,
+                            {@render drillCount(data.capabilityStats.singleComponent, 'capabilitySingletons')}
+                            of {data.capabilityStats.distinct} capabilities rest on a single component.
+                        </p>
+                    {/if}
                 </section>
             {/if}
         </div>
@@ -519,25 +597,40 @@
 
         <!-- ── Distributions ──────────────────────────────────────────────── -->
         <div class="grid md:grid-cols-2 xl:grid-cols-4 gap-4 mb-4">
+            <!-- The noun matters: two of these panels cover the whole portfolio
+                 and two cover one type of factsheet, so a bare percentage would
+                 otherwise be a share of something unstated. -->
             {#each [
-                { title: 'Lifecycle state', items: data.lifecycle, dim: 'lifecycle' },
-                { title: 'Technical fit', items: data.technicalFit, dim: 'technicalFit' },
-                { title: 'Component category', items: data.categories, dim: 'category' },
-                { title: 'TIME classification', items: data.time, dim: 'time' }
+                { title: 'Lifecycle state', items: data.lifecycle, dim: 'lifecycle', noun: 'factsheets' },
+                { title: 'Technical fit', items: data.technicalFit, dim: 'technicalFit', noun: 'factsheets' },
+                { title: 'Component category', items: data.categories, dim: 'category', noun: 'components' },
+                { title: 'TIME classification', items: data.time, dim: 'time', noun: 'applications' }
             ] as panel}
                 {#if panel.items.length > 0}
+                    {@const total = panel.items.reduce((s, i) => s + i.count, 0)}
                     <section class="card p-5">
-                        <h2 class="text-sm font-semibold text-strong mb-3">{panel.title}</h2>
+                        <div class="flex items-baseline justify-between gap-2 mb-3">
+                            <h2 class="text-sm font-semibold text-strong">{panel.title}</h2>
+                            <span class="text-[11px] text-faint tabular-nums">{total} {panel.noun}</span>
+                        </div>
                         <div class="flex flex-col gap-2">
                             {#each panel.items as item}
-                                {@const max = Math.max(1, ...panel.items.map((i) => i.count))}
+                                <!-- Scaled to the panel TOTAL, not to its largest bucket.
+                                     Against the largest, every panel's leader is a full bar
+                                     and "76 active" looks the same as "25 software" — the
+                                     chart answers "which is biggest" when the question is
+                                     "how much of the portfolio is this". -->
+                                {@const share = total > 0 ? item.count / total : 0}
                                 <div class="flex items-center gap-2">
                                     <span class="text-[12px] w-28 shrink-0 truncate {item.label === 'Not set' ? 'text-faint italic' : 'text-dim'}"
                                           title={item.label}>{item.label}</span>
                                     <div class="flex-1 h-2 rounded-full bg-well overflow-hidden">
                                         <div class="h-full rounded-full {LIFECYCLE_TONE[item.label] ?? (item.label === 'Not set' ? 'bg-muted' : 'bg-accent')}"
-                                             style="width: {(item.count / max) * 100}%"></div>
+                                             style="width: {Math.max(share * 100, item.count > 0 ? 1.5 : 0)}%"></div>
                                     </div>
+                                    <span class="text-[11px] text-faint tabular-nums w-9 text-right">
+                                        {Math.round(share * 100)}%
+                                    </span>
                                     <span class="text-[12px] text-mute tabular-nums w-8 text-right">
                                         {@render drillCount(item.count, panel.dim, item.key)}
                                     </span>
@@ -654,9 +747,36 @@
                 {#if data.roadmap.length === 0}
                     <p class="text-[13px] text-mute">No factsheet in the portfolio carries an end-of-life date.</p>
                 {:else}
+                    <!-- The timeline exists because "runway" is a distance, and a
+                         column of ISO dates is not one. Plotted from today rather
+                         than from the earliest date, so an empty stretch ahead
+                         reads as empty and a cluster reads as a cluster. -->
+                    <div class="mb-5">
+                        <div class="relative h-9">
+                            <div class="absolute left-0 right-0 top-3 h-px bg-line"></div>
+                            {#each data.roadmap as item}
+                                <button
+                                    class="absolute -translate-x-1/2 top-1 w-2.5 h-2.5 rounded-full border border-raised
+                                           {urgencyTone(item.monthsAway)} hover:scale-150 transition-transform"
+                                    style="left: {2 + item.position * 96}%"
+                                    onclick={() => (openAssessment = null, scrollToRoadmap(item.id))}
+                                    title="{item.name} — {item.end_of_life_date} ({runway(item.monthsAway)})"
+                                    aria-label="{item.name}, end of life {item.end_of_life_date}"
+                                ></button>
+                            {/each}
+                            <span class="absolute left-0 top-5 text-[10px] text-faint">today</span>
+                            <span class="absolute right-0 top-5 text-[10px] text-faint">
+                                {data.roadmap[data.roadmap.length - 1].end_of_life_date.slice(0, 4)}
+                            </span>
+                        </div>
+                    </div>
+
                     <div class="flex flex-col gap-1.5">
                         {#each data.roadmap as item}
-                            <div class="flex items-center justify-between gap-3 py-1.5 border-b border-line-subtle last:border-0">
+                            <div
+                                id="eol-{item.id}"
+                                class="flex items-center justify-between gap-3 py-1.5 border-b border-line-subtle last:border-0"
+                            >
                                 <div class="min-w-0">
                                     {#if item.url}
                                         <a
@@ -673,7 +793,15 @@
                                     {/if}
                                     <p class="text-[11px] text-faint">{item.fs_type} · {item.lifecycle_label}</p>
                                 </div>
-                                <span class="badge badge-warning shrink-0 tabular-nums">{item.end_of_life_date}</span>
+                                <div class="shrink-0 text-right">
+                                    <!-- The distance leads and the date supports it: the
+                                         question is "how long have we got", not "what does
+                                         the calendar say". -->
+                                    <p class="text-[12px] tabular-nums {urgencyText(item.monthsAway)}">
+                                        {runway(item.monthsAway)}
+                                    </p>
+                                    <p class="text-[10px] text-faint tabular-nums">{item.end_of_life_date}</p>
+                                </div>
                             </div>
                         {/each}
                     </div>
@@ -727,28 +855,51 @@
         {#if data.criticality.rows.length > 0}
             <section class="card p-5 mb-4">
                 <h2 class="text-sm font-semibold text-strong mb-1">Business criticality against data classification</h2>
-                <p class="text-xs text-faint mb-4">Applications only — where the portfolio's exposure concentrates.</p>
+                <p class="text-xs text-faint mb-4">
+                    Applications only — where the portfolio's exposure concentrates. Both axes run most severe
+                    first, so the top-left corner is the one to read: the most critical applications holding
+                    the most sensitive data.
+                </p>
                 <div class="overflow-x-auto">
-                    <table class="w-full text-[12px]">
+                    <!-- Fixed layout so every cell is the same size. In a heatmap
+                         the eye reads area as magnitude, and auto-width columns
+                         size themselves to their header text — which would make
+                         "Confidential" look larger than "Secret" for no reason
+                         connected to the data. -->
+                    <table class="w-full text-[12px] border-separate border-spacing-1 table-fixed min-w-[30rem]">
                         <thead>
                             <tr class="text-left">
-                                <th class="eyebrow pb-2 pr-4">Criticality</th>
+                                <th class="eyebrow pb-1 pr-3 w-40"></th>
                                 {#each data.criticality.columns as col}
-                                    <th class="eyebrow pb-2 px-3 text-center">{col}</th>
+                                    <th class="eyebrow pb-1 px-2 text-center font-normal">{col}</th>
                                 {/each}
                             </tr>
                         </thead>
                         <tbody>
                             {#each data.criticality.rows as row}
-                                <tr class="border-t border-line-subtle">
-                                    <td class="py-2 pr-4 text-dim">{row.label}</td>
+                                <tr>
+                                    <td class="py-1 pr-3 text-dim whitespace-nowrap">{row.label}</td>
                                     {#each row.cells as cell}
-                                        <td class="py-2 px-3 text-center tabular-nums {cell.count > 0 ? 'text-strong' : 'text-ghost'}">
-                                            {#if cell.count > 0}
-                                                {@render drillCount(cell.count, 'criticality', cell.criticalityKey, cell.key)}
-                                            {:else}
-                                                –
-                                            {/if}
+                                        <!-- Intensity carries magnitude, position carries severity.
+                                             Deliberately a single hue rather than a green-to-red ramp:
+                                             a count is not a risk score, and colouring it as one would
+                                             invent a judgement the data does not contain. -->
+                                        {@const weight = data.criticality.max > 0 ? cell.count / data.criticality.max : 0}
+                                        <td class="p-0">
+                                            <div
+                                                class="rounded-md h-11 flex items-center justify-center tabular-nums
+                                                       {cell.count > 0 ? 'text-strong' : 'text-ghost'}"
+                                                style="background: {cell.count > 0
+                                                    ? `color-mix(in oklab, var(--accent) ${Math.round(12 + weight * 46)}%, transparent)`
+                                                    : 'var(--bg-well)'}"
+                                                title="{row.label} · {cell.label}: {cell.count} application{cell.count === 1 ? '' : 's'}"
+                                            >
+                                                {#if cell.count > 0}
+                                                    {@render drillCount(cell.count, 'criticality', cell.criticalityKey, cell.key)}
+                                                {:else}
+                                                    <span class="text-[11px]">–</span>
+                                                {/if}
+                                            </div>
                                         </td>
                                     {/each}
                                 </tr>
@@ -756,6 +907,10 @@
                         </tbody>
                     </table>
                 </div>
+                <p class="text-[11px] text-faint mt-3">
+                    {data.criticality.total} of {data.summary.applications} applications carry both a criticality
+                    and a data classification. Shading shows how many sit in each combination, not how risky it is.
+                </p>
             </section>
         {/if}
 
@@ -768,23 +923,44 @@
             <p class="text-xs text-faint mb-4">
                 What the portfolio record cannot currently answer, out of {data.dataQuality.total} factsheets.
             </p>
-            <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
                 {#each [
-                    { label: 'No technical fit', value: data.dataQuality.no_technical_fit, key: 'no_technical_fit' },
-                    { label: 'No description', value: data.dataQuality.no_description, key: 'no_description' },
-                    { label: 'No responsible owner', value: data.dataQuality.no_responsible_owner, key: 'no_responsible_owner' },
-                    { label: 'No tech capability', value: data.dataQuality.no_tech_capability, key: 'no_tech_capability' },
-                    { label: 'No lifecycle state', value: data.dataQuality.no_lifecycle, key: 'no_lifecycle' }
+                    { label: 'No technical fit', value: data.dataQuality.no_technical_fit, key: 'no_technical_fit', of: data.dataQuality.total },
+                    { label: 'No description', value: data.dataQuality.no_description, key: 'no_description', of: data.dataQuality.total },
+                    { label: 'No responsible owner', value: data.dataQuality.no_responsible_owner, key: 'no_responsible_owner', of: data.dataQuality.total },
+                    // Scoped to components: business capabilities are not something
+                    // an IT component carries, so measuring it against all 78 would
+                    // overstate the gap by the 14 applications that cannot have one.
+                    { label: 'No tech capability', value: data.dataQuality.no_tech_capability, key: 'no_tech_capability', of: data.summary.components },
+                    { label: 'No lifecycle state', value: data.dataQuality.no_lifecycle, key: 'no_lifecycle', of: data.dataQuality.total }
                 ] as gap}
+                    {@const share = gap.of > 0 ? gap.value / gap.of : 0}
                     <div>
-                        <p class="text-xl font-semibold tabular-nums {gap.value > 0 ? 'text-warning' : 'text-mute'}">
+                        <div class="flex items-baseline gap-1.5">
+                            <p class="text-xl font-semibold tabular-nums {gap.value > 0 ? 'text-warning' : 'text-mute'}">
+                                {#if gap.value > 0}
+                                    {@render drillCount(gap.value, 'gap', gap.key)}
+                                {:else}
+                                    {gap.value}
+                                {/if}
+                            </p>
+                            <span class="text-[11px] text-faint tabular-nums">of {gap.of}</span>
+                        </div>
+                        <!-- The proportion is the point. "61" reads as a number;
+                             a bar filling four fifths of its track reads as most
+                             of the portfolio, which is what it is. -->
+                        <div class="h-1.5 rounded-full bg-well overflow-hidden mt-1.5">
+                            <div
+                                class="h-full rounded-full {gap.value > 0 ? 'bg-warning' : 'bg-success'}"
+                                style="width: {Math.max(share * 100, gap.value > 0 ? 2 : 0)}%"
+                            ></div>
+                        </div>
+                        <p class="text-[11px] text-faint mt-1">
+                            {gap.label}
                             {#if gap.value > 0}
-                                {@render drillCount(gap.value, 'gap', gap.key)}
-                            {:else}
-                                {gap.value}
+                                <span class="text-mute tabular-nums">· {Math.round(share * 100)}%</span>
                             {/if}
                         </p>
-                        <p class="text-[11px] text-faint">{gap.label}</p>
                     </div>
                 {/each}
             </div>

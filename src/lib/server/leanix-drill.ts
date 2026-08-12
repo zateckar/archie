@@ -369,6 +369,22 @@ export function drill(dimension: string, key: string, key2: string): DrillResult
                  GROUP BY to_name ORDER BY count DESC, name COLLATE NOCASE`
             );
 
+        case 'capabilitySingletons':
+            // The thin end of the coverage distribution — capabilities where a
+            // single component is the whole answer. Invisible on a chart ranked
+            // by component count, which is exactly why it is drillable here.
+            return groupDrill(
+                'Single-component capabilities',
+                'Technology capabilities served by exactly one component',
+                'Capability',
+                'component',
+                `SELECT to_name AS name, COUNT(DISTINCT from_id) AS count
+                 FROM leanix_relations
+                 WHERE rel_type = 'relITComponentToTechnologyStack' AND to_name IS NOT NULL
+                 GROUP BY to_name HAVING count = 1
+                 ORDER BY name COLLATE NOCASE`
+            );
+
         case 'businessCapabilities':
             return groupDrill(
                 'Business capabilities',

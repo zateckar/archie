@@ -151,6 +151,71 @@ export function getVendorConcentration(limit = 15) {
     `).all(limit) as { vendor: string; component_count: number }[];
 }
 
+/**
+ * How concentrated the supplier base actually is.
+ *
+ * The ranked bars above answer "who is biggest", which is not the same question
+ * as "how much of the estate sits behind one supplier" — a ranking looks equally
+ * dramatic whether the leader holds 80% or 17%. These are the figures that
+ * separate those two cases, so the panel can state its own claim instead of
+ * leaving a bar chart to imply one.
+ */
+export function getVendorStats() {
+    const vendors = db.prepare(`
+        SELECT to_name AS vendor, COUNT(DISTINCT from_id) AS c
+        FROM leanix_relations
+        WHERE rel_type = 'relITComponentToProvider' AND to_name IS NOT NULL
+        GROUP BY to_name ORDER BY c DESC, vendor COLLATE NOCASE
+    `).all() as { vendor: string; c: number }[];
+
+    const total = vendors.reduce((s, v) => s + v.c, 0);
+    // How few suppliers it takes to cover half the vendored estate — the standard
+    // way of saying "concentrated" without inventing an index nobody reads.
+    let running = 0;
+    let vendorsForHalf = 0;
+    for (const v of vendors) {
+        running += v.c;
+        vendorsForHalf++;
+        if (running * 2 >= total) break;
+    }
+
+    const topShare = total > 0 ? (vendors[0]?.c ?? 0) / total : 0;
+    return {
+        distinct: vendors.length,
+        componentsWithVendor: total,
+        top: vendors[0] ?? null,
+        topShare,
+        vendorsForHalf,
+        // Segments for the share bar: the leaders, then everyone else as one.
+        segments: vendors.slice(0, 5).map(v => ({ label: v.vendor, count: v.c })),
+        remainder: vendors.slice(5).reduce((s, v) => s + v.c, 0),
+        remainderVendors: Math.max(0, vendors.length - 5)
+    };
+}
+
+/**
+ * The spread of technology capability coverage.
+ *
+ * The panel's stated purpose is that "thin coverage and duplication both show
+ * here", but a list ranked by component count only ever shows the duplication
+ * end — the thinly-covered capabilities sit below the cut by construction. This
+ * counts them, so the thin end can be stated and drilled.
+ */
+export function getCapabilityStats() {
+    const rows = db.prepare(`
+        SELECT to_name AS n, COUNT(DISTINCT from_id) AS c
+        FROM leanix_relations
+        WHERE rel_type = 'relITComponentToTechnologyStack' AND to_name IS NOT NULL
+        GROUP BY to_name
+    `).all() as { n: string; c: number }[];
+
+    return {
+        distinct: rows.length,
+        singleComponent: rows.filter(r => r.c === 1).length,
+        max: rows.reduce((m, r) => Math.max(m, r.c), 0)
+    };
+}
+
 /** Technology capability coverage (LeanIX TechnicalStack factsheets). */
 export function getCapabilityCoverage(limit = 20) {
     return db.prepare(`
@@ -178,6 +243,37 @@ export function getBusinessCapabilities(limit = 20) {
 }
 
 /**
+ * Severity order for the exposure matrix, most severe FIRST.
+ *
+ * Without these the axes come back in whatever order SQLite grouped them —
+ * alphabetical in practice, which puts "Administrative service" above "Mission
+ * critical" and scatters the sensitive data classes. The matrix exists to show
+ * where exposure concentrates, and that only reads if the most exposed corner is
+ * a corner: severity descending down the rows, sensitivity descending across the
+ * columns, so the top-left cell is the one to look at first.
+ *
+ * Values absent from these lists sort last rather than being dropped — a new
+ * LeanIX enum value should appear in the matrix, just not jump the ordering.
+ */
+const CRITICALITY_ORDER = [
+    'missionCritical', 'businessCritical', 'businessOperational', 'administrativeService'
+];
+const DATA_CLASS_ORDER = ['secret', 'confidential', 'internal', 'public'];
+
+function bySeverity(order: string[]) {
+    return (a: string | null, b: string | null) => {
+        // Null ("Not set") is not a severity; it belongs at the end of the axis.
+        const rank = (v: string | null) => {
+            if (v == null) return order.length + 1;
+            const i = order.indexOf(v);
+            return i === -1 ? order.length : i;
+        };
+        const diff = rank(a) - rank(b);
+        return diff !== 0 ? diff : String(a ?? '').localeCompare(String(b ?? ''));
+    };
+}
+
+/**
  * Business criticality against data classification — the cut that says where the
  * portfolio's exposure actually is. Applications only; the fields are theirs.
  */
@@ -189,8 +285,8 @@ export function getCriticalityMatrix() {
         GROUP BY business_criticality, data_class
     `).all() as { criticality: string | null; dataclass: string | null; count: number }[];
 
-    const criticalities = [...new Set(rows.map(r => r.criticality))];
-    const dataclasses = [...new Set(rows.map(r => r.dataclass))];
+    const criticalities = [...new Set(rows.map(r => r.criticality))].sort(bySeverity(CRITICALITY_ORDER));
+    const dataclasses = [...new Set(rows.map(r => r.dataclass))].sort(bySeverity(DATA_CLASS_ORDER));
     return {
         rows: criticalities.map(c => ({
             key: c ?? '',
@@ -205,24 +301,56 @@ export function getCriticalityMatrix() {
                 count: rows.find(r => r.criticality === c && r.dataclass === d)?.count ?? 0
             }))
         })),
-        columns: dataclasses.map(d => label(d))
+        columns: dataclasses.map(d => label(d)),
+        // Scale for the heatmap. Computed here so the page never has to flatten
+        // the grid to find it, and reported even when zero so a matrix with no
+        // applications in it cannot divide by nothing.
+        max: rows.reduce((m, r) => Math.max(m, r.count), 0),
+        total: rows.reduce((s, r) => s + r.count, 0)
     };
 }
 
-/** Everything with a dated end of life, soonest first. */
+/**
+ * Everything with a dated end of life, soonest first.
+ *
+ * Each row carries its distance from today as well as its date, because "runway"
+ * is the question and a raw date is not an answer to it — reading "2031-06-30"
+ * and working out how far away that is, is arithmetic the page should have done.
+ * The fraction along the window is included for the timeline, so the page plots a
+ * position rather than recomputing the span per row.
+ */
 export function getRoadmap(limit = 25) {
-    return db.prepare(`
+    const rows = db.prepare(`
         SELECT id, name, fs_type, lifecycle_state, end_of_life_date
         FROM leanix_factsheets
         WHERE end_of_life_date IS NOT NULL
         ORDER BY end_of_life_date ASC
         LIMIT ?
-    `).all(limit).map((r: any) => ({
-        ...r,
-        lifecycle_label: label(r.lifecycle_state),
-        end_of_life_date: String(r.end_of_life_date).slice(0, 10),
-        url: factsheetUrl({ id: r.id, fs_type: r.fs_type }, getWorkspaceUrl())
-    }));
+    `).all(limit) as any[];
+
+    const now = Date.now();
+    const times = rows.map(r => Date.parse(String(r.end_of_life_date).slice(0, 10))).filter(Number.isFinite);
+    // The window runs from today (not from the earliest date) so an item three
+    // months out sits hard against the left edge, where it belongs.
+    const start = now;
+    const end = times.length ? Math.max(...times) : now;
+    const span = Math.max(1, end - start);
+
+    return rows.map(r => {
+        const date = String(r.end_of_life_date).slice(0, 10);
+        const at = Date.parse(date);
+        const monthsAway = Number.isFinite(at) ? (at - now) / (1000 * 60 * 60 * 24 * 30.44) : null;
+        return {
+            ...r,
+            lifecycle_label: label(r.lifecycle_state),
+            end_of_life_date: date,
+            monthsAway,
+            // Clamped, so an item already past its date pins to the left edge
+            // instead of being plotted off the track.
+            position: Number.isFinite(at) ? Math.min(1, Math.max(0, (at - start) / span)) : 0,
+            url: factsheetUrl({ id: r.id, fs_type: r.fs_type }, getWorkspaceUrl())
+        };
+    });
 }
 
 /** Owning organisations, and the responsible roles that are actually staffed. */
@@ -362,7 +490,9 @@ export function getPortfolioPage() {
         time: getTimeBreakdown(),
         platformLoad: getPlatformLoad(),
         vendors: getVendorConcentration(),
+        vendorStats: getVendorStats(),
         capabilities: getCapabilityCoverage(),
+        capabilityStats: getCapabilityStats(),
         businessCapabilities: getBusinessCapabilities(),
         criticality: getCriticalityMatrix(),
         roadmap: getRoadmap(),

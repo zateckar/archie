@@ -502,6 +502,32 @@ few is nominal. The panel says so, and links to the full 57.
 Admins get a status card and a "Sync now" button on `/admin`
 (`POST /api/leanix`, admin-gated in `hooks.server.ts`).
 
+**Each chart is shaped to its own claim.** A panel that says "concentration" or
+"runway" has to show one, and several here originally did not:
+
+- **Distributions** scale to the panel *total*, not to its largest bucket.
+  Against the largest, every panel's leader is a full bar and "76 active" looks
+  identical to "25 software"; against the total, technical fit reads as *78%
+  unrecorded*, which is the actual finding.
+- **End-of-life runway** leads with the distance ("in 6 months"), not the date,
+  and plots the dates on a timeline starting at today — so the 18-month gap
+  before the first expiry and the cluster around 2030–31 are visible rather than
+  inferred from a column of ISO dates.
+- **The criticality matrix** is a heatmap with both axes ordered most-severe
+  first, so the most-exposed combination is in a corner instead of wherever
+  SQLite grouped it. Cells are fixed-width, because area reads as magnitude, and
+  intensity is a single hue: a count is not a risk score, and a green-to-red ramp
+  would invent a judgement the data does not contain.
+- **Record gaps** show the proportion. "61" is a number; a bar filling four
+  fifths of its track is most of the portfolio. The tech-capability gap is
+  measured against components only, since applications cannot have one.
+- **Vendor concentration** carries a share bar and states its own claim, because
+  a ranking looks equally dramatic whether the leader holds 80% of the estate or
+  17% (it is 17%, and it takes 8 of 31 suppliers to reach half).
+- **Technology capability coverage** counts the thin end it cannot draw: a list
+  ranked by component count only ever shows duplication, so the 45 of 61
+  capabilities resting on a single component are stated and drillable instead.
+
 **Every number drills.** Each aggregate answers "how many"; clicking it asks
 "which ones" and opens the list beside the chart — the 974 applications on Power
 Platform, the components behind a vendor, the factsheets in a lifecycle bucket,
