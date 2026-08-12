@@ -22,6 +22,7 @@ Archie is a sophisticated Retrieval-Augmented Generation (RAG) chatbot built wit
 - **Source Grounding:** End-to-end lineage from document → chunk → claim, with inline `[source]` citations in knowledge context and responses.
 - **User Feedback Loop:** Thumbs up/down on every assistant response, stored with full context snapshots for quality analysis.
 - **Real-time Chat:** Conversational interface with streaming responses and source citations.
+- **MCP Server:** The same chat, exposed over Model Context Protocol at `/api/mcp`, so Claude Code, Claude Desktop or any MCP client can ask the knowledge base and manage its conversations — sharing one pipeline, one token budget and one conversation list with the web UI. Authorized by standard OAuth 2.1 against the app's existing OIDC provider, with no app-issued credentials.
 - **Rich Markdown Responses:** Chat responses are automatically formatted with headers, tables, code blocks, lists, and relationship arrows for maximum readability.
 - **Sleek UI:** Modern dark theme with a terminal-inspired aesthetic.
   - **Knowledge Graph Visualization:** Interactive force-directed canvas graph with category-colored nodes, directed edges, zoom/pan, and node detail panels.
@@ -297,10 +298,103 @@ The chat interface provides a natural way to interact with the knowledge base, w
 *   **Claim Type Awareness:** Question queries automatically boost constraint-type claims (negations, conditions, boundaries) to surface nuanced answers.
 *   **User Feedback:** Thumbs up/down on each response, stored with the full context snapshot for pipeline tuning.
 
+### 6. MCP Server (Chat for Agents)
+
+Everything the chat page can do is also reachable over [Model Context Protocol](https://modelcontextprotocol.io),
+so an AI assistant — Claude Code, Claude Desktop, Copilot, anything that speaks MCP —
+can query the knowledge base directly. It is the same pipeline, not a parallel one:
+both front doors call `lib/server/chat-pipeline.ts` and `lib/server/conversations.ts`,
+so a question asked from an editor appears in the web sidebar, is charged to the same
+per-user token budget, and is throttled by the same per-minute limit.
+
+**Endpoint:** `POST /api/mcp` — Streamable HTTP transport, stateless (no MCP session
+state; one server instance is built per request from the authenticated user). `GET` and
+`DELETE` return 405: there are no server-initiated notifications to stream and no
+sessions to terminate.
+
+**Tools:**
+
+| Tool | What it does |
+|------|--------------|
+| `ask` | A grounded, cited answer via the full RAG pipeline. Appends to a conversation shared with the web UI. Returns clarifying questions instead of an answer when the query is too vague. Slow (10–60s) and rate limited. |
+| `search_knowledge` | Semantic search over topics and claims with relevance scores. No answer is written, so it is cheap — the right tool for "is this documented?". |
+| `list_conversations` | The user's own conversations, filterable by title or message contents. |
+| `get_conversation` | One transcript, turns numbered from zero, with the sources each answer cited. |
+| `pin_conversation` | Pin or unpin, without disturbing `updated_at`. |
+| `delete_conversation` | Deletes a conversation; refuses while it is pinned, exactly as the sidebar does. |
+| `rate_answer` | Thumbs up/down, into the same `response_feedback` table as the UI. |
+
+**Authorization: OAuth 2.1, against the OIDC provider the app already uses.** There is no
+app-issued credential and no MCP-specific account. `/api/mcp` is a *protected resource*;
+the authorization server is whatever `OIDC_ISSUER` points at, and Archie only validates
+what it issues:
+
+1. The client calls `/api/mcp` with no token and gets `401` with
+   `WWW-Authenticate: Bearer resource_metadata="…"`.
+2. It reads that document — `/.well-known/oauth-protected-resource/api/mcp`
+   (RFC 9728, public) — which names the resource identifier and the authorization server.
+3. It reads the provider's own metadata, registers (RFC 7591) or uses a pre-registered
+   client id, and sends the user through the provider's login and consent.
+4. It exchanges the code for an access token (authorization code + PKCE).
+5. It calls `/api/mcp` with `Authorization: Bearer <access token>`.
+
+Every token is checked for signature (JWKS, cached), issuer, expiry and — the part that
+matters most — **audience**: a token is accepted only if its `aud` names this server, so a
+token some other service behind the same IdP obtained for itself does not open this one.
+Opaque (non-JWT) tokens fall back to RFC 7662 introspection using the client credentials
+already configured for sign-in. The subject is mapped to the same user row a browser
+session produces, provisioning on first sight exactly as the web callback does; new
+accounts get the default `user` role, so a client cannot mint an admin.
+
+The session cookie is deliberately *not* accepted on `/api/mcp` — MCP is OAuth-only, so
+everything the tools do happened under a token the provider issued and can revoke.
+Identity comes from the token, never from a tool argument, and every conversation id is
+re-checked against its owner. See `lib/server/oauth-token.ts` (verification),
+`lib/server/oauth-resource.ts` (the rules and the challenge) and `lib/server/mcp/auth.ts`.
+
+Connecting a client — no secret to paste; the client opens a browser on first use:
+
+```bash
+claude mcp add --transport http archie https://your-host/api/mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "archie": {
+      "type": "http",
+      "url": "https://your-host/api/mcp"
+    }
+  }
+}
+```
+
+For a client that only speaks stdio, bridge it with `npx mcp-remote https://your-host/api/mcp`,
+which runs the same OAuth flow.
+
+**What the provider needs (two things), for Keycloak:**
+
+1. **An audience Archie accepts.** If the provider honours the `resource` parameter
+   (RFC 8707) it stamps `https://your-host/api/mcp` and nothing needs configuring.
+   Otherwise add an audience mapper to the client and set `MCP_OAUTH_AUDIENCE` to whatever
+   it emits (often a client id). There is no "accept any audience" switch — that is the
+   whole confused-deputy defence.
+2. **A way for clients to get a client id.** Either enable dynamic client registration
+   (Keycloak: a client-registration policy that permits anonymous registration), which is
+   what Claude clients expect, or pre-register a public client using authorization code +
+   PKCE with the client's loopback redirect URI and hand users its id.
+
+`/settings` reports both live — whether the provider is reachable, whether it offers
+dynamic registration, and which audience is currently accepted — so a client that cannot
+connect can be diagnosed without reading logs.
+
+See `lib/server/mcp/` for the tool definitions and `routes/api/mcp/` for the transport.
+
 
 ## 💻 Tech Stack
 
 - **Frontend/Backend:** [SvelteKit](https://kit.svelte.dev/)
+- **Agent Access:** [Model Context Protocol SDK](https://modelcontextprotocol.io) (Streamable HTTP)
 - **LLM/Embeddings:** [Google Gemini API](https://ai.google.dev/)
 - **Database:** [SQLite](https://www.sqlite.org/)
 - **Vector Search:** [sqlite-vector](https://github.com/asg017/sqlite-vector)
@@ -381,6 +475,11 @@ The chat interface provides a natural way to interact with the knowledge base, w
 | `OIDC_CLIENT_SECRET` | No | — | OIDC client secret |
 | `PUBLIC_URL` | No | — | Public URL for OIDC redirects |
 | `SUPPORTED_EXTENSIONS` | No | `.md,.mdx` | Comma-separated list of file extensions to sync from git |
+| `CHAT_RATE_LIMIT_PER_MIN` | No | `20` | Answered questions per user per minute, across the web UI and MCP alike |
+| `MCP_RATE_LIMIT_PER_MIN` | No | `120` | MCP requests per user per minute (the cheap read tools; `ask` is bounded by `CHAT_RATE_LIMIT_PER_MIN`) |
+| `MCP_OAUTH_AUDIENCE` | No | the resource URI `<PUBLIC_URL>/api/mcp` | Comma-separated audience values a token may carry to be accepted on `/api/mcp`. Set this when the provider stamps a fixed audience instead of honouring RFC 8707 `resource` |
+| `MCP_OAUTH_REQUIRED_SCOPE` | No | — | Scope(s) a token must carry, e.g. `mcp:access`. Missing scopes give `403 insufficient_scope` |
+| `MCP_OAUTH_INTROSPECT` | No | `false` | Force RFC 7662 introspection even for JWTs (immediate revocation, one round trip per token, cached 60s) |
 
 ---
 
@@ -455,6 +554,20 @@ services:
   guard. Wiki writes require admin or contributor.
 - **Passwords:** Hashed using scrypt (salted, CPU/memory-hard KDF)
 - **PAT Tokens:** Encrypted at rest using AES-256-GCM
+- **MCP authorization is OAuth 2.1, and only OAuth** (`OAUTH_ROUTE` in
+  `hooks.server.ts`). `/api/mcp` accepts nothing but an access token from the
+  configured OIDC provider — not the session cookie, and no credential this app
+  could issue. Tokens are validated for signature, issuer, expiry and audience;
+  the audience check is what stops a token another service behind the same IdP
+  holds from working here. The discovery document that makes the flow possible
+  (`/.well-known/oauth-protected-resource`) is public and discloses only the
+  issuer that browsers are already redirected to. Revocation, MFA and session
+  lifetime therefore stay with the identity provider, which is the point: there is
+  no second, unreviewed credential store to keep in step.
+- **OIDC discovery is issuer-verified:** the provider's discovery document is
+  rejected unless its `issuer` matches `OIDC_ISSUER` (RFC 8414 §3.3), and token
+  verification refuses to guess endpoints if discovery is unavailable. A `jwks_uri`
+  from an unverified document is a key set that can mint tokens this server trusts.
 - **Session Duration:** 24 hours (configurable via `SESSION_DURATION_MS` in code)
 - **CSP Headers:** Content Security Policy enforced on all responses
 - **XSS Prevention:** AI-generated content is sanitized before rendering

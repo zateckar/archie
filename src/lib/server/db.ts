@@ -1006,6 +1006,19 @@ export function setUserPreference(userId: number, key: string, value: string): v
     `).run(userId, key, value);
 }
 
+// ── api_tokens: removed ─────────────────────────────────────────────────────
+//
+// A short-lived experiment in bespoke personal access tokens for the MCP server,
+// replaced before release by standard OAuth 2.1: /api/mcp is now a resource
+// server that validates access tokens issued by the configured OIDC provider
+// (see ./oauth-token), so there is no app-issued credential to store. Dropped
+// rather than left behind so nothing can quietly keep authenticating with one.
+try {
+    db.exec('DROP TABLE IF EXISTS api_tokens');
+} catch (e) {
+    console.error('[Migration] Failed to drop api_tokens:', e);
+}
+
 export function getDocuments() {
     return db.prepare(`
         SELECT d.id, d.filename, d.context, d.created_at, d.path, r.url as repo_url 

@@ -19,6 +19,7 @@ import Search from '@lucide/svelte/icons/search';
 import X from '@lucide/svelte/icons/x';
 import Pin from '@lucide/svelte/icons/pin';
 import PinOff from '@lucide/svelte/icons/pin-off';
+import Plug from '@lucide/svelte/icons/plug';
     import { fade, fly } from 'svelte/transition';
     import MessageBubble from '$lib/components/MessageBubble.svelte';
     import ThemeToggle from '$lib/components/ThemeToggle.svelte';
@@ -758,6 +759,10 @@ import PinOff from '@lucide/svelte/icons/pin-off';
                             <a href="/wiki" class="nav-item">
                                 <BookOpen class="w-4 h-4 text-faint" />
                                 Wiki
+                            </a>
+                            <a href="/settings" class="nav-item">
+                                <Plug class="w-4 h-4 text-faint" />
+                                Connect apps (MCP)
                             </a>
                             <a href="/about" class="nav-item">
                                 <Info class="w-4 h-4 text-faint" />

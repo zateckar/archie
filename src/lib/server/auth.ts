@@ -97,6 +97,21 @@ export function validateSession(sessionId: string) {
 }
 
 /**
+ * The projected user row for an already-authenticated id.
+ *
+ * Exists so a second way in — an OAuth access token at /api/mcp, resolved through
+ * ./oidc-user — produces exactly the same `SessionUser` shape, through the same
+ * column list, without re-implementing the projection. That matters more than the
+ * saved line: the rule this module exists to enforce is "nothing outside here gets
+ * a secret", and it only holds while there is one place that decides which columns
+ * leave.
+ */
+export function sessionUserById(userId: number): SessionUser | null {
+    const user = db.prepare(`SELECT ${SESSION_USER_COLUMNS} FROM users WHERE id = ?`).get(userId) as SessionUser | undefined;
+    return user ?? null;
+}
+
+/**
  * Deletes every session past its expiry.
  *
  * `validateSession` only ever cleans up the one session it was handed, so a row

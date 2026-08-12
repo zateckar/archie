@@ -85,6 +85,7 @@ const sessionPurgeTimer = setInterval(() => {
 sessionPurgeTimer.unref?.();
 
 import { validateSession } from '$lib/server/auth';
+import { authenticateMcpRequest } from '$lib/server/mcp/auth';
 
 /**
  * Segment-aware prefix match for route guards.
@@ -120,12 +121,32 @@ function jsonError(message: string, status: number): Response {
  * healthcheck in docker-compose.yml fetches it with no credentials, and with
  * `restart: always` a 401 there would put the deployment in a restart loop. It
  * discloses nothing but a boolean liveness verdict (see routes/api/health).
+ *
+ * `/.well-known/oauth-protected-resource` is public because it has to be: it is
+ * what an MCP client reads, *before* it has any credential, to discover which
+ * authorization server to send the user to (RFC 9728). It discloses only the
+ * issuer this deployment already redirects browsers to, and the path-aware
+ * variant for the MCP endpoint hangs beneath the same prefix.
  */
-const PUBLIC_ROUTES = ['/login', '/api/auth', '/api/health'];
+const PUBLIC_ROUTES = ['/login', '/api/auth', '/api/health', '/.well-known/oauth-protected-resource'];
 
 function isPublicRoute(pathname: string): boolean {
     return PUBLIC_ROUTES.some(route => matchesRoute(pathname, route));
 }
+
+/**
+ * The one route authenticated by an OAuth access token rather than the session
+ * cookie — and, deliberately, ONLY by one.
+ *
+ * The session cookie is not accepted here even when present. MCP's authorization
+ * model is OAuth 2.1: a client discovers the authorization server from this
+ * server's metadata, sends the user through it, and presents the resulting token
+ * (see lib/server/mcp/auth.ts). Letting a cookie in as well would mean two ways
+ * to reach the same tools, one of which no MCP client can produce and no
+ * authorization server can revoke — so the guarantee "everything /api/mcp does
+ * happened under a token the IdP issued and can withdraw" would stop holding.
+ */
+const OAUTH_ROUTE = '/api/mcp';
 
 export async function handle({ event, resolve }) {
     const sessionId = event.cookies.get('session');
@@ -146,6 +167,40 @@ export async function handle({ event, resolve }) {
 
     const pathname = event.url.pathname;
     const isApi = matchesRoute(pathname, '/api');
+
+    // ── OAuth 2.1 bearer authentication for MCP ──────────────────────────────
+    // Runs instead of the cookie check, not after it (see OAUTH_ROUTE), and
+    // returns the RFC 6750 challenge itself: the `WWW-Authenticate` header is how
+    // a client discovers where to authorize, so a bare 401 would leave it unable
+    // to do anything but report failure.
+    if (matchesRoute(pathname, OAUTH_ROUTE)) {
+        const outcome = await authenticateMcpRequest(event.request, event.url.origin);
+        if (!outcome.ok) {
+            // `error` is the RFC 6750 code when there is one. Absent, it depends on
+            // which way the failure went: a 500 body reading "unauthorized" would
+            // send a client off to re-authorize against a provider that is the thing
+            // actually broken.
+            const code = outcome.error ?? (outcome.status === 500 ? 'server_error' : 'unauthorized');
+            return new Response(
+                JSON.stringify({
+                    error: code,
+                    error_description: outcome.description
+                }),
+                {
+                    status: outcome.status,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'WWW-Authenticate': outcome.challenge
+                    }
+                }
+            );
+        }
+        event.locals.user = outcome.user;
+        // No session row exists behind an access token, and inventing one would let
+        // a token holder be signed out — or have their credential expire — through
+        // a table they have no row in. The token's own expiry is the authority.
+        event.locals.session = null;
+    }
 
     // ── Deny-by-default authentication ───────────────────────────────────────
     // Every route except PUBLIC_ROUTES requires a session. This replaced two

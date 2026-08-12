@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestEvent } from '@sveltejs/kit';
-import { db } from '$lib/server/db';
+import { recordFeedback } from '$lib/server/conversations';
 
 export async function POST({ request, locals }: RequestEvent) {
     const user = locals.user;
@@ -10,24 +10,18 @@ export async function POST({ request, locals }: RequestEvent) {
 
     const { conversationId, messageIndex, rating } = await request.json();
 
-    if (!conversationId || messageIndex === undefined || ![-1, 1].includes(rating)) {
+    if (!conversationId || typeof conversationId !== 'string' || !Number.isInteger(messageIndex) || ![-1, 1].includes(rating)) {
         return json({ error: 'Invalid feedback data' }, { status: 400 });
     }
 
     try {
-        // Get the query and response from chat history
-        const messages = db.prepare(
-            'SELECT role, content FROM chat_history WHERE conversation_id = ? ORDER BY created_at ASC'
-        ).all(conversationId) as { role: string; content: string }[];
-
-        const queryText = messages[messageIndex - 1]?.content || null;
-        const responseText = messages[messageIndex]?.content || null;
-
-        db.prepare(`
-            INSERT INTO response_feedback (conversation_id, message_index, rating, query_text, response_text)
-            VALUES (?, ?, ?, ?, ?)
-        `).run(conversationId, messageIndex, rating, queryText, responseText);
-
+        // Ownership is enforced in recordFeedback: a rating is stored with a
+        // snapshot of the exchange it judged, so rating someone else's
+        // conversation would copy their text into this user's feedback row.
+        const result = recordFeedback(user.id, conversationId, messageIndex, rating);
+        if (!result.ok) {
+            return json({ error: result.error }, { status: result.status });
+        }
         return json({ success: true });
     } catch (e) {
         console.error('[Feedback] Failed to store:', e);

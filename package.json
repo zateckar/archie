@@ -29,6 +29,7 @@
 		"test:admin": "playwright test e2e/04-admin-dashboard.spec.ts e2e/05-admin-repos.spec.ts e2e/06-admin-documents.spec.ts e2e/07-admin-users.spec.ts",
 		"test:repos": "playwright test e2e/05-admin-repos.spec.ts",
 		"test:mermaid": "playwright test e2e/08-mermaid.spec.ts",
+		"test:mcp": "playwright test e2e/09-mcp.spec.ts",
 		"test:debug": "playwright test --debug"
 	},
 	"devDependencies": {
@@ -53,6 +54,7 @@
 	"dependencies": {
 		"@google/genai": "^2.13.0",
 		"@lucide/svelte": "^1.25.0",
+		"@modelcontextprotocol/sdk": "^1.30.0",
 		"@sqliteai/sqlite-vector": "^1.0.0",
 		"@tailwindcss/typography": "^0.5.20",
 		"@tiptap/core": "^3.27.1",
@@ -70,10 +72,12 @@
 		"graphology-communities-louvain": "^2.0.2",
 		"graphology-metrics": "^2.4.0",
 		"isomorphic-git": "^1.38.6",
+		"jose": "^6.2.8",
 		"marked": "^18.0.5",
 		"mermaid": "^11.16.0",
 		"pdf-parse": "^2.4.5",
 		"tailwind-merge": "^3.6.0",
-		"turndown": "^7.2.4"
+		"turndown": "^7.2.4",
+		"zod": "^4.4.3"
 	}
 }

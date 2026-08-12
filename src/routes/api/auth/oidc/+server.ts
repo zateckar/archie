@@ -1,12 +1,11 @@
 import { redirect } from '@sveltejs/kit';
 import crypto from 'crypto';
 import { safeRedirectTarget } from '$lib/server/auth';
+import { idpEndpoints, oidcConfig } from '$lib/server/oidc-discovery';
 
 export async function GET({ cookies, url }) {
-    const issuer = process.env.OIDC_ISSUER;
-    const clientId = process.env.OIDC_CLIENT_ID;
-    
-    if (!issuer || !clientId) {
+    const config = oidcConfig();
+    if (!config) {
         return new Response('OIDC not configured', { status: 500 });
     }
 
@@ -28,8 +27,13 @@ export async function GET({ cookies, url }) {
 
     const redirectUri = `${url.origin}/api/auth/callback`;
 
-    const authUrl = new URL(`${issuer}/protocol/openid-connect/auth`);
-    authUrl.searchParams.set('client_id', clientId);
+    // Discovered rather than assembled from Keycloak's path layout, which is what
+    // this route used to hardcode. Falls back to that layout if the provider's
+    // discovery document is unreachable, so an IdP hiccup cannot lock everyone out.
+    const endpoints = await idpEndpoints(config);
+
+    const authUrl = new URL(endpoints.authorizationEndpoint);
+    authUrl.searchParams.set('client_id', config.clientId);
     authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('redirect_uri', redirectUri);
     authUrl.searchParams.set('scope', 'openid profile email');
