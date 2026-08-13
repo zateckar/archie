@@ -8,6 +8,8 @@ import {
     factsheetContentHash,
     factsheetFilename,
     factsheetUrl,
+    endingMilestone,
+    parseLifecyclePhases,
     RELATION_EXAMPLE_LIMIT,
     type LeanixNode
 } from './leanix-format';
@@ -292,6 +294,78 @@ describe('factsheetContentHash', () => {
         const after = itComponent({ technicalSuitability: 'adequate' });
         const md = (n: LeanixNode) => buildFactsheetMarkdown(normalizeFactsheet(n), extractRelations(n));
         expect(factsheetContentHash(md(before))).not.toBe(factsheetContentHash(md(after)));
+    });
+});
+
+describe('endingMilestone — which date the roadmap should actually plot', () => {
+    /** Shorthand for the stored JSON column. */
+    const phases = (...pairs: [string, string][]) =>
+        JSON.stringify(pairs.map(([phase, startDate]) => ({ phase, startDate })));
+
+    it('finds an ending that only the phases record', () => {
+        // The five factsheets that appeared on no timeline at all: a dated
+        // phase-out with the end_of_life_date column left unset.
+        const m = endingMilestone({
+            end_of_life_date: null,
+            lifecycle_phases: phases(['active', '2017-01-01'], ['phaseOut', '2027-12-31'])
+        });
+        expect(m).toEqual({ date: '2027-12-31', kind: 'phaseOut', label: 'Phase-out' });
+    });
+
+    it('prefers the earlier phase-out to the later end-of-life column', () => {
+        // The regression that mattered most: DevOps Server read as a 2030
+        // problem while it had been phasing out since October 2025.
+        const m = endingMilestone({
+            end_of_life_date: '2030-10-08',
+            lifecycle_phases: phases(['active', '2020-08-25'], ['phaseOut', '2025-10-14'])
+        });
+        expect(m?.date).toBe('2025-10-14');
+        expect(m?.kind).toBe('phaseOut');
+    });
+
+    it('falls back to the column when the phases say nothing about an ending', () => {
+        const m = endingMilestone({
+            end_of_life_date: '2029-12-31',
+            lifecycle_phases: phases(['active', '2020-01-01'])
+        });
+        expect(m).toEqual({ date: '2029-12-31', kind: 'endOfLife', label: 'End of life' });
+    });
+
+    it('breaks a same-day tie towards the phase that starts the work', () => {
+        const m = endingMilestone({
+            end_of_life_date: '2029-12-31',
+            lifecycle_phases: phases(['phaseOut', '2029-12-31'], ['endOfLife', '2029-12-31'])
+        });
+        expect(m?.kind).toBe('phaseOut');
+    });
+
+    it('ignores phases that are not endings', () => {
+        expect(endingMilestone({
+            end_of_life_date: null,
+            lifecycle_phases: phases(['plan', '2020-07-01'], ['phaseIn', '2020-07-31'], ['active', '2020-08-31'])
+        })).toBeNull();
+    });
+
+    it('returns nothing for a factsheet with no dated ending', () => {
+        expect(endingMilestone({ end_of_life_date: null, lifecycle_phases: null })).toBeNull();
+        expect(endingMilestone({})).toBeNull();
+    });
+
+    it('trims a stored timestamp to a date', () => {
+        expect(endingMilestone({ end_of_life_date: '2028-11-30T00:00:00Z' })?.date).toBe('2028-11-30');
+    });
+});
+
+describe('parseLifecyclePhases', () => {
+    it('survives unreadable or unexpected column contents', () => {
+        for (const raw of [null, undefined, '', 'not json', '{}', '[1,2]', '[{"phase":"active"}]']) {
+            expect(() => parseLifecyclePhases(raw)).not.toThrow();
+            expect(parseLifecyclePhases(raw)).toEqual([]);
+        }
+    });
+
+    it('drops entries whose date is too short to be a date', () => {
+        expect(parseLifecyclePhases('[{"phase":"phaseOut","startDate":"2027"}]')).toEqual([]);
     });
 });
 

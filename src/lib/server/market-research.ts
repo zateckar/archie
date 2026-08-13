@@ -1,14 +1,19 @@
 import { db, getAppStateNumber, setAppState } from './db';
 import { inCategory } from './usage';
 import { groundedSearchConfigured } from './providers';
-import { assessProduct, researchProduct } from './llm';
+import { assessProduct, researchProduct, resolveProductIdentity } from './llm';
 import {
+    ALERT_WINDOW_MONTHS,
+    applyIdentity,
     briefIsEmpty,
+    isCurrentEvent,
     selectDue,
+    type IdentityInput,
     type MarketAssessment,
     type MarketSubject,
     type PortfolioContext,
-    type ResearchCandidate
+    type ResearchCandidate,
+    type ResolvedIdentity
 } from './market-format';
 
 /**
@@ -30,17 +35,28 @@ import {
  *   • TTL (default 7 days) — has enough time passed for the answer to differ?
  *     News about an enterprise product does not turn over daily, and a nightly
  *     re-read would multiply the bill by seven to re-fetch the same headlines.
- *   • Input hash — is this still the same product? A renamed factsheet or a
- *     changed vendor invalidates immediately, without waiting for the TTL. Every
- *     other edit (description, owner, criticality) does not, because none of
- *     them change what the search would return.
- *   • Batch cap (default 10 per run) — spreads a first run of 78 factsheets
- *     across a week instead of spending it in one burst, so a misconfiguration
- *     is discovered at a cost of ten calls rather than a hundred and fifty.
+ *     A factsheet with no public product behind it gets its own, much longer
+ *     clock: "this is an in-house system" does not become false in a week.
+ *   • Input hash — is this still the same product? A renamed factsheet, a
+ *     changed vendor or an edited description invalidates immediately, without
+ *     waiting for the TTL. Owner, criticality and fit ratings do not, because
+ *     none of them change what would be searched for.
+ *   • Batch cap (default 10 per run) — so a misconfiguration is discovered at a
+ *     cost of ten calls rather than a hundred and fifty.
  *
  * A failure is stamped like a success but retried on a shorter clock, so a
  * transient provider error costs one wasted call rather than either a retry loop
  * or a week of silence.
+ *
+ * ── Getting the portfolio covered in the first place ─────────────────────────
+ * Those gates make a steady state cheap, but they also made the FIRST pass
+ * glacial: ten a day against seventy-eight factsheets meant the page sat mostly
+ * empty for a week, with well-known products at the end of an alphabetical queue
+ * simply because their names start late. Two things fix that without loosening
+ * the steady-state budget — the run ticks on BACKFILL_INTERVAL_MS while any
+ * factsheet has never been looked at (see initMarketResearch), and selectDue
+ * orders by portfolio weight within a due reason so the heaviest platforms are
+ * covered first rather than alphabetically.
  */
 
 function envInt(name: string, fallback: number): number {
@@ -51,10 +67,19 @@ function envInt(name: string, fallback: number): number {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const TTL_MS = envInt('MARKET_RESEARCH_TTL_DAYS', 7) * DAY_MS;
+/**
+ * Refresh clock for a factsheet the web had nothing on. Longer than the TTL
+ * because an in-house system is not news that goes stale — re-asking every week
+ * spent the batch cap on the one answer that cannot change, which is most of why
+ * the well-known products in the portfolio had no assessment at all.
+ */
+const UNIDENTIFIED_TTL_MS = envInt('MARKET_RESEARCH_UNIDENTIFIED_TTL_DAYS', 60) * DAY_MS;
 /** How soon a factsheet whose last attempt errored is tried again. */
 const ERROR_RETRY_MS = envInt('MARKET_RESEARCH_ERROR_RETRY_HOURS', 6) * 60 * 60 * 1000;
 const BATCH_LIMIT = envInt('MARKET_RESEARCH_BATCH', 10);
 const RUN_INTERVAL_MS = envInt('MARKET_RESEARCH_INTERVAL_HOURS', 24) * 60 * 60 * 1000;
+/** The clock while the portfolio has never-researched factsheets left. */
+const BACKFILL_INTERVAL_MS = envInt('MARKET_RESEARCH_BACKFILL_INTERVAL_HOURS', 1) * 60 * 60 * 1000;
 
 const LAST_RUN_KEY = 'market:last-run-at';
 
@@ -96,7 +121,7 @@ interface CandidateRow extends ResearchCandidate {
 function loadCandidates(): CandidateRow[] {
     return db.prepare(`
         SELECT
-            f.id, f.fs_type, f.name, f.alias, f.category,
+            f.id, f.fs_type, f.name, f.alias, f.category, f.description,
             f.lifecycle_state, f.technical_fit, f.functional_fit,
             f.business_criticality, f.time_classification, f.end_of_life_date,
             (SELECT r.to_name FROM leanix_relations r
@@ -106,12 +131,36 @@ function loadCandidates(): CandidateRow[] {
             (SELECT COUNT(*) FROM leanix_relations r
               WHERE r.from_id = f.id AND r.rel_type = 'relITComponentToApplication') AS app_count,
             m.input_hash,
+            m.identified,
             CAST(strftime('%s', m.researched_at) AS INTEGER) * 1000 AS researched_at_ms,
             CASE WHEN m.error IS NOT NULL THEN 1 ELSE 0 END AS had_error
         FROM leanix_factsheets f
         LEFT JOIN leanix_market_research m ON m.factsheet_id = f.id
         ORDER BY f.name COLLATE NOCASE
-    `).all() as CandidateRow[];
+    `).all().map(row => {
+        const candidate = row as CandidateRow;
+        candidate.priority = priorityOf(candidate);
+        return candidate;
+    });
+}
+
+/**
+ * How much of the portfolio depends on this factsheet, as a tie-break for the
+ * batch cap.
+ *
+ * Dependent applications dominate deliberately — they are the count that says
+ * how far a problem would spread — with criticality as a nudge so that a
+ * mission-critical component with few recorded dependants is not sorted below
+ * an incidental one. The absolute scale is meaningless; only the order is used.
+ */
+function priorityOf(row: CandidateRow): number {
+    const criticality = ({
+        missionCritical: 30,
+        businessCritical: 20,
+        businessOperational: 10,
+        administrativeService: 0
+    } as Record<string, number>)[row.business_criticality ?? ''] ?? 0;
+    return (row.app_count || 0) + criticality;
 }
 
 function contextOf(row: CandidateRow): PortfolioContext {
@@ -133,9 +182,43 @@ function dueCandidates(rows: CandidateRow[], force: boolean) {
     return selectDue(rows, {
         now: Date.now(),
         ttlMs: TTL_MS,
+        unidentifiedTtlMs: UNIDENTIFIED_TTL_MS,
         errorRetryMs: ERROR_RETRY_MS,
         force
     });
+}
+
+/** The identity call's view of a factsheet. Everything else stays behind. */
+function identityInputOf(row: CandidateRow): IdentityInput {
+    return {
+        fsType: row.fs_type,
+        name: row.name,
+        alias: row.alias ?? null,
+        vendor: row.vendor,
+        category: row.category ?? null,
+        description: row.description ?? null
+    };
+}
+
+/**
+ * Works out what to search for, and never fails the run doing it.
+ *
+ * A resolution error is not worth abandoning a factsheet over: the fallback is
+ * the name this feature searched for before the call existed, minus its local
+ * decoration. Worst case the search is as good as it used to be.
+ */
+async function resolveSubject(
+    row: CandidateRow,
+    subject: MarketSubject
+): Promise<{ subject: MarketSubject; identity: ResolvedIdentity }> {
+    try {
+        const identity = await resolveProductIdentity(identityInputOf(row));
+        return { subject: applyIdentity(subject, identity), identity };
+    } catch (e) {
+        console.warn(`[Market] Identity resolution failed for ${subject.label}:`, (e as Error)?.message ?? e);
+        const fallback: ResolvedIdentity = { product: null, vendor: null, inHouse: false, note: null };
+        return { subject: applyIdentity(subject, fallback), identity: fallback };
+    }
 }
 
 // ── Persistence ─────────────────────────────────────────────────────────────
@@ -262,6 +345,10 @@ export interface MarketResearchResult {
     researched: number;
     identified: number;
     unidentified: number;
+    /** Of the unidentified, those the identity call settled without a search. */
+    inHouse: number;
+    /** Factsheets searched for under a name other than their own. */
+    renamed: number;
     alerts: number;
     failed: { name: string; error: string }[];
     /** Grounded searches issued. Billed per request on top of tokens. */
@@ -274,8 +361,8 @@ async function runMarketResearchImpl(
     options: { force?: boolean; limit?: number } = {}
 ): Promise<MarketResearchResult> {
     const empty: MarketResearchResult = {
-        status: 'ok', due: 0, researched: 0, identified: 0,
-        unidentified: 0, alerts: 0, failed: [], searches: 0
+        status: 'ok', due: 0, researched: 0, identified: 0, unidentified: 0,
+        inHouse: 0, renamed: 0, alerts: 0, failed: [], searches: 0
     };
 
     if (!marketResearchConfigured()) {
@@ -311,15 +398,41 @@ async function runMarketResearchImpl(
         const result: MarketResearchResult = { ...empty, due: due.length };
 
         for (const candidate of batch) {
-            const { row, subject, hash } = candidate;
+            const { row, hash } = candidate;
+            let subject = candidate.subject;
             try {
+                // What to search for, decided before anything is spent on it.
+                const resolved = await resolveSubject(row, subject);
+                subject = resolved.subject;
+
+                if (resolved.identity.inHouse) {
+                    // No search is issued at all. This is the cheap half of the
+                    // gate: the answer for a bespoke system is knowable from the
+                    // record itself, and a grounded request could only confirm it
+                    // at full price.
+                    persistAssessment(row.id, subject, hash, model, failedAssessment(), null);
+                    result.researched++;
+                    result.unidentified++;
+                    result.inHouse++;
+                    console.log(
+                        `[Market] ${subject.label}: no public product behind it` +
+                        `${resolved.identity.note ? ` (${resolved.identity.note})` : ''} — not searched.`
+                    );
+                    continue;
+                }
+
+                if (subject.name !== candidate.subject.name) {
+                    result.renamed++;
+                    console.log(`[Market] ${candidate.subject.name} → searching as "${subject.name}".`);
+                }
+
                 const { brief, sources, queries } = await researchProduct(subject);
                 result.searches++;
 
                 if (briefIsEmpty(brief)) {
-                    // Not a failure: an in-house system has no market to research,
-                    // and recording that plainly is what stops it being retried
-                    // from scratch every week.
+                    // Not a failure: some records have no market to research, and
+                    // recording that plainly is what stops it being retried from
+                    // scratch every week.
                     persistAssessment(row.id, subject, hash, model, failedAssessment(), null);
                     result.researched++;
                     result.unidentified++;
@@ -376,11 +489,16 @@ export function marketResearchStatus() {
     `).get() as { researched: number; identified: number | null; errored: number | null };
 
     const total = (db.prepare('SELECT COUNT(*) AS c FROM leanix_factsheets').get() as { c: number }).c;
-    const alerts = db.prepare(`
-        SELECT COUNT(*) AS total,
-               SUM(CASE WHEN severity IN ('critical', 'high') THEN 1 ELSE 0 END) AS urgent
-        FROM leanix_market_alerts
-    `).get() as { total: number; urgent: number | null };
+
+    // Filtered in JS against the same predicate the write side uses, rather than
+    // by a second date rule expressed in SQL. A stored alert ages out between
+    // refreshes, and the two counts disagreeing is exactly the kind of drift a
+    // duplicated rule produces.
+    const now = Date.now();
+    const alertRows = db.prepare(
+        'SELECT severity, event_date FROM leanix_market_alerts'
+    ).all() as { severity: string; event_date: string | null }[];
+    const current = alertRows.filter(a => isCurrentEvent(a.event_date, now));
 
     return {
         configured: marketResearchConfigured(),
@@ -388,22 +506,41 @@ export function marketResearchStatus() {
         researched: counts.researched,
         identified: counts.identified ?? 0,
         errored: counts.errored ?? 0,
-        alerts: alerts.total,
-        urgentAlerts: alerts.urgent ?? 0,
+        alerts: current.length,
+        urgentAlerts: current.filter(a => a.severity === 'critical' || a.severity === 'high').length,
         lastRunAt: getAppStateNumber(LAST_RUN_KEY),
         ttlMs: TTL_MS,
         batchLimit: BATCH_LIMIT,
+        alertWindowMonths: ALERT_WINDOW_MONTHS,
         running: runInProgress
     };
 }
 
 let researchTimer: ReturnType<typeof setInterval> | null = null;
 
+/** Factsheets that have never been looked at, at all. */
+function unresearchedCount(): number {
+    return (db.prepare(`
+        SELECT COUNT(*) AS c
+        FROM leanix_factsheets f
+        LEFT JOIN leanix_market_research m ON m.factsheet_id = f.id
+        WHERE m.factsheet_id IS NULL
+    `).get() as { c: number }).c;
+}
+
 /**
  * Hourly tick guarding a daily interval — the same shape as the LeanIX sync, and
  * for the same reason: the guard is what makes a restart-heavy deployment behave,
  * since a container that restarts twice a day would otherwise either research
  * twice or, with a naive daily timer, never.
+ *
+ * The interval is the daily one only once the portfolio has been covered. While
+ * factsheets remain that have never been looked at, the guard drops to
+ * BACKFILL_INTERVAL_MS: a daily clock against a batch of ten needed more than a
+ * week to reach the end of seventy-eight factsheets, which left the page mostly
+ * empty and — because the queue was alphabetical — missing exactly the
+ * well-known platforms an architect would check first. The steady-state budget
+ * is untouched; only the empty-page case is hurried.
  *
  * The first run is deliberately delayed well past boot. It is the only scheduled
  * work in this app that costs money per item, and starting it while embedding
@@ -418,7 +555,12 @@ export function initMarketResearch() {
 
     const tick = () => {
         const last = getAppStateNumber(LAST_RUN_KEY) ?? 0;
-        if (Date.now() - last < RUN_INTERVAL_MS) return;
+        const remaining = unresearchedCount();
+        const interval = remaining > 0 ? BACKFILL_INTERVAL_MS : RUN_INTERVAL_MS;
+        if (Date.now() - last < interval) return;
+        if (remaining > 0) {
+            console.log(`[Market] Backfilling — ${remaining} factsheet(s) never researched.`);
+        }
         runMarketResearch().catch(err => console.error('[Market] Scheduled run failed:', err));
     };
 

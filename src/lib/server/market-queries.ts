@@ -4,7 +4,10 @@ import { getWorkspaceUrl } from './leanix';
 import { marketResearchStatus } from './market-research';
 import {
     ALERT_CATEGORY_LABELS,
+    ALERT_WINDOW_MONTHS,
     VERDICT_LABELS,
+    exposureScore,
+    isCurrentEvent,
     severityRank,
     type AlertCategory,
     type MarketAlternative,
@@ -54,13 +57,40 @@ export interface MarketAlertView {
     sourceTitle: string | null;
     /** First seen within the last 7 days — the page badges these as new. */
     isNew: boolean;
+    /** Applications recorded as running on the affected factsheet. */
+    reach: number;
+    /** Severity weighted by reach — see exposureScore. */
+    exposure: number;
 }
 
 /**
- * The alert feed: most severe first, then most recent.
+ * Every stored alert still dated inside the alert window.
  *
- * Sorted on severity RANK rather than the stored string, because alphabetical
- * order on severity names puts "critical" after "high" and "low" in the middle.
+ * Read-side filtering exists because the write side cannot be the whole answer.
+ * normalizeAssessment refuses to store an event older than the window, but a
+ * stored alert keeps ageing afterwards and the row is only reconciled when its
+ * factsheet is next researched — up to a TTL later. Without this the page would
+ * drift back into showing exactly what it is supposed to have stopped showing.
+ *
+ * Rows are not deleted on the way past: the next refresh reconciles them anyway,
+ * and a read path that quietly deletes is a read path that surprises someone.
+ */
+function currentAlertRows<T extends { event_date: string | null }>(rows: T[]): T[] {
+    const now = Date.now();
+    return rows.filter(r => isCurrentEvent(r.event_date, now));
+}
+
+/**
+ * The alert feed: most exposed first.
+ *
+ * Ordered on exposure rather than severity alone, so how far an event reaches is
+ * part of the ranking instead of something the reader has to notice — see
+ * exposureScore for where the crossover between the two sits. Severity rank is
+ * still carried on every row, because the badge colour is a severity, not an
+ * exposure.
+ *
+ * The limit is applied AFTER the recency filter, not in SQL — an out-of-window
+ * alert must not consume one of the slots.
  */
 export function getMarketAlerts(limit = 60): MarketAlertView[] {
     const rows = db.prepare(`
@@ -68,15 +98,15 @@ export function getMarketAlerts(limit = 60): MarketAlertView[] {
             a.id, a.factsheet_id, a.severity, a.category, a.title, a.detail,
             a.event_date, a.source_url, a.source_title,
             f.name AS factsheet_name, f.fs_type,
+            (SELECT COUNT(*) FROM leanix_relations r
+              WHERE r.from_id = f.id AND r.rel_type = 'relITComponentToApplication') AS reach,
             CASE WHEN a.first_seen_at >= datetime('now', '-7 days') THEN 1 ELSE 0 END AS is_new
         FROM leanix_market_alerts a
         JOIN leanix_factsheets f ON f.id = a.factsheet_id
-        ORDER BY a.event_date DESC, a.title
-        LIMIT ?
-    `).all(limit) as any[];
+    `).all() as any[];
 
     const workspace = getWorkspaceUrl();
-    return rows
+    return currentAlertRows(rows)
         .map(r => ({
             id: r.id,
             factsheetId: r.factsheet_id,
@@ -92,18 +122,64 @@ export function getMarketAlerts(limit = 60): MarketAlertView[] {
             eventDate: r.event_date,
             sourceUrl: r.source_url,
             sourceTitle: r.source_title,
-            isNew: r.is_new === 1
+            isNew: r.is_new === 1,
+            reach: r.reach ?? 0,
+            exposure: exposureScore(r.severity, r.reach ?? 0)
         }))
         .sort((a, b) => {
-            const bySeverity = a.severityRank - b.severityRank;
-            if (bySeverity !== 0) return bySeverity;
-            // Undated events sort last within their severity: an event with no
-            // date is not "the most recent one".
+            const byExposure = b.exposure - a.exposure;
+            if (byExposure !== 0) return byExposure;
+            // Undated events sort last within equal exposure. They no longer
+            // survive normalization, but rows written before that rule existed
+            // are still in the table until their factsheet is next researched.
             if (!a.eventDate && !b.eventDate) return a.title.localeCompare(b.title);
             if (!a.eventDate) return 1;
             if (!b.eventDate) return -1;
             return b.eventDate.localeCompare(a.eventDate);
-        });
+        })
+        .slice(0, limit);
+}
+
+export interface ExposureSummary {
+    /** Distinct factsheets carrying at least one current critical or high alert. */
+    factsheets: number;
+    /** Applications running on them — counted once per application. */
+    applications: number;
+    /** The factsheet putting the most applications at risk, for the headline. */
+    worst: { id: string; name: string; reach: number; severity: Severity } | null;
+}
+
+/**
+ * How much of the estate sits under an urgent alert.
+ *
+ * "3 critical alerts" is a count of stories; this is a count of consequences,
+ * which is the figure that decides whether the feed is a reading item or a
+ * standing meeting. Applications are de-duplicated across factsheets because one
+ * application on two alerting platforms is still one application at risk —
+ * summing the per-platform reach would double-count exactly the applications
+ * that matter most.
+ */
+export function getExposureSummary(alerts: MarketAlertView[]): ExposureSummary {
+    const urgent = alerts.filter(a => a.severity === 'critical' || a.severity === 'high');
+    if (urgent.length === 0) return { factsheets: 0, applications: 0, worst: null };
+
+    const factsheetIds = [...new Set(urgent.map(a => a.factsheetId))];
+    const placeholders = factsheetIds.map(() => '?').join(', ');
+    const applications = (db.prepare(`
+        SELECT COUNT(DISTINCT to_id) AS c FROM leanix_relations
+        WHERE rel_type = 'relITComponentToApplication' AND from_id IN (${placeholders})
+    `).get(...factsheetIds) as { c: number }).c;
+
+    // Picked by REACH, not by exposure score. The score ranks the feed, where the
+    // question is what to read first; this sentence is about applications at
+    // risk, and naming a 18-application critical as "most exposed" beside a
+    // 187-application high would contradict the number it sits next to.
+    const worst = urgent.reduce((a, b) => (b.reach > a.reach ? b : a));
+    return {
+        factsheets: factsheetIds.length,
+        applications,
+        worst: { id: worst.factsheetId, name: worst.factsheetName, reach: worst.reach, severity: worst.severity }
+    };
 }
 
 export interface AssessmentView {
@@ -157,22 +233,27 @@ export function getAssessments(): Record<string, AssessmentView> {
     return out;
 }
 
-/** Alert counts per factsheet, for the badge in the table. */
+/**
+ * Alert counts per factsheet, for the badge in the table.
+ *
+ * Counted row by row rather than with a GROUP BY, so the same recency predicate
+ * decides this badge and the feed above it. A badge reading 3 above a feed
+ * showing 1 is the bug this shape exists to prevent.
+ */
 export function getAlertCounts(): Record<string, { total: number; worst: Severity }> {
-    const rows = db.prepare(`
-        SELECT factsheet_id, severity, COUNT(*) AS c
+    const rows = currentAlertRows(db.prepare(`
+        SELECT factsheet_id, severity, event_date
         FROM leanix_market_alerts
-        GROUP BY factsheet_id, severity
-    `).all() as { factsheet_id: string; severity: Severity; c: number }[];
+    `).all() as { factsheet_id: string; severity: Severity; event_date: string | null }[]);
 
     const out: Record<string, { total: number; worst: Severity }> = {};
     for (const row of rows) {
         const entry = out[row.factsheet_id];
         if (!entry) {
-            out[row.factsheet_id] = { total: row.c, worst: row.severity };
+            out[row.factsheet_id] = { total: 1, worst: row.severity };
             continue;
         }
-        entry.total += row.c;
+        entry.total++;
         if (severityRank(row.severity) < severityRank(entry.worst)) entry.worst = row.severity;
     }
     return out;
@@ -245,9 +326,12 @@ export function getFitDisagreements(limit = 10) {
 
 /** Everything the portfolio page needs from this feature, in one call. */
 export function getMarketPage() {
+    const alerts = getMarketAlerts();
     return {
         status: marketResearchStatus(),
-        alerts: getMarketAlerts(),
+        alertWindowMonths: ALERT_WINDOW_MONTHS,
+        alerts,
+        exposure: getExposureSummary(alerts),
         assessments: getAssessments(),
         alertCounts: getAlertCounts(),
         verdicts: getVerdictBreakdown(),

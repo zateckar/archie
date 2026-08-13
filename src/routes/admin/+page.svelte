@@ -38,6 +38,7 @@ import RefreshCw from '@lucide/svelte/icons/refresh-cw';
         urgentAlerts: number;
         lastRunAt: number | null;
         batchLimit: number;
+        alertWindowMonths: number;
         running: boolean;
     }
     let market = $state<MarketStatus | null>(null);
@@ -105,7 +106,10 @@ import RefreshCw from '@lucide/svelte/icons/refresh-cw';
             researchMessage = res.ok
                 ? (result.status === 'skipped'
                     ? `Skipped — ${result.reason}`
-                    : `${result.researched} researched · ${result.identified} identified · ${result.unidentified} not found · ${result.alerts} alert(s)` +
+                    : `${result.researched} researched · ${result.identified} identified · ${result.unidentified} not found` +
+                      (result.inHouse ? ` (${result.inHouse} in-house, not searched)` : '') +
+                      (result.renamed ? ` · ${result.renamed} searched under their product name` : '') +
+                      ` · ${result.alerts} alert(s)` +
                       (result.due > result.researched ? ` · ${result.due - result.researched} still queued` : '') +
                       (result.failed.length ? ` · ${result.failed.length} failed` : ''))
                 : (result.error ?? 'Research failed');
@@ -215,7 +219,9 @@ import RefreshCw from '@lucide/svelte/icons/refresh-cw';
                     </h2>
                     <p class="text-xs text-faint mt-1">
                         Searches the web about each portfolio product. Billed per search and per token, so it
-                        runs {market.batchLimit} at a time and re-checks each factsheet weekly.
+                        runs {market.batchLimit} at a time and re-checks each factsheet weekly — hourly until
+                        every factsheet has been looked at once. Records with no public product behind them are
+                        settled without a search.
                     </p>
                 </div>
                 <button class="btn btn-secondary btn-sm shrink-0" onclick={runResearch}
@@ -230,7 +236,7 @@ import RefreshCw from '@lucide/svelte/icons/refresh-cw';
                     { name: 'Status', value: market.configured ? 'Configured' : 'Not configured', ok: market.configured },
                     { name: 'Coverage', value: `${market.researched} of ${market.total} factsheets`, ok: market.researched > 0 },
                     { name: 'Identified on the web', value: `${market.identified}`, ok: market.identified > 0 },
-                    { name: 'Open alerts', value: `${market.alerts}${market.urgentAlerts ? ` (${market.urgentAlerts} critical or high)` : ''}`, ok: market.alerts === 0 },
+                    { name: `Current alerts (last ${market.alertWindowMonths} months)`, value: `${market.alerts}${market.urgentAlerts ? ` (${market.urgentAlerts} critical or high)` : ''}`, ok: market.alerts === 0 },
                     { name: 'Last run', value: ago(market.lastRunAt), ok: !!market.lastRunAt }
                 ] as row}
                     <div class="flex items-center justify-between py-2.5">

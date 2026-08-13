@@ -3,11 +3,15 @@ import crypto from 'crypto';
 import * as providers from './providers';
 import {
     buildAssessmentPrompt,
+    buildIdentityPrompt,
     buildResearchPrompt,
     normalizeAssessment,
+    normalizeIdentity,
+    type IdentityInput,
     type MarketAssessment,
     type MarketSubject,
-    type PortfolioContext
+    type PortfolioContext,
+    type ResolvedIdentity
 } from './market-format';
 
 /**
@@ -2069,18 +2073,43 @@ export function normalizeConsistencyResult(r: ConsistencyResult): ConsistencyRes
 
 // ── Market research ─────────────────────────────────────────────────────────
 //
-// Two calls, and the split between them is deliberate rather than incidental.
+// Three calls, and the split between them is deliberate rather than incidental.
 //
 // researchProduct is the only outward-facing call in the application: it runs
 // with a live search tool, and its prompt is built exclusively from public
-// product identity (see ./market-format). assessProduct reads that brief
-// alongside our internal record — criticality, dependencies, our own fitness
-// ratings — and runs with NO tool, so there is no mechanism by which anything it
-// reads could become a search query.
+// product identity (see ./market-format). The other two run with NO tool, so
+// there is no mechanism by which anything they read could become a search query.
 //
-// The second call also buys back structured output: a grounded Gemini call
-// cannot use JSON mode, so a single-call design would mean parsing JSON out of
-// free text produced by the one call least able to follow a format.
+// resolveProductIdentity comes first and decides WHAT to search for. It is the
+// only call that sees the factsheet description, and it hands back at most a
+// product name — which is the whole reason a locally-named record like
+// "Skoda PostgreSQL platform" can be researched at all. It also answers "there
+// is no public product here", and that answer saves a billed search.
+//
+// assessProduct comes last and reads the brief alongside our internal record —
+// criticality, dependencies, our own fitness ratings. Being a separate call also
+// buys back structured output: a grounded Gemini call cannot use JSON mode, so a
+// single-call design would mean parsing JSON out of free text produced by the
+// one call least able to follow a format.
+
+/**
+ * Works out which public product a local factsheet is about.
+ *
+ * Un-grounded, and cheap next to the search it gates: on this portfolio roughly
+ * a quarter of factsheets are in-house, and answering that here costs tokens
+ * instead of a billed grounded request that could only come back empty.
+ */
+export async function resolveProductIdentity(input: IdentityInput): Promise<ResolvedIdentity> {
+    const result = await withRetry(() =>
+        providers.generateContent(
+            buildIdentityPrompt(input),
+            { model: TEXT_MODEL },
+            DETERMINISTIC_JSON_CONFIG,
+            { op: 'market_research_identify' }
+        )
+    );
+    return normalizeIdentity(tryParseJSON(result.response.text()));
+}
 
 /** Free-text brief plus the sources the provider says it consulted. */
 export async function researchProduct(
@@ -2121,7 +2150,7 @@ export async function assessProduct(
             { op: 'market_research_assess' }
         )
     );
-    return normalizeAssessment(tryParseJSON(result.response.text()), sources);
+    return normalizeAssessment(tryParseJSON(result.response.text()), sources, { now: Date.now() });
 }
 
 /** HTTP statuses worth a retry: rate limiting and transient server/gateway faults. */

@@ -406,6 +406,82 @@ export function factsheetFilename(fs: { fs_type: string; name: string }): string
  * otherwise: the .env holds an API gateway address, which is not the address a
  * browser opens, and guessing one produces links that 404.
  */
+// ── Lifecycle ───────────────────────────────────────────────────────────────
+
+/**
+ * The phases that mean a factsheet is on its way out, earliest-acting first.
+ *
+ * `phaseOut` outranks `endOfLife` because it is the one that starts the work:
+ * once a platform is phasing out, migration is already the answer, and waiting
+ * for the end-of-life date is waiting for the deadline rather than the trigger.
+ */
+export const ENDING_PHASES = ['phaseOut', 'endOfLife'] as const;
+
+export interface LifecyclePhase {
+    phase: string;
+    startDate: string;
+}
+
+export interface EndingMilestone {
+    /** YYYY-MM-DD. */
+    date: string;
+    kind: (typeof ENDING_PHASES)[number];
+    label: string;
+}
+
+/** Reads the stored `lifecycle_phases` JSON, treating unusable data as absent. */
+export function parseLifecyclePhases(raw: unknown): LifecyclePhase[] {
+    if (typeof raw !== 'string' || !raw) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter(
+            (p): p is LifecyclePhase =>
+                !!p && typeof p.phase === 'string' && typeof p.startDate === 'string' && p.startDate.length >= 10
+        );
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * The ending a factsheet is actually working towards, and what kind it is.
+ *
+ * Reads the lifecycle phases as well as the `end_of_life_date` column and takes
+ * the EARLIEST of them, which is the correction this function exists for. The
+ * column alone was wrong in both directions on the reference workspace: it is
+ * unset on five factsheets that do carry a dated phase-out — Central Log Archive
+ * ends 2027-12-31 and appeared on no timeline at all — and where both exist it
+ * is routinely the LATER date, so the roadmap presented DevOps Server as a 2030
+ * problem when its phase-out had already begun in October 2025.
+ *
+ * Returns null when nothing dates an ending, which is most of a portfolio.
+ */
+export function endingMilestone(row: {
+    end_of_life_date?: string | null;
+    lifecycle_phases?: string | null;
+}): EndingMilestone | null {
+    const candidates: { date: string; kind: (typeof ENDING_PHASES)[number] }[] = [];
+
+    for (const phase of parseLifecyclePhases(row.lifecycle_phases)) {
+        const kind = ENDING_PHASES.find(p => p === phase.phase);
+        if (kind) candidates.push({ date: phase.startDate.slice(0, 10), kind });
+    }
+    if (row.end_of_life_date) {
+        candidates.push({ date: String(row.end_of_life_date).slice(0, 10), kind: 'endOfLife' });
+    }
+    if (candidates.length === 0) return null;
+
+    // Dates are zero-padded ISO, so a string compare is a date compare. On a tie
+    // phaseOut wins, being the phase that starts the work.
+    candidates.sort((a, b) =>
+        a.date.localeCompare(b.date) || ENDING_PHASES.indexOf(a.kind) - ENDING_PHASES.indexOf(b.kind)
+    );
+
+    const best = candidates[0];
+    return { ...best, label: best.kind === 'phaseOut' ? 'Phase-out' : 'End of life' };
+}
+
 export function factsheetUrl(fs: { id: string; fs_type: string }, workspaceUrl?: string | null): string | null {
     const base = (workspaceUrl ?? '').trim().replace(/\/$/, '');
     if (!base) return null;

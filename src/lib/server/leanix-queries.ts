@@ -1,5 +1,5 @@
 import { db } from './db';
-import { humanizeEnum, factsheetUrl } from './leanix-format';
+import { humanizeEnum, factsheetUrl, endingMilestone, type EndingMilestone } from './leanix-format';
 import { getWorkspaceUrl, leanixStatus } from './leanix';
 
 /**
@@ -38,7 +38,13 @@ export function getPortfolioSummary() {
             SUM(CASE WHEN fs_type = 'ITComponent'  THEN 1 ELSE 0 END)       AS components,
             SUM(CASE WHEN lifecycle_state = 'active'   THEN 1 ELSE 0 END)   AS active,
             SUM(CASE WHEN lifecycle_state = 'phaseOut' THEN 1 ELSE 0 END)   AS phasing_out,
-            SUM(CASE WHEN end_of_life_date IS NOT NULL THEN 1 ELSE 0 END)   AS with_eol,
+            -- Counted the same way getRoadmap selects, so the KPI and the panel
+            -- cannot disagree: the end_of_life_date column alone misses every
+            -- factsheet whose ending is dated only as a lifecycle phase.
+            SUM(CASE WHEN end_of_life_date IS NOT NULL
+                       OR lifecycle_phases LIKE '%phaseOut%'
+                       OR lifecycle_phases LIKE '%endOfLife%'
+                     THEN 1 ELSE 0 END)                                       AS with_eol,
             AVG(completion)                                                 AS avg_completion
         FROM leanix_factsheets
     `).get() as {
@@ -310,47 +316,189 @@ export function getCriticalityMatrix() {
     };
 }
 
+export interface RoadmapItem {
+    id: string;
+    name: string;
+    fs_type: string;
+    lifecycle_state: string | null;
+    lifecycle_label: string;
+    /** The earliest dated ending, whatever kind it is. */
+    end_of_life_date: string;
+    kind: string;
+    kindLabel: string;
+    monthsAway: number | null;
+    /** True once that date has passed — the factsheet is ending now, not later. */
+    started: boolean;
+    /** Applications recorded as running on it. Zero for Application factsheets. */
+    reach: number;
+    position: number;
+    url: string | null;
+}
+
 /**
- * Everything with a dated end of life, soonest first.
+ * Everything with a dated ending, soonest first.
  *
  * Each row carries its distance from today as well as its date, because "runway"
  * is the question and a raw date is not an answer to it — reading "2031-06-30"
  * and working out how far away that is, is arithmetic the page should have done.
  * The fraction along the window is included for the timeline, so the page plots a
  * position rather than recomputing the span per row.
+ *
+ * `reach` rides along because runway alone does not rank work: a platform ending
+ * in eighteen months with 187 applications on it is a bigger programme than one
+ * ending next month with none.
  */
-export function getRoadmap(limit = 25) {
+export function getRoadmap(limit = 25): RoadmapItem[] {
     const rows = db.prepare(`
-        SELECT id, name, fs_type, lifecycle_state, end_of_life_date
-        FROM leanix_factsheets
-        WHERE end_of_life_date IS NOT NULL
-        ORDER BY end_of_life_date ASC
-        LIMIT ?
-    `).all(limit) as any[];
+        SELECT f.id, f.name, f.fs_type, f.lifecycle_state, f.end_of_life_date, f.lifecycle_phases,
+               (SELECT COUNT(*) FROM leanix_relations r
+                 WHERE r.from_id = f.id AND r.rel_type = 'relITComponentToApplication') AS reach
+        FROM leanix_factsheets f
+        WHERE f.end_of_life_date IS NOT NULL
+           OR f.lifecycle_phases LIKE '%phaseOut%'
+           OR f.lifecycle_phases LIKE '%endOfLife%'
+    `).all() as any[];
 
     const now = Date.now();
-    const times = rows.map(r => Date.parse(String(r.end_of_life_date).slice(0, 10))).filter(Number.isFinite);
+    const dated = rows
+        .map(r => ({ row: r, milestone: endingMilestone(r) }))
+        .filter((e): e is { row: any; milestone: EndingMilestone } => e.milestone !== null)
+        .sort((a, b) => a.milestone.date.localeCompare(b.milestone.date))
+        .slice(0, limit);
+
+    const times = dated.map(e => Date.parse(e.milestone.date)).filter(Number.isFinite);
     // The window runs from today (not from the earliest date) so an item three
     // months out sits hard against the left edge, where it belongs.
     const start = now;
-    const end = times.length ? Math.max(...times) : now;
+    const end = times.length ? Math.max(...times, now) : now;
     const span = Math.max(1, end - start);
 
-    return rows.map(r => {
-        const date = String(r.end_of_life_date).slice(0, 10);
-        const at = Date.parse(date);
+    return dated.map(({ row, milestone }) => {
+        const at = Date.parse(milestone.date);
         const monthsAway = Number.isFinite(at) ? (at - now) / (1000 * 60 * 60 * 24 * 30.44) : null;
         return {
-            ...r,
-            lifecycle_label: label(r.lifecycle_state),
-            end_of_life_date: date,
+            id: row.id,
+            name: row.name,
+            fs_type: row.fs_type,
+            lifecycle_state: row.lifecycle_state,
+            lifecycle_label: label(row.lifecycle_state),
+            end_of_life_date: milestone.date,
+            kind: milestone.kind,
+            kindLabel: milestone.label,
             monthsAway,
+            started: monthsAway != null && monthsAway < 0,
+            reach: row.reach ?? 0,
             // Clamped, so an item already past its date pins to the left edge
             // instead of being plotted off the track.
             position: Number.isFinite(at) ? Math.min(1, Math.max(0, (at - start) / span)) : 0,
-            url: factsheetUrl({ id: r.id, fs_type: r.fs_type }, getWorkspaceUrl())
+            url: factsheetUrl({ id: row.id, fs_type: row.fs_type }, getWorkspaceUrl())
         };
     });
+}
+
+// ── The action gap ──────────────────────────────────────────────────────────
+
+/** Technical fit ratings that are a finding rather than a reassurance. */
+const POOR_FIT = ['insufficient', 'unreasonable'];
+
+/**
+ * Reach at which a platform is load-bearing enough that a problem with it is a
+ * portfolio problem.
+ *
+ * Twenty is not a magic number; it is the point on this workspace's distribution
+ * where the long tail of two- and three-application components ends. It is a
+ * parameter rather than a literal so that a different portfolio can move it
+ * without the rule being rewritten.
+ */
+const LOAD_BEARING_APPS = 20;
+
+export interface AtRiskItem {
+    id: string;
+    name: string;
+    fs_type: string;
+    lifecycle_label: string;
+    technical_fit_label: string;
+    reach: number;
+    endingOn: string | null;
+    /** Why this factsheet is on the list, in the page's own words. */
+    reasons: string[];
+    projectCount: number;
+    /** Named so a covered item can be checked rather than taken on trust. */
+    projects: string[];
+    url: string | null;
+}
+
+/**
+ * At-risk factsheets, and whether anything is actually being done about them.
+ *
+ * Every other panel on this page reports a state. This one reports the gap
+ * between a state and a response, which is the question a portfolio review
+ * actually turns on: a platform that is old, heavily depended on and phasing out
+ * is a known problem, and the useful fact about it is whether a project exists.
+ *
+ * Deliberately built from LeanIX signals only, with no reference to the market
+ * research next door. Two reasons: the risk that matters here is the one the
+ * organisation has already recorded about itself, and market research covers a
+ * fraction of the portfolio at any moment, so folding it in would make the list
+ * fluctuate with the research backlog rather than with the portfolio.
+ */
+export function getActionGap(): { covered: AtRiskItem[]; uncovered: AtRiskItem[] } {
+    const rows = db.prepare(`
+        SELECT f.id, f.name, f.fs_type, f.lifecycle_state, f.technical_fit,
+               f.end_of_life_date, f.lifecycle_phases,
+               (SELECT COUNT(*) FROM leanix_relations r
+                 WHERE r.from_id = f.id AND r.rel_type = 'relITComponentToApplication') AS reach,
+               (SELECT GROUP_CONCAT(r.to_name, '||') FROM leanix_relations r
+                 WHERE r.from_id = f.id
+                   AND r.rel_type IN ('relITComponentToProject', 'relApplicationToProject')) AS project_names
+        FROM leanix_factsheets f
+    `).all() as any[];
+
+    const items: AtRiskItem[] = [];
+    for (const row of rows) {
+        const milestone = endingMilestone(row);
+        const reach = row.reach ?? 0;
+        const reasons: string[] = [];
+
+        if (reach >= LOAD_BEARING_APPS) reasons.push(`${reach} applications depend on it`);
+        if (milestone) {
+            const started = Date.parse(milestone.date) < Date.now();
+            reasons.push(
+                milestone.kind === 'phaseOut'
+                    ? `${started ? 'phasing out since' : 'phases out'} ${milestone.date}`
+                    : `end of life ${milestone.date}`
+            );
+        }
+        if (POOR_FIT.includes(row.technical_fit)) {
+            reasons.push(`rated ${humanizeEnum(row.technical_fit)?.toLowerCase()}`);
+        }
+        if (reasons.length === 0) continue;
+
+        const projects = row.project_names ? String(row.project_names).split('||').filter(Boolean) : [];
+        items.push({
+            id: row.id,
+            name: row.name,
+            fs_type: row.fs_type,
+            lifecycle_label: label(row.lifecycle_state),
+            technical_fit_label: label(row.technical_fit),
+            reach,
+            endingOn: milestone?.date ?? null,
+            reasons,
+            projectCount: projects.length,
+            projects: [...new Set(projects)],
+            url: factsheetUrl({ id: row.id, fs_type: row.fs_type }, getWorkspaceUrl())
+        });
+    }
+
+    // Widest reach first within each group: the gap that matters most is the one
+    // under the most applications, not the one with the nearest date.
+    const byReach = (a: AtRiskItem, b: AtRiskItem) =>
+        b.reach - a.reach || a.name.localeCompare(b.name);
+
+    return {
+        uncovered: items.filter(i => i.projectCount === 0).sort(byReach),
+        covered: items.filter(i => i.projectCount > 0).sort(byReach)
+    };
 }
 
 /** Owning organisations, and the responsible roles that are actually staffed. */
@@ -496,6 +644,7 @@ export function getPortfolioPage() {
         businessCapabilities: getBusinessCapabilities(),
         criticality: getCriticalityMatrix(),
         roadmap: getRoadmap(),
+        actionGap: getActionGap(),
         ownership: getOwnership(),
         dataQuality: getDataQuality(),
         factsheets: getFactsheetTable()

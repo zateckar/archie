@@ -181,6 +181,13 @@
         showAllAlerts ? data.market.alerts : data.market.alerts.slice(0, ALERT_PREVIEW)
     );
 
+    /** Action-gap rows shown before the panel collapses. */
+    const ACTION_GAP_PREVIEW = 6;
+    let showAllGaps = $state(false);
+    const visibleGaps = $derived(
+        showAllGaps ? data.actionGap.uncovered : data.actionGap.uncovered.slice(0, ACTION_GAP_PREVIEW)
+    );
+
     // ── Drill-down ───────────────────────────────────────────────────────────
     // Every count on this page answers "how many"; clicking it asks "which ones".
     // Fetched on demand rather than shipped with the page: the relation table
@@ -396,10 +403,37 @@
                         Found on the open web · researched {relativeTime(data.market.status.lastRunAt)}
                     </p>
                 </div>
-                <p class="text-xs text-faint mb-4">
-                    Events reported about products in this portfolio — incidents, breaches, ownership changes,
-                    strategy shifts and end-of-life announcements. Each links to the source it came from.
+                <p class="text-xs text-faint mb-3">
+                    Events reported about products in this portfolio in the last {data.market.alertWindowMonths}
+                    months, plus announcements dated ahead — incidents, breaches, ownership changes, strategy
+                    shifts and end-of-life dates. Each links to the source it came from. Older history is not
+                    dropped: it is weighed into each product's assessment instead.
                 </p>
+
+                <!-- The count above says how many stories there are; this says what
+                     they cost. Ordering follows the same weighting, so the feed is
+                     not sorted by one thing and summarised by another. -->
+                {#if data.market.exposure.applications > 0}
+                    <p class="well px-3 py-2 text-[12px] text-body mb-4">
+                        Critical and high alerts affect
+                        <strong class="tabular-nums">{data.market.exposure.applications}</strong>
+                        application{data.market.exposure.applications === 1 ? '' : 's'}
+                        across {data.market.exposure.factsheets}
+                        platform{data.market.exposure.factsheets === 1 ? '' : 's'}.
+                        {#if data.market.exposure.worst}
+                            Most exposed:
+                            <button
+                                class="underline underline-offset-2 hover:text-accent"
+                                onclick={() => toggleAssessment(data.market.exposure.worst.id)}
+                            >{data.market.exposure.worst.name}</button>
+                            ({data.market.exposure.worst.reach} apps).
+                        {/if}
+                    </p>
+                {:else}
+                    <p class="text-xs text-faint mb-4">
+                        Ordered by severity weighted by how many applications each affects.
+                    </p>
+                {/if}
 
                 <div class="flex flex-col">
                     {#each visibleAlerts as alert (alert.id)}
@@ -425,6 +459,13 @@
                                         class="text-[11px] text-dim hover:text-accent underline underline-offset-2"
                                         onclick={() => toggleAssessment(alert.factsheetId)}
                                     >{alert.factsheetName}</button>
+                                    <!-- Blast radius, stated on the row rather than left to
+                                         the ordering to imply. -->
+                                    {#if alert.reach > 0}
+                                        <span class="text-[11px] text-faint tabular-nums">
+                                            · {alert.reach} app{alert.reach === 1 ? '' : 's'}
+                                        </span>
+                                    {/if}
                                     {#if alert.eventDate}
                                         <span class="text-[11px] text-faint tabular-nums">· {alert.eventDate}</span>
                                     {/if}
@@ -743,9 +784,12 @@
                     <CalendarClock class="w-4 h-4 text-faint" />
                     <h2 class="text-sm font-semibold text-strong">End-of-life runway</h2>
                 </div>
-                <p class="text-xs text-faint mb-4">Factsheets carrying a dated end-of-life phase, soonest first.</p>
+                <p class="text-xs text-faint mb-4">
+                    Factsheets with a dated ending, soonest first — the earliest of a phase-out or an
+                    end-of-life date, since the phase-out is what starts the migration.
+                </p>
                 {#if data.roadmap.length === 0}
-                    <p class="text-[13px] text-mute">No factsheet in the portfolio carries an end-of-life date.</p>
+                    <p class="text-[13px] text-mute">No factsheet in the portfolio carries a dated ending.</p>
                 {:else}
                     <!-- The timeline exists because "runway" is a distance, and a
                          column of ISO dates is not one. Plotted from today rather
@@ -760,8 +804,8 @@
                                            {urgencyTone(item.monthsAway)} hover:scale-150 transition-transform"
                                     style="left: {2 + item.position * 96}%"
                                     onclick={() => (openAssessment = null, scrollToRoadmap(item.id))}
-                                    title="{item.name} — {item.end_of_life_date} ({runway(item.monthsAway)})"
-                                    aria-label="{item.name}, end of life {item.end_of_life_date}"
+                                    title="{item.name} — {item.kindLabel} {item.end_of_life_date} ({runway(item.monthsAway)})"
+                                    aria-label="{item.name}, {item.kindLabel} {item.end_of_life_date}"
                                 ></button>
                             {/each}
                             <span class="absolute left-0 top-5 text-[10px] text-faint">today</span>
@@ -791,16 +835,32 @@
                                     {:else}
                                         <p class="text-[13px] text-body truncate">{item.name}</p>
                                     {/if}
-                                    <p class="text-[11px] text-faint">{item.fs_type} · {item.lifecycle_label}</p>
+                                    <p class="text-[11px] text-faint">
+                                        {item.fs_type} · {item.lifecycle_label}
+                                        <!-- Reach turns the runway into a size of job. An
+                                             ending with nothing on it is a date; an ending
+                                             with 187 applications on it is a programme. -->
+                                        {#if item.reach > 0}
+                                            · <span class="tabular-nums">{item.reach}</span>
+                                            app{item.reach === 1 ? '' : 's'}
+                                        {/if}
+                                    </p>
                                 </div>
                                 <div class="shrink-0 text-right">
                                     <!-- The distance leads and the date supports it: the
                                          question is "how long have we got", not "what does
                                          the calendar say". -->
                                     <p class="text-[12px] tabular-nums {urgencyText(item.monthsAway)}">
-                                        {runway(item.monthsAway)}
+                                        <!-- A phase-out whose date has passed is not "overdue",
+                                             it is happening — the distinction changes whether
+                                             the row is a planning item or a live migration. -->
+                                        {item.started && item.kind === 'phaseOut'
+                                            ? 'phasing out now'
+                                            : runway(item.monthsAway)}
                                     </p>
-                                    <p class="text-[10px] text-faint tabular-nums">{item.end_of_life_date}</p>
+                                    <p class="text-[10px] text-faint tabular-nums">
+                                        {item.kindLabel} · {item.end_of_life_date}
+                                    </p>
                                 </div>
                             </div>
                         {/each}
@@ -808,48 +868,113 @@
                 {/if}
             </section>
 
-            <!-- ── Ownership ──────────────────────────────────────────────── -->
+            <!-- ── Action gap ─────────────────────────────────────────────── -->
+            <!-- Next to the runway on purpose: that panel says what is ending,
+                 this one says whether anybody is doing something about it. -->
             <section class="card p-5">
-                <h2 class="text-sm font-semibold text-strong mb-1">Ownership</h2>
-                <p class="text-xs text-faint mb-4">Owning organisations, and which responsible roles are staffed.</p>
-                <div class="grid sm:grid-cols-2 gap-4">
-                    <div>
-                        <p class="eyebrow mb-2">Organisation</p>
-                        {#if data.ownership.orgs.length === 0}
-                            <p class="text-[13px] text-mute">Not recorded.</p>
-                        {:else}
-                            <div class="flex flex-col gap-1">
-                                {#each data.ownership.orgs as o}
-                                    <div class="flex justify-between gap-2 text-[12px]">
-                                        <span class="text-dim truncate" title={o.org}>{o.org}</span>
-                                        <span class="text-mute tabular-nums">
-                                            {@render drillCount(o.factsheet_count, 'org', o.org)}
-                                        </span>
-                                    </div>
-                                {/each}
-                            </div>
-                        {/if}
-                    </div>
-                    <div>
-                        <p class="eyebrow mb-2">Responsible role</p>
-                        {#if data.ownership.roles.length === 0}
-                            <p class="text-[13px] text-mute">Not recorded.</p>
-                        {:else}
-                            <div class="flex flex-col gap-1">
-                                {#each data.ownership.roles as r}
-                                    <div class="flex justify-between gap-2 text-[12px]">
-                                        <span class="text-dim truncate" title={r.role}>{r.role}</span>
-                                        <span class="text-mute tabular-nums">
-                                            {@render drillCount(r.factsheet_count, 'role', r.role)}
-                                        </span>
-                                    </div>
-                                {/each}
-                            </div>
-                        {/if}
-                    </div>
+                <div class="flex items-center gap-2 mb-1">
+                    <TriangleAlert class="w-4 h-4 text-warning" />
+                    <h2 class="text-sm font-semibold text-strong">Action gap</h2>
+                    {#if data.actionGap.uncovered.length > 0}
+                        <span class="badge badge-warning tabular-nums">{data.actionGap.uncovered.length}</span>
+                    {/if}
                 </div>
+                <p class="text-xs text-faint mb-4">
+                    Factsheets carrying a recorded risk — heavy application load, a dated ending, or a poor
+                    technical-fit rating — with no project attached in LeanIX.
+                </p>
+
+                {#if data.actionGap.uncovered.length === 0}
+                    <p class="text-[13px] text-mute">
+                        Every at-risk factsheet has a project against it.
+                    </p>
+                {:else}
+                    <div class="flex flex-col">
+                        {#each visibleGaps as item (item.id)}
+                            <div class="flex items-start justify-between gap-3 py-2 border-b border-line-subtle last:border-0">
+                                <div class="min-w-0">
+                                    {#if item.url}
+                                        <a
+                                            href={item.url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            class="text-[13px] text-body hover:text-accent truncate flex items-center gap-1"
+                                        >
+                                            {item.name}
+                                            <ExternalLink class="w-3 h-3 text-faint shrink-0" />
+                                        </a>
+                                    {:else}
+                                        <p class="text-[13px] text-body truncate">{item.name}</p>
+                                    {/if}
+                                    <!-- The reasons are listed rather than summarised: "at
+                                         risk" is a conclusion, and the row has to show its
+                                         working for anyone expected to act on it. -->
+                                    <p class="text-[11px] text-mute mt-0.5">{item.reasons.join(' · ')}</p>
+                                </div>
+                                <span class="badge badge-neutral shrink-0">no project</span>
+                            </div>
+                        {/each}
+                    </div>
+
+                    {#if data.actionGap.uncovered.length > ACTION_GAP_PREVIEW}
+                        <button class="btn btn-ghost btn-sm mt-3" onclick={() => (showAllGaps = !showAllGaps)}>
+                            {showAllGaps ? 'Show fewer' : `Show all ${data.actionGap.uncovered.length}`}
+                        </button>
+                    {/if}
+
+                    {#if data.actionGap.covered.length > 0}
+                        <p class="text-[11px] text-faint mt-3 pt-3 border-t border-line-subtle">
+                            {data.actionGap.covered.length} other at-risk factsheet{data.actionGap.covered.length === 1 ? ' has' : 's have'}
+                            a project attached.
+                        </p>
+                    {/if}
+                {/if}
             </section>
         </div>
+
+        <!-- ── Ownership ──────────────────────────────────────────────────── -->
+        <!-- Full width now that the action gap has taken the column beside the
+             runway; its own two-up layout carries the space. -->
+        <section class="card p-5 mb-4">
+            <h2 class="text-sm font-semibold text-strong mb-1">Ownership</h2>
+            <p class="text-xs text-faint mb-4">Owning organisations, and which responsible roles are staffed.</p>
+            <div class="grid sm:grid-cols-2 gap-4">
+                <div>
+                    <p class="eyebrow mb-2">Organisation</p>
+                    {#if data.ownership.orgs.length === 0}
+                        <p class="text-[13px] text-mute">Not recorded.</p>
+                    {:else}
+                        <div class="flex flex-col gap-1">
+                            {#each data.ownership.orgs as o}
+                                <div class="flex justify-between gap-2 text-[12px]">
+                                    <span class="text-dim truncate" title={o.org}>{o.org}</span>
+                                    <span class="text-mute tabular-nums">
+                                        {@render drillCount(o.factsheet_count, 'org', o.org)}
+                                    </span>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+                <div>
+                    <p class="eyebrow mb-2">Responsible role</p>
+                    {#if data.ownership.roles.length === 0}
+                        <p class="text-[13px] text-mute">Not recorded.</p>
+                    {:else}
+                        <div class="flex flex-col gap-1">
+                            {#each data.ownership.roles as r}
+                                <div class="flex justify-between gap-2 text-[12px]">
+                                    <span class="text-dim truncate" title={r.role}>{r.role}</span>
+                                    <span class="text-mute tabular-nums">
+                                        {@render drillCount(r.factsheet_count, 'role', r.role)}
+                                    </span>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+        </section>
 
         <!-- ── Criticality × data class ───────────────────────────────────── -->
         {#if data.criticality.rows.length > 0}

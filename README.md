@@ -630,6 +630,60 @@ what the page can show:
 - **Sparse fields.** `technicalSuitability` is set on 11 of 64 components. The page
   reports "Not set" explicitly rather than letting an empty bar read as zero.
 
+#### Runway, blast radius and the action gap
+
+Three cuts that exist because a portfolio review turns on them and a factsheet
+list cannot answer them.
+
+**The runway reads lifecycle phases, not just the end-of-life column.** The
+`end_of_life_date` field alone was wrong in both directions on the reference
+workspace: unset on five factsheets that do carry a dated phase-out, and where
+both exist, routinely the *later* of the two. `endingMilestone` in
+`lib/server/leanix-format.ts` takes the **earliest** dated ending from either
+source and labels which kind it is, so DevOps Server reads as *phasing out now*
+(since 2025-10-14) instead of a 2030 problem. Timeline coverage went from 9 of 78
+to 14, and a phase-out whose date has passed is worded as happening rather than
+"overdue" — the difference between a planning item and a live migration.
+
+**Risk is weighted by how far it reaches.** Severity alone ranked a critical
+advisory on a 9-application component above an end-of-support notice on one
+carrying 187. `exposureScore(severity, reach)` sets the band by severity and lifts
+within it by dependent applications, damped logarithmically:
+
+```
+score = severityWeight × (1 + log10(1 + reach))
+        critical 1000 · high 300 · medium 60 · low 10
+```
+
+The damping is what keeps it honest — the gap between 3 and 30 dependants matters
+far more than between 300 and 3000, and undamped reach would let a `low` on the
+largest platform outrank a `critical`. The crossover lands somewhere defensible: a
+`high` needs on the order of a thousand dependants to overtake a `critical` with
+none recorded, and nothing overtakes a critical that is itself widely deployed.
+Reach is shown on every alert row, and the feed states its own cost — *critical and
+high alerts affect 213 applications across 3 platforms* — with applications
+de-duplicated across platforms, since one application on two alerting platforms is
+still one application at risk.
+
+Reach is dependent **applications**, so it is zero for Application factsheets:
+they are leaves in this graph, not platforms. A zero-reach alert still scores its
+full severity weight — no recorded dependants is not evidence that nothing depends
+on it.
+
+**The action gap says whether anyone is doing something about it.** Every other
+panel reports a state; this one reports the distance between a state and a
+response. Factsheets carrying a recorded risk — 20+ dependent applications, a
+dated ending, or a poor technical-fit rating — are checked against
+`relITComponentToProject` / `relApplicationToProject`, and the ones with no project
+attached are listed with their reasons spelled out. On the reference workspace
+that is 12 of 34, led by ŠKODA API Management with 284 applications and nothing
+scheduled.
+
+Built from LeanIX signals only, deliberately: the risk that counts here is the one
+the organisation has already recorded about itself, and market research covers a
+fraction of the portfolio at any moment, so folding it in would make the list
+fluctuate with the research backlog rather than with the portfolio.
+
 ---
 
 ### 8. Market Research (Web Search over the Portfolio)
@@ -644,12 +698,13 @@ Results appear on the same `/leanix` page: an alert feed at the top, a verdict
 distribution, a "where we disagree with the market" panel, and a Market column in
 the factsheet table that opens the full assessment.
 
-#### Two calls, and why they are separate
+#### Three calls, and why they are separate
 
 | Call | Tool | Sees | Produces |
 |---|---|---|---|
-| 1. Research | Google Search grounding | Public product identity only | Free-text brief + provider-reported sources |
-| 2. Assess | **none** | The brief + our internal record | Strict JSON verdict, alternatives, alerts |
+| 1. Identify | **none** | The local record, including its description | A product name, or "in-house" |
+| 2. Research | Google Search grounding | Public product identity only | Free-text brief + provider-reported sources |
+| 3. Assess | **none** | The brief + our internal record | Strict JSON verdict, alternatives, alerts |
 
 The split is a containment boundary, not an implementation detail:
 
@@ -657,14 +712,54 @@ The split is a containment boundary, not an implementation detail:
   a search query is more exposed than a model prompt — it reaches a search index.
   Its prompt is built from an explicit allowlist (`PUBLIC_IDENTITY_FIELDS` in
   `lib/server/market-format.ts`): product name, alias, vendor, category. Business
-  criticality, ownership, dependency counts, TIME posture and free-text
-  descriptions never leave.
-- **The assessment call has no search tool attached.** It is the only call that
-  sees the internal record, and without a tool there is no mechanism by which
-  anything it reads could become a query.
-- The second call also buys back structured output: a grounded Gemini call cannot
+  criticality, ownership, dependency counts and TIME posture never leave.
+- **The other two calls have no search tool attached.** They are the only calls
+  that see internal text, and without a tool there is no mechanism by which
+  anything they read could become a query.
+- Call 3 also buys back structured output: a grounded Gemini call cannot
   use JSON mode, so a one-call design would mean parsing JSON out of free text
   produced by the call least able to follow a format.
+
+#### Working out what to search for
+
+Factsheet names in a real repository are **local**, and searching them finds
+nothing: `Skoda PostgreSQL platform` is PostgreSQL, `Power BI SaaS Hosting` is
+Power BI, and `Central Log Archive` is only identifiable from its description
+("Elasticsearch + Kibana + Logstash"). Left unresolved, the portfolio's best-known
+products — MongoDB, PostgreSQL, OpenShift — come back as *not found*, which reads
+like a finding about the product rather than a failure to name it.
+
+Call 1 resolves this. It is un-grounded and it is the only call that sees the
+`description`, which is what makes it safe: the description reaches an inference
+endpoint, never a search index. What it may hand back is deliberately narrow — a
+**product name**, at most 8 words on one line. An answer longer than that is
+*rejected outright rather than truncated*, because a truncated sentence is still a
+sentence leaving the building; the fallback is the factsheet's own name with local
+decoration stripped (`stripLocalQualifiers`), i.e. exactly what this feature
+searched for before the call existed.
+
+It also answers "there is no public product here", which is what stops a bespoke
+system costing a billed search to confirm.
+
+#### An alert is a current risk, not a history
+
+Two windows, deliberately different:
+
+| Window | Default | Governs |
+|---|---|---|
+| `LOOKBACK_MONTHS` | 24 | How far back the **brief** reports, for context |
+| `ALERT_WINDOW_MONTHS` | 6 | How far back an event may be dated and still be an **alert** |
+
+An assessment needs two years of history — an acquisition eighteen months ago is
+still why a roadmap went where it did. An alert makes a different claim: *this is
+live, look at it now*. A vulnerability patched a year ago does not make that claim,
+so past the alert window an event stays in the rationale, the concerns and the
+market position, and stops being an alert.
+
+Enforced in `normalizeAssessment` rather than left to the prompt, and enforced
+again on read, since a stored alert keeps ageing between refreshes. **An undated
+event is never an alert**: it cannot be shown to be recent, and the page's entire
+claim is that what it lists is happening now.
 
 Gemini is used directly and with **no fallback**. The LiteLLM gateway exposes no
 search tool, so there is nothing to fall back to — and quietly answering from model
@@ -686,13 +781,18 @@ string is length-capped before it reaches the database.
 
 #### "Not found" is a first-class answer
 
-An in-house system has no market to research. The research prompt gives the model
-an explicit way to say so (`NO_PUBLIC_INFORMATION`), which short-circuits the
-second call — so an unresearchable factsheet costs one call, not two — and stores
-a row that makes no claims. This is deliberately distinct from both "not yet
-researched" and "researched and fine": in the reference workspace, `AWS Cloud
-Škoda` and `Azure Cloud Škoda` correctly return not-found rather than an invented
-assessment of generic AWS or Azure.
+An in-house system has no market to research, and there are two places to say so.
+The identity call settles the clear cases from the record alone, **without issuing
+a search at all**. Where it cannot, the research prompt still gives the model an
+explicit way to say so (`NO_PUBLIC_INFORMATION`), which short-circuits the
+assessment call. Either way the row makes no claims.
+
+This is deliberately distinct from both "not yet researched" and "researched and
+fine" — a bespoke application is unresearchable, not risky, and the page must not
+imply otherwise. It is also why a not-found row refreshes on its own, much longer
+clock (`MARKET_RESEARCH_UNIDENTIFIED_TTL_DAYS`, default 60): an in-house system
+does not become researchable in a week, and re-asking every seven days spent the
+batch cap on the one answer that cannot change.
 
 If a factsheet is not identified, its verdict, alternatives and alerts are all
 discarded — a model that says "not identified" and then lists a breach is
@@ -707,16 +807,27 @@ question:
 | Gate | Question | Default | Override |
 |---|---|---|---|
 | TTL | Has enough time passed for the answer to differ? | 7 days | `MARKET_RESEARCH_TTL_DAYS` |
-| Input hash | Is this still the same product? | name/alias/vendor/category | — |
+| Not-found TTL | …and for something with no public product? | 60 days | `MARKET_RESEARCH_UNIDENTIFIED_TTL_DAYS` |
+| Input hash | Is this still the same product? | name/alias/vendor/category/description | — |
 | Batch cap | How much can one run spend? | 10 factsheets | `MARKET_RESEARCH_BATCH` |
 
-The input hash invalidates immediately on a rename or a vendor change; every other
-edit (description, owner, criticality) does not, because none of them change what
-a search would return. A failed attempt is retried on a short clock
-(`MARKET_RESEARCH_ERROR_RETRY_HOURS`, default 6) rather than either looping or
-waiting out the full TTL. A first run over 78 factsheets therefore spreads across
-about a week; the admin card reports how many are still queued so a partly-filled
-page never reads as a finished one.
+The input hash invalidates immediately on a rename, a vendor change or an edited
+description — the description decides *which* product gets searched for, so
+rewording `Central log platform` to `Infrastructure for Elasticsearch` turns an
+unresearchable record into a researchable one. Owner, criticality and fit ratings
+do not invalidate it, because none of them change what would be searched. A failed
+attempt is retried on a short clock (`MARKET_RESEARCH_ERROR_RETRY_HOURS`, default
+6) rather than either looping or waiting out the full TTL.
+
+**Getting covered in the first place** is a separate problem from staying fresh.
+Ten a day over 78 factsheets left the page mostly empty for a week, and because
+the queue was alphabetical it was missing exactly the platforms an architect would
+check first. Two things fix that without touching the steady-state budget: the run
+ticks hourly (`MARKET_RESEARCH_BACKFILL_INTERVAL_HOURS`) while any factsheet has
+never been looked at, and within a due reason `selectDue` orders by portfolio
+weight — dependent applications plus criticality — so the platform carrying 974
+applications is covered on day one rather than day eight. The admin card reports
+how many are still queued so a partly-filled page never reads as a finished one.
 
 Measured on the reference workspace: ~45s and 6–8 underlying searches per
 identified factsheet, one grounded request each.
@@ -848,9 +959,11 @@ with it off, every field degrades to empty and the portfolio page is unchanged.
 | `LEANIX_REQUEST_TIMEOUT_MS` | No | `120000` | Per-request timeout; the ITComponent query returns thousands of relation edges |
 | `LEANIX_WORKSPACE_URL` | No | derived from the access token | Base for "open in LeanIX" links. Normally leave unset — the token carries `instanceUrl` and the workspace name, so the first sync derives it at no request cost. Set only to override |
 | `MARKET_RESEARCH_ENABLED` | No | `true` | Set `false` to disable web research entirely. Also inert without `GEMINI_API_KEY`, since no other configured provider offers web search |
-| `MARKET_RESEARCH_TTL_DAYS` | No | `7` | How long an assessment stays fresh. A rename or vendor change invalidates it sooner regardless |
+| `MARKET_RESEARCH_TTL_DAYS` | No | `7` | How long an assessment stays fresh. A rename, vendor change or edited description invalidates it sooner regardless |
+| `MARKET_RESEARCH_UNIDENTIFIED_TTL_DAYS` | No | `60` | Refresh clock for a factsheet with no public product behind it. Longer because "this is in-house" does not go stale in a week |
 | `MARKET_RESEARCH_BATCH` | No | `10` | Factsheets researched per run — the ceiling on what one run can spend |
-| `MARKET_RESEARCH_INTERVAL_HOURS` | No | `24` | How often a run may start |
+| `MARKET_RESEARCH_INTERVAL_HOURS` | No | `24` | How often a run may start, once the portfolio has been covered once |
+| `MARKET_RESEARCH_BACKFILL_INTERVAL_HOURS` | No | `1` | How often a run may start *while* factsheets remain that have never been researched |
 | `MARKET_RESEARCH_ERROR_RETRY_HOURS` | No | `6` | How soon a failed attempt is retried, instead of waiting out the full TTL |
 
 ---
