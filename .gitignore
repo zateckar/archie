@@ -31,6 +31,9 @@ vite.config.ts.timestamp-*
 # Data (git repo clones, etc.)
 data/repos/
 data/*.db
+# Per-install key for the PATs stored in that install's database: it belongs
+# with the database, never in the repository.
+data/.encryption_key
 
 # E2E auth state (contains session cookies / tokens)
 e2e/.auth/
