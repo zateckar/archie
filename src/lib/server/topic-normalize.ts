@@ -88,6 +88,27 @@ export function foldDiacritics(input: string): string {
  *          that two differently-spelled names for the same concept can never
  *          both be inserted as distinct topics, even under concurrent writes).
  */
+/**
+ * Cleans the `aliases` an extraction returned for a topic: strings only,
+ * normalised like topic names, de-duplicated by key, and without the topic's
+ * own key (an alias equal to the name adds nothing). Accepts anything, because
+ * the value comes straight from model JSON.
+ */
+export function cleanTopicAliases(aliases: unknown, topicKey: string, max = 8): { alias: string; key: string }[] {
+    if (!Array.isArray(aliases)) return [];
+    const seen = new Set<string>([topicKey]);
+    const out: { alias: string; key: string }[] = [];
+    for (const raw of aliases) {
+        if (typeof raw !== 'string') continue;
+        const { displayName, key } = normalizeTopicName(raw);
+        if (!key || displayName.length > 120 || seen.has(key)) continue;
+        seen.add(key);
+        out.push({ alias: displayName, key });
+        if (out.length >= max) break;
+    }
+    return out;
+}
+
 export function normalizeTopicName(name: string): { displayName: string; key: string } {
     if (!name) return { displayName: '', key: '' };
 

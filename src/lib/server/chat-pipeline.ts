@@ -5,8 +5,11 @@ import {
     analyzeAndCondenseQuery,
     evaluateContext,
     synthesizeContext,
-    buildConversationBriefing
+    buildConversationBriefing,
+    type ContextDoubt
 } from './llm';
+import { MAX_FOLLOW_UP_ROUNDS, planFollowUpQueries, verificationNotes } from './follow-up';
+import type { ChatProgress, ChatStage, ProgressSink } from '../chat-progress';
 import { db } from './db';
 import { checkRateLimit, CHAT_RATE_LIMIT } from './rate-limit';
 import { withUsageCategory } from './usage';
@@ -81,7 +84,10 @@ export interface ChatAnswer {
     type: 'answer';
     /** The conversation the turn was appended to — created here when absent. */
     conversationId: string;
-    /** Full retrieved chunks, in citation order. */
+    /**
+     * Retrieved chunks in citation order, followed by documents that contributed
+     * only knowledge-graph claims (those have empty `content`).
+     */
     sources: RetrievedChunk[];
     /**
      * The answer, in provider-sized deltas.
@@ -133,11 +139,31 @@ export function sourceRefs(chunks: RetrievedChunk[]): SourceRef[] {
  * than relying on whatever context the *consumer* happens to run in. Callers do
  * not have to wrap anything.
  */
-export function runChat(input: ChatInput): Promise<ChatOutcome> {
-    return withUsageCategory('chat', () => prepareChat(input));
+export function runChat(input: ChatInput, onProgress?: ProgressSink): Promise<ChatOutcome> {
+    return withUsageCategory('chat', async () => {
+        const admitted = admitChat(input);
+        return admitted.type === 'rejected' ? admitted : answerChat(admitted, onProgress);
+    });
 }
 
-async function prepareChat({ user, prompt, conversationId, history: rawHistory, skipAnalysis }: ChatInput): Promise<ChatOutcome> {
+/** A request that passed `admitChat`: validated, rate-limited, owned. */
+export interface AdmittedChat {
+    type: 'admitted';
+    user: SessionUser;
+    prompt: string;
+    history: { role: string; content: string }[];
+    /** An existing conversation the user owns, or undefined for a new one. */
+    conversationId?: string;
+    skipAnalysis: boolean;
+}
+
+/**
+ * The cheap checks, with no provider calls: rate limit, prompt, history and
+ * conversation ownership. Split from `answerChat` so the HTTP route can still
+ * answer a refusal with a real status code, then start streaming progress for
+ * an admitted request before any of the slow work begins.
+ */
+export function admitChat({ user, prompt, conversationId, history: rawHistory, skipAnalysis }: ChatInput): ChatRejected | AdmittedChat {
     // Rate limit before any provider call. This pipeline fans out to a dozen-plus
     // LLM requests per invocation, so it is by far the most expensive thing a
     // client can trigger. Keyed on the user rather than the transport, so opening
@@ -182,6 +208,27 @@ async function prepareChat({ user, prompt, conversationId, history: rawHistory, 
         }
     }
 
+    return {
+        type: 'admitted',
+        user,
+        prompt,
+        history,
+        conversationId: typeof conversationId === 'string' && conversationId !== '' ? conversationId : undefined,
+        skipAnalysis: !!skipAnalysis
+    };
+}
+
+/**
+ * Everything slow: query analysis, retrieval, checking, synthesis, and the
+ * start of the answer stream. Reports each stage to `onProgress`. Callers must
+ * run it under the 'chat' usage category (`runChat` does; the HTTP route wraps it).
+ */
+export async function answerChat(
+    { user, prompt, history, conversationId, skipAnalysis }: AdmittedChat,
+    onProgress?: ProgressSink
+): Promise<ChatClarification | ChatAnswer> {
+    const progress = progressReporter(onProgress);
+
     // Step 1+2: Analyze query quality AND condense it with conversation history
     // in a single LLM call (previously two sequential calls: analyzeQuery then
     // condenseQuery). Skipped entirely when the user already answered a
@@ -193,11 +240,13 @@ async function prepareChat({ user, prompt, conversationId, history: rawHistory, 
     // retrieval falls back to searching on the condensed query alone.
     let searchPrompt: string;
     let queryKeywords: QueryKeywords | undefined;
+    progress.start('analyze');
     if (!skipAnalysis) {
         const analysis = await analyzeAndCondenseQuery(prompt, history);
 
         // If query needs clarification, return questions instead of searching
         if (analysis.needsClarification && analysis.clarificationQuestions && analysis.clarificationQuestions.length > 0) {
+            progress.done('analyze', 'The question needs clarifying');
             return {
                 type: 'clarification',
                 questions: analysis.clarificationQuestions,
@@ -212,92 +261,9 @@ async function prepareChat({ user, prompt, conversationId, history: rawHistory, 
     } else {
         searchPrompt = await condenseQuery(history, prompt);
     }
+    progress.done('analyze', `Searching for: ${searchPrompt}`);
 
-    // Step 3: Multi-pass context gathering
-    // Pass 1: Primary search — knowledge graph + verbatim chunks in parallel
-    const [knowledgeResult, relevantChunks] = await Promise.all([
-        buildKnowledgeContext(searchPrompt, 5, 15, queryKeywords),
-        searchChunks(searchPrompt, 3)
-    ]);
-
-    let context = knowledgeResult.text;
-    if (relevantChunks.length > 0) {
-        const chunkContext = relevantChunks.map(c => `[${c.path || c.filename}]\n${c.content}`).join('\n\n');
-        context += `\n\n---\n\nVERBATIM EXCERPTS (for direct quotes if needed):\n\n${chunkContext}`;
-    }
-
-    // Pass 2: Evaluate context quality — if insufficient, refine and search again
-    const evaluation = await evaluateContext(searchPrompt, context);
-    let refinementHappened = false;
-
-    if (!evaluation.sufficient && evaluation.refinedQueries.length > 0) {
-        refinementHappened = true;
-        console.log(`[MultiPassRAG] Context insufficient for "${searchPrompt.slice(0, 60)}". Missing: ${evaluation.missingAspects.join(', ')}. Refining with: ${evaluation.refinedQueries.join(', ')}`);
-
-        const additionalContexts = await Promise.all(
-            evaluation.refinedQueries.slice(0, 2).map(async (refinedQuery) => {
-                const [addlKnowledge, addlChunks] = await Promise.all([
-                    buildKnowledgeContext(refinedQuery, 3, 10),
-                    searchChunks(refinedQuery, 2)
-                ]);
-                let addlContext = '';
-                if (addlKnowledge.text && !addlKnowledge.text.includes('No relevant knowledge found')) {
-                    addlContext += addlKnowledge.text;
-                }
-                if (addlChunks.length > 0) {
-                    addlContext += '\n' + addlChunks.map(c => `[${c.path || c.filename}]\n${c.content}`).join('\n\n');
-                    // Merge additional chunks into relevantChunks for source display
-                    relevantChunks.push(...addlChunks);
-                }
-                return addlContext;
-            })
-        );
-
-        const additionalContext = additionalContexts.filter(c => c.trim()).join('\n\n---\n\n');
-        if (additionalContext) {
-            context += `\n\n---\n\nADDITIONAL CONTEXT (from refined searches for: ${evaluation.missingAspects.join(', ')}):\n\n${additionalContext}`;
-        }
-    }
-
-    // Build conversation briefing for multi-turn coherence
-    const conversationBriefing = history.length >= 2
-        ? await buildConversationBriefing(history)
-        : '';
-
-    // Synthesize context into a coherent briefing. Skipped for simple,
-    // well-covered, single-topic queries — buildKnowledgeContext already
-    // produces well-structured markdown (headers, Facts, Constraints), and
-    // sending it through another LLM pass purely to reformat it costs a full
-    // extra round trip and risks additional paraphrase drift for zero benefit
-    // when there's nothing to synthesize across topics or reconcile from a
-    // second search pass. Multi-topic or refined-search results still get the
-    // full synthesis pass since that's where it earns its cost.
-    // A thematic overview in the context is itself a reason NOT to skip: the
-    // whole point of that section is material that spans topics, and it is
-    // derived prose that must be folded into the briefing rather than passed
-    // through raw next to the facts it summarises.
-    const canSkipSynthesis =
-        !refinementHappened &&
-        !knowledgeResult.hasConflicts &&
-        knowledgeResult.communityCount === 0 &&
-        knowledgeResult.topicCount <= 1 &&
-        relevantChunks.length <= 1 &&
-        context.length < 4000;
-
-    let synthesizedContext: string;
-    if (context && !context.includes('No relevant knowledge found')) {
-        if (canSkipSynthesis) {
-            synthesizedContext = context;
-            console.log(`[MultiPassRAG] Skipping synthesis pass for "${searchPrompt.slice(0, 60)}" — single-topic, well-covered query.`);
-        } else {
-            const verbatimSection = relevantChunks.length > 0
-                ? relevantChunks.map((c) => `[${c.path || c.filename}]\n${c.content}`).join('\n\n')
-                : '';
-            synthesizedContext = await synthesizeContext(searchPrompt, context, verbatimSection, conversationBriefing || undefined);
-        }
-    } else {
-        synthesizedContext = context;
-    }
+    const { answerContext, sources } = await buildAnswerContext(searchPrompt, queryKeywords, history, onProgress);
 
     // Resolve the conversation to append to.
     //
@@ -326,13 +292,240 @@ async function prepareChat({ user, prompt, conversationId, history: rawHistory, 
     // outright still surfaces as a thrown error to the caller (an HTTP 500),
     // which is what it did before this pipeline was extracted. Failures *during*
     // the stream remain the generator's business.
-    const providerStream = await chatStream(prompt, synthesizedContext, history);
+    // The 'answer' stage closes when the first words arrive (in drainAnswer):
+    // with reasoning on, the model thinks for a while before it writes.
+    progress.start('answer');
+    const providerStream = await chatStream(prompt, answerContext, history);
 
     return {
         type: 'answer',
         conversationId: currentConversationId,
-        sources: relevantChunks,
-        stream: drainAnswer(providerStream, user, currentConversationId, relevantChunks)
+        sources,
+        stream: drainAnswer(providerStream, user, currentConversationId, sources, () => progress.done('answer'))
+    };
+}
+
+function countsDetail(topics: number, claims: number, passages: number): string {
+    const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+    return `Found ${n(topics, 'topic', 'topics')}, ${n(claims, 'fact', 'facts')}, ${n(passages, 'passage', 'passages')}`;
+}
+
+function evaluationDetail(e: { sufficient: boolean; missingAspects: string[]; doubts: ContextDoubt[] }): string {
+    const parts: string[] = [];
+    if (!e.sufficient) parts.push(`Missing: ${e.missingAspects.join(', ') || 'parts of the question'}`);
+    if (e.doubts.length) parts.push(`Doubtful: ${e.doubts.map(d => d.concern).join('; ')}`);
+    return parts.length ? parts.join(' · ') : 'Looks complete and consistent';
+}
+
+/**
+ * Times stages and forwards them to the sink. A sink that throws (a closed
+ * browser stream) must never break the answer, so every call is guarded.
+ */
+function progressReporter(sink: ProgressSink | undefined) {
+    const started = new Map<ChatStage, number>();
+    const emit = (event: ChatProgress) => {
+        if (!sink) return;
+        try { sink(event); } catch { /* the listener went away; keep answering */ }
+    };
+    return {
+        start(stage: ChatStage, detail?: string) {
+            started.set(stage, Date.now());
+            emit({ stage, status: 'start', detail });
+        },
+        done(stage: ChatStage, detail?: string) {
+            const t = started.get(stage);
+            emit({ stage, status: 'done', detail, ms: t === undefined ? undefined : Date.now() - t });
+        }
+    };
+}
+
+/**
+ * How the retrieved context reaches the answering model:
+ *   - `auto` (default): through the synthesis pass, except for simple,
+ *     single-topic, well-covered queries, which pass through raw.
+ *   - `off`: always raw. Removes one paraphrase hop and its drift risk; the
+ *     raw context keeps every fact's [source] tag.
+ *   - `always`: always synthesized.
+ * A knob rather than a decision because which one answers better is an
+ * empirical question — compare them with `npm run eval -- --answers`.
+ */
+function synthesisMode(): 'auto' | 'off' | 'always' {
+    const v = (process.env.CHAT_SYNTHESIS ?? '').trim().toLowerCase();
+    return v === 'off' || v === 'always' ? v : 'auto';
+}
+
+/** Verbatim chunks retrieved on the primary pass (CHAT_VERBATIM_CHUNKS, default 3). */
+function verbatimChunkCount(): number {
+    const n = Number(process.env.CHAT_VERBATIM_CHUNKS);
+    return Number.isInteger(n) && n > 0 && n <= 20 ? n : 3;
+}
+
+export interface AnswerContext {
+    /** What the answering model is given as its briefing. */
+    answerContext: string;
+    /** Verbatim chunks first, then documents that only contributed claims. */
+    sources: RetrievedChunk[];
+}
+
+/**
+ * Retrieval, multi-pass refinement and (optional) synthesis for one standalone
+ * search query — everything between "we know what to search for" and "the
+ * answering model starts writing". Has no side effects beyond provider calls,
+ * which is what lets the eval harness score real answers without writing
+ * conversations.
+ */
+export async function buildAnswerContext(
+    searchPrompt: string,
+    queryKeywords: QueryKeywords | undefined,
+    history: { role: string; content: string }[],
+    onProgress?: ProgressSink
+): Promise<AnswerContext> {
+    const progress = progressReporter(onProgress);
+
+    // Pass 1: Primary search — knowledge graph + verbatim chunks in parallel
+    progress.start('retrieve');
+    const [knowledgeResult, relevantChunks] = await Promise.all([
+        buildKnowledgeContext(searchPrompt, 5, 15, queryKeywords),
+        searchChunks(searchPrompt, verbatimChunkCount())
+    ]);
+    const claimDocuments = [...knowledgeResult.sources];
+    progress.done('retrieve', countsDetail(knowledgeResult.topicCount, knowledgeResult.claimCount, relevantChunks.length));
+
+    let context = knowledgeResult.text;
+    if (relevantChunks.length > 0) {
+        const chunkContext = relevantChunks.map(c => `[${c.path || c.filename}]\n${c.content}`).join('\n\n');
+        context += `\n\n---\n\nVERBATIM EXCERPTS (for direct quotes if needed):\n\n${chunkContext}`;
+    }
+
+    // Pass 2+: Check the context for coverage AND plausibility, and search again
+    // for what is missing or doubtful — up to MAX_FOLLOW_UP_ROUNDS times. Each
+    // round is re-checked against the grown context, so a doubt the new results
+    // settle is dropped, and one they do not settle reaches the answering model
+    // as a verification note.
+    let refinementHappened = false;
+    let openDoubts: ContextDoubt[] = [];
+    const searched = new Set<string>([searchPrompt]);
+
+    for (let round = 0; round <= MAX_FOLLOW_UP_ROUNDS; round++) {
+        progress.start('evaluate');
+        const evaluation = await evaluateContext(searchPrompt, context);
+        openDoubts = evaluation.doubts;
+        progress.done('evaluate', evaluationDetail(evaluation));
+        if (round === MAX_FOLLOW_UP_ROUNDS) break;
+
+        const followUps = planFollowUpQueries(evaluation, searched);
+        if (followUps.length === 0) break;
+        followUps.forEach(f => searched.add(f.query));
+        refinementHappened = true;
+        console.log(
+            `[MultiPassRAG] Round ${round + 1} for "${searchPrompt.slice(0, 60)}". ` +
+            `Missing: ${evaluation.missingAspects.join(', ') || '-'}. ` +
+            `Doubts: ${evaluation.doubts.map(d => d.concern).join(' | ') || '-'}. ` +
+            `Searching: ${followUps.map(f => `${f.query} (${f.purpose})`).join(', ')}`
+        );
+
+        progress.start('follow_up', followUps.map(f => f.purpose === 'verify' ? `verifying: ${f.query}` : f.query).join(' · '));
+        const additionalContexts = await Promise.all(
+            followUps.map(async ({ query: refinedQuery }) => {
+                const [addlKnowledge, addlChunks] = await Promise.all([
+                    buildKnowledgeContext(refinedQuery, 3, 10),
+                    searchChunks(refinedQuery, 2)
+                ]);
+                let addlContext = '';
+                if (addlKnowledge.text && !addlKnowledge.text.includes('No relevant knowledge found')) {
+                    addlContext += addlKnowledge.text;
+                    claimDocuments.push(...addlKnowledge.sources);
+                }
+                // A later round often finds the same passage again; repeating it
+                // only crowds the context.
+                const fresh = addlChunks.filter(c =>
+                    !relevantChunks.some(r => (r.path || r.filename) === (c.path || c.filename) && r.content === c.content)
+                );
+                if (fresh.length > 0) {
+                    addlContext += '\n' + fresh.map(c => `[${c.path || c.filename}]\n${c.content}`).join('\n\n');
+                    // Merge additional chunks into relevantChunks for source display
+                    relevantChunks.push(...fresh);
+                }
+                return addlContext;
+            })
+        );
+
+        const additionalContext = additionalContexts.filter(c => c.trim()).join('\n\n---\n\n');
+        progress.done('follow_up');
+        if (additionalContext) {
+            const reasons = [
+                ...evaluation.missingAspects,
+                ...evaluation.doubts.map(d => `verifying "${d.fact}"`)
+            ].join('; ');
+            context += `\n\n---\n\nADDITIONAL CONTEXT (from follow-up searches for: ${reasons}):\n\n${additionalContext}`;
+        }
+    }
+
+    // Synthesize context into a coherent briefing. Skipped for simple,
+    // well-covered, single-topic queries — buildKnowledgeContext already
+    // produces well-structured markdown (headers, Facts, Constraints), and
+    // sending it through another LLM pass purely to reformat it costs a full
+    // extra round trip and risks additional paraphrase drift for zero benefit
+    // when there's nothing to synthesize across topics or reconcile from a
+    // second search pass. Multi-topic or refined-search results still get the
+    // full synthesis pass since that's where it earns its cost.
+    // A thematic overview in the context is itself a reason NOT to skip: the
+    // whole point of that section is material that spans topics, and it is
+    // derived prose that must be folded into the briefing rather than passed
+    // through raw next to the facts it summarises.
+    const canSkipSynthesis =
+        !refinementHappened &&
+        !knowledgeResult.hasConflicts &&
+        knowledgeResult.communityCount === 0 &&
+        knowledgeResult.topicCount <= 1 &&
+        relevantChunks.length <= 1 &&
+        context.length < 4000;
+
+    const mode = synthesisMode();
+    const hasKnowledge = !!context && !context.includes('No relevant knowledge found');
+    const synthesize = hasKnowledge && (mode === 'always' || (mode === 'auto' && !canSkipSynthesis));
+
+    let answerContext = context;
+    if (synthesize) {
+        progress.start('synthesize');
+        // Conversation briefing for multi-turn coherence. Only the synthesis
+        // pass reads it; on the raw path the answering model gets the history itself.
+        const conversationBriefing = history.length >= 2
+            ? await buildConversationBriefing(history)
+            : '';
+        const verbatimSection = relevantChunks.length > 0
+            ? relevantChunks.map((c) => `[${c.path || c.filename}]\n${c.content}`).join('\n\n')
+            : '';
+        answerContext = await synthesizeContext(searchPrompt, context, verbatimSection, conversationBriefing || undefined);
+        progress.done('synthesize');
+    } else if (hasKnowledge) {
+        console.log(`[MultiPassRAG] Passing raw context for "${searchPrompt.slice(0, 60)}" (synthesis=${mode}).`);
+    }
+
+    // After synthesis, so the doubts reach the answering model verbatim.
+    const notes = verificationNotes(openDoubts);
+    if (notes && hasKnowledge) {
+        console.log(`[MultiPassRAG] ${openDoubts.length} doubt(s) still open for "${searchPrompt.slice(0, 60)}".`);
+        answerContext += `\n\n---\n\n${notes}`;
+    }
+
+    // Documents that reached the answer only through claims are listed after
+    // the verbatim chunks. They carry no passage of their own (`content` is
+    // empty); every consumer of `sources` reads only filename/path/repo_id.
+    const chunkKeys = new Set(relevantChunks.map(c => c.path || c.filename));
+    const claimOnly = claimDocuments.filter(d => {
+        const key = d.path || d.filename;
+        if (!key || chunkKeys.has(key)) return false;
+        chunkKeys.add(key);
+        return true;
+    });
+
+    return {
+        answerContext,
+        sources: [
+            ...relevantChunks,
+            ...claimOnly.map(d => ({ content: '', filename: d.filename, path: d.path, repo_id: d.repo_id, score: 0 }))
+        ]
     };
 }
 
@@ -356,7 +549,8 @@ async function* drainAnswer(
     providerStream: ProviderStream,
     user: SessionUser,
     conversationId: string,
-    chunks: RetrievedChunk[]
+    chunks: RetrievedChunk[],
+    onFirstText?: () => void
 ): AsyncGenerator<string, void, void> {
     const iterator = providerStream[Symbol.asyncIterator]();
     let fullResponse = '';
@@ -366,6 +560,7 @@ async function* drainAnswer(
             if (done) break;
             const text = value.text();
             if (text) {
+                if (!fullResponse) onFirstText?.();
                 fullResponse += text;
                 yield text;
             }

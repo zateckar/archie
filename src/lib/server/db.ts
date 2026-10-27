@@ -390,6 +390,36 @@ try {
     db.exec('ALTER TABLE knowledge_claims ADD COLUMN chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL');
 } catch (e) {}
 
+// Migration: which claim a `conflicting` claim contradicts. A conflict verdict
+// must now name its counterpart (see normalizeConsistencyResult), and keeping
+// the pair lets a reviewer — or scripts/recheck-conflicts.ts — judge the two
+// claims side by side instead of a lone claim tagged "disputed".
+try {
+    db.exec('ALTER TABLE knowledge_claims ADD COLUMN conflicts_with INTEGER REFERENCES knowledge_claims(id) ON DELETE SET NULL');
+} catch (e) {}
+
+// Migration: topic aliases. Topic names are extracted in English so that one
+// concept gets one topic across Czech and English documents; the names the
+// source actually uses (the Czech term, acronyms) are kept here. They let a
+// later extraction that only knows the Czech term land on the same topic, are
+// folded into the topic's embedding text, and are matched by the keyword
+// fallback in buildKnowledgeContext. `alias_key` is normalizeTopicName's key,
+// i.e. the same folding as topics.canonical_key. Not unique: one acronym can
+// legitimately name several topics, and callers treat such a key as ambiguous.
+try {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS topic_aliases (
+            topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+            alias TEXT NOT NULL,
+            alias_key TEXT NOT NULL,
+            PRIMARY KEY (topic_id, alias_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_topic_aliases_key ON topic_aliases(alias_key);
+    `);
+} catch (e) {
+    console.error('[Migration] Failed to create topic_aliases:', e);
+}
+
 // Migration: Add claim_type to knowledge_claims for expanded claim types
 try {
     db.exec("ALTER TABLE knowledge_claims ADD COLUMN claim_type TEXT DEFAULT 'assertion'");

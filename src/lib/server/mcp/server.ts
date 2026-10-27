@@ -8,13 +8,14 @@ import {
     recordFeedback,
     setConversationPinned
 } from '../conversations';
-import { searchClaims, searchTopics } from '../rag';
+import { searchChunks, searchClaims, searchTopics } from '../rag';
 import type { SessionUser } from '../auth';
 import {
     dedupeSources,
     formatClarificationRequest,
     formatConversationList,
     formatKnowledgeHits,
+    formatPassageHits,
     formatTranscript,
     withSourceFooter,
     wikiUrl,
@@ -54,7 +55,8 @@ const INSTRUCTIONS = `Archie is a retrieval-augmented knowledge base over an org
 Use "ask" for questions that need an answer grounded in that documentation; it runs the full retrieval
 pipeline (knowledge graph + verbatim excerpts, multi-pass refinement, synthesis) and cites its sources,
 but it costs many model calls and can take tens of seconds. Use "search_knowledge" instead when you only
-need to see whether something is covered, or want raw facts and topics without a written answer.
+need to see whether something is covered, or want raw facts and topics without a written answer. Use
+"search_documents" for the documents' own wording — to quote them, or to verify an extracted fact.
 
 Answers are grounded in the corpus, not in general knowledge: if the documentation does not cover
 something, "ask" will say so rather than fill the gap. Treat its output as sourced material and keep the
@@ -244,9 +246,11 @@ export function createMcpServer(user: SessionUser): McpServer {
         async ({ query, type = 'all', limit = 10 }) => {
             // Run both halves concurrently when both were asked for; each embeds
             // the query, and the embedding cache in ../llm means the second is free.
+            // Reranked like the chat path, so a hit list here and the facts
+            // `ask` would have used agree on what is most relevant.
             const [topics, claims] = await Promise.all([
-                type === 'topics' || type === 'all' ? searchTopics(query, limit) : Promise.resolve([]),
-                type === 'claims' || type === 'all' ? searchClaims(query, null, limit) : Promise.resolve([])
+                type === 'topics' || type === 'all' ? searchTopics(query, limit, undefined, true) : Promise.resolve([]),
+                type === 'claims' || type === 'all' ? searchClaims(query, null, limit, undefined, true) : Promise.resolve([])
             ]);
 
             return textResult(formatKnowledgeHits(topics, claims), {
@@ -261,10 +265,45 @@ export function createMcpServer(user: SessionUser): McpServer {
                     topic: c.topic_name,
                     claim_type: c.claim_type,
                     source: c.path || c.filename,
-                    // Claims carry no repo_id, so there is no page to link to from
-                    // here; get_conversation and ask are where wiki links come from.
-                    wiki_url: null,
+                    wiki_url: wikiUrl(c),
                     score: c.score
+                }))
+            });
+        }
+    );
+
+    // ── search_documents ─────────────────────────────────────────────────────
+    server.registerTool(
+        'search_documents',
+        {
+            title: 'Search document passages',
+            description:
+                'Hybrid (semantic + full-text) search over the documents themselves, returning verbatim passages ' +
+                'with their source. Use it to quote the documentation, or to check a fact from search_knowledge or ' +
+                'ask against the original wording — knowledge-graph facts are extracted and may be paraphrased or ' +
+                'translated, passages are not. Cheaper than ask; no answer is written.',
+            inputSchema: {
+                query: z.string().min(1).max(1000).describe('What to look for. Natural language or exact terms both work.'),
+                limit: z.number().int().min(1).max(20).optional().describe('Maximum passages. Defaults to 5.')
+            },
+            outputSchema: {
+                passages: z.array(
+                    z.object({
+                        content: z.string(),
+                        ...SOURCE_SHAPE
+                    })
+                )
+            },
+            annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+        },
+        async ({ query, limit = 5 }) => {
+            const passages = await searchChunks(query, limit);
+            return textResult(formatPassageHits(passages), {
+                passages: passages.map((p) => ({
+                    content: p.content,
+                    filename: p.filename,
+                    path: p.path ?? null,
+                    wiki_url: wikiUrl(p)
                 }))
             });
         }

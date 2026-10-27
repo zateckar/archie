@@ -91,6 +91,24 @@ export interface GenerationConfig {
      * Gemini's `maxOutputTokens` and the LiteLLM/OpenAI `max_tokens`.
      */
     maxOutputTokens?: number;
+    /**
+     * How hard the model should think before answering. Mapped to Gemini's
+     * `thinkingConfig.thinkingLevel` and the LiteLLM/OpenAI `reasoning_effort`.
+     * The thinking itself is never part of the returned text.
+     */
+    reasoning?: 'low' | 'medium' | 'high';
+}
+
+/**
+ * The app's config in the shape the Gemini SDK takes. Gemini 3 models take a
+ * thinking level; older ones (1.x/2.x) use a token budget and reject the level,
+ * so they get the model's default thinking instead.
+ */
+function toGeminiConfig(model: string, config: GenerationConfig | undefined): Record<string, unknown> | undefined {
+    if (!config) return undefined;
+    const { reasoning, ...rest } = config;
+    if (!reasoning || /gemini-[12]\./i.test(model)) return rest;
+    return { ...rest, thinkingConfig: { thinkingLevel: reasoning.toUpperCase() } };
 }
 
 export interface GenerateResult {
@@ -323,11 +341,18 @@ function buildChatMessages(
  */
 let streamUsageSupported: boolean | null = null;
 
+/**
+ * Same idea for `reasoning_effort`: the gateway's model may not accept it.
+ * Learned once per process, then the parameter is no longer sent.
+ */
+let reasoningSupported: boolean | null = null;
+
 function litellmBody(
     messages: { role: string; content: string }[],
     config: GenerationConfig | undefined,
     stream: boolean,
-    includeStreamUsage = false
+    includeStreamUsage = false,
+    includeReasoning = false
 ): Record<string, unknown> {
     const body: Record<string, unknown> = {
         model: litellmTextModel,
@@ -339,6 +364,7 @@ function litellmBody(
     }
     if (config?.temperature !== undefined) body.temperature = config.temperature;
     if (config?.maxOutputTokens !== undefined) body.max_tokens = config.maxOutputTokens;
+    if (includeReasoning && config?.reasoning) body.reasoning_effort = config.reasoning;
     if (config?.responseMimeType === 'application/json') {
         body.response_format = { type: 'json_object' };
     }
@@ -384,17 +410,29 @@ async function* litellmChatStream(
 ): AsyncGenerator<StreamChunk> {
     const url = `${litellmBaseUrl}/chat/completions`;
 
+    let askedForReasoning = !!config?.reasoning && reasoningSupported !== false;
     const send = (withUsage: boolean) =>
         litellmFetch(url, {
             method: 'POST',
             headers: litellmHeaders(),
-            body: JSON.stringify(litellmBody(messages, config, true, withUsage))
+            body: JSON.stringify(litellmBody(messages, config, true, withUsage, askedForReasoning))
         });
 
     const startedAt = Date.now();
     const inputText = messagesText(messages);
     let askedForUsage = streamUsageSupported !== false;
     let res = await send(askedForUsage);
+
+    // A model behind the gateway that can't take `reasoning_effort` rejects the
+    // request. Drop it first (it is the newer, likelier culprit), and remember.
+    if (!res.ok && askedForReasoning && (res.status === 400 || res.status === 422)) {
+        console.warn('[Providers] LiteLLM rejected reasoning_effort (%s) — retrying without it.', res.status);
+        askedForReasoning = false;
+        res = await send(askedForUsage);
+        if (res.ok) reasoningSupported = false;
+    } else if (res.ok && askedForReasoning) {
+        reasoningSupported = true;
+    }
 
     // A gateway that doesn't know `stream_options` rejects the whole request.
     // Retry once without it and remember, so this costs at most one request.
@@ -542,8 +580,16 @@ async function litellmRerank(
     if (!Array.isArray(ranked)) {
         throw new Error('LiteLLM rerank returned no results');
     }
-    // Each result carries an `index` into the input `documents` array.
-    const indices = ranked
+    // Each result carries an `index` into the input `documents` array. The
+    // Cohere-style contract is that results arrive sorted by score, but that is
+    // the gateway's promise, not ours — sort on `relevance_score` whenever it is
+    // present so a backend that returns input order cannot pass it off as a
+    // ranking.
+    const scored = ranked.every((r: any) => typeof r?.relevance_score === 'number');
+    const ordered = scored
+        ? [...ranked].sort((a: any, b: any) => b.relevance_score - a.relevance_score)
+        : ranked;
+    const indices = ordered
         .map((r: any) => r?.index)
         .filter((i: unknown): i is number => typeof i === 'number');
     if (indices.length === 0) throw new Error('LiteLLM rerank returned no indices');
@@ -564,7 +610,7 @@ async function geminiGenerate(
         result = await genAI.models.generateContent({
             model,
             contents: prompt,
-            config
+            config: toGeminiConfig(model, config)
         });
     } catch (e) {
         meterFailure(op, 'gemini', model, 'generate', prompt, startedAt);
@@ -597,7 +643,7 @@ async function* geminiChatStream(
     const inputText = [systemInstruction ?? '', ...history.map((m) => m.content), prompt].join('\n');
     const chat = genAI.chats.create({
         model,
-        config: { ...config, systemInstruction },
+        config: { ...toGeminiConfig(model, config), systemInstruction },
         history: history.map((msg): Content => ({
             role: msg.role === 'user' ? 'user' : 'model',
             parts: [{ text: msg.content }]

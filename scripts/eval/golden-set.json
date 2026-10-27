@@ -1,102 +1,344 @@
 {
   "version": 1,
-  "corpus": "not yet seeded — run `npm run eval:seed`",
+  "corpus": "191 documents, 2728 topics",
   "cases": [
     {
-      "id": "topic-2",
-      "query": "Co je IT Product Manager (ITPM)?",
-      "expectedTopics": [
-        "IT Product Manager (ITPM)"
+      "id": "integ-01-direct-communication",
+      "query": "Smí dvě aplikace komunikovat napřímo, bez integrační platformy?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
       ],
-      "expectedClaimSubstrings": [
-        "IT Product Managers and IT Delivery Managers must"
+      "expectedFacts": [
+        "Direct point-to-point communication between different applications is forbidden; incoming communication must go through an approved integration solution.",
+        "Direct communication is allowed only between internal components of the same application."
       ],
-      "reviewed": false,
-      "note": "Auto-generated probe (27 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
     },
     {
-      "id": "topic-131",
-      "query": "Co je Business Partner (External Subject)?",
-      "expectedTopics": [
-        "Business Partner (External Subject)"
+      "id": "integ-02-default-style",
+      "query": "What is the default integration style between systems, and how must APIs be described?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
       ],
-      "expectedClaimSubstrings": [
-        "Before application takeover, external applications must be checked"
+      "expectedFacts": [
+        "REST APIs and Kafka are the default integration approaches."
       ],
-      "reviewed": false,
-      "note": "Auto-generated probe (22 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
     },
     {
-      "id": "topic-483",
-      "query": "Co je Firewall Approval?",
-      "expectedTopics": [
-        "Firewall Approval"
+      "id": "integ-03-subscription-key",
+      "query": "Která hlavička je povinná při volání API přes API Management?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
       ],
-      "expectedClaimSubstrings": [
-        "If a critical situation like production interruption occurs"
+      "expectedFacts": [
+        "The Ocp-Apim-Subscription-Key header is mandatory on every API request through APIM; it is issued based on an approved subscription."
       ],
-      "reviewed": false,
-      "note": "Auto-generated probe (19 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
     },
     {
-      "id": "topic-400",
-      "query": "Co je Image Recording (POZ)?",
-      "expectedTopics": [
-        "Image Recording (POZ)"
+      "id": "integ-04-apim-auth",
+      "query": "Jaké způsoby autentizace API Management ověřuje a jsou povinné?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
       ],
-      "expectedClaimSubstrings": [
-        "Extraordinary image recordings involving confidential or secret information"
+      "expectedFacts": [
+        "Subscription key is mandatory. OIDC and mTLS are optional and depend on the API's confidentiality;"
       ],
-      "reviewed": false,
-      "note": "Auto-generated probe (19 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
     },
     {
-      "id": "topic-26",
-      "query": "Co je FIG (IT Governance, Security, and Service Management)?",
-      "expectedTopics": [
-        "FIG (IT Governance, Security, and Service Management)"
+      "id": "integ-05-backend-tls",
+      "query": "Can TLS be omitted between API Management and the backend service?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
       ],
-      "expectedClaimSubstrings": [
-        "FIG defines new Planning Groups when an Organizational"
+      "expectedFacts": [
+        "TLS between APIM and the backend may be omitted for performance only if the connection is secured by trusted network boundaries."
       ],
-      "reviewed": false,
-      "note": "Auto-generated probe (16 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
     },
     {
-      "id": "topic-473",
-      "query": "Co je Network Access Control (NAC)?",
-      "expectedTopics": [
-        "Network Access Control (NAC)"
+      "id": "integ-06-pattern-no-ack",
+      "query": "Mám integraci mezi dvěma aplikacemi, konzument nepotřebuje okamžité potvrzení doručení a nepotřebuji garantované zpracování. Jaký vzor použít?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-patterns-guide.md"
       ],
-      "expectedClaimSubstrings": [
-        "Disabling network access control functions in an emergency"
+      "expectedFacts": [
+        "Use event streaming (log-based), e.g. Škoda Kafka or Azure Event Hubs."
       ],
-      "reviewed": false,
-      "note": "Auto-generated probe (15 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
     },
     {
-      "id": "topic-496",
-      "query": "Co je WiFi Security?",
-      "expectedTopics": [
-        "WiFi Security"
+      "id": "integ-07-grpc-cross-app",
+      "query": "Is gRPC allowed between two different applications?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-patterns-guide.md"
       ],
-      "expectedClaimSubstrings": [
-        "The use of WPA2/3-PSK requires technical requirement checks,"
+      "expectedFacts": [
+        "gRPC is allowed within the same application boundary (same LeanIX ID) but is discouraged or restricted across application boundaries."
       ],
-      "reviewed": false,
-      "note": "Auto-generated probe (14 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+      "mustNotRetrieve": [],
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
     },
     {
-      "id": "topic-591",
-      "query": "Co je Microsoft Teams?",
+      "id": "integ-08-kafka-encryption",
+      "query": "Šifruje Kafka obsah zpráv? Jak mám přenášet citlivá data?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
+      ],
+      "expectedFacts": [
+        "Kafka does not provide payload encryption.",
+        "Secret data must be encrypted by the producer and decrypted by the consumer."
+      ],
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
+    },
+    {
+      "id": "integ-09-kafka-auth",
+      "query": "How do I authenticate to the Škoda Kafka platform?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
+      ],
+      "expectedFacts": [
+        "Kafka supports OAuth2 via ŠKODA IdP and mTLS/SSL with client certificates."
+      ],
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
+    },
+    {
+      "id": "integ-10-kafka-sla",
+      "query": "Jaké je SLA a podpora Kafka platformy?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
+      ],
+      "expectedFacts": [
+        "Infrastructure SLA is 99.95%.",
+        "Infrastructure support is 24x7; customer care is 8x5."
+      ],
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
+    },
+    {
+      "id": "integ-11-firewall-onprem",
+      "query": "Jak požádat o prostupnost firewallu mezi on-premise aplikací a API Managementem v Mladé Boleslavi?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
+      ],
+      "expectedFacts": [
+        "Firewall access is requested via UMS Form 9031.",
+        "API providers request access from API Management to the backend; consumers request access from the application to API Management."
+      ],
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
+    },
+    {
+      "id": "integ-12-self-hosted-gateway",
+      "query": "What happens to the Azure self-hosted APIM gateway if it loses connectivity to Azure?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
+      ],
+      "expectedFacts": [
+        "It keeps serving traffic from its in-memory configuration (fail-static).",
+        "With a local backup enabled it can also survive a restart during the outage."
+      ],
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
+    },
+    {
+      "id": "integ-13-aws-gateway",
+      "query": "Can I still use the AWS Europe Central 1 API gateway?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
+      ],
+      "expectedFacts": [
+        "The AWS Europe Central 1 gateway is deprecated across all environments."
+      ],
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
+    },
+    {
+      "id": "integ-14-mcp-scenarios",
+      "query": "Jak vystavit existující API jako MCP server pro AI asistenty?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
+      ],
+      "expectedFacts": [
+        "Scenario 1: wrap an existing REST API published in APIM in an MCP layer — for standard internal APIs, no extra infrastructure for the team.",
+        "Scenario 2: the application team operates its own MCP server and registers it in APIM — for complex or performance-sensitive cases needing full control."
+      ],
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
+    },
+    {
+      "id": "integ-15-external-app",
+      "query": "Co musí splňovat externí (periferní) aplikace, se kterou se integrujeme?",
+      "expectedTopics": [],
+      "expectedSources": [
+        "integration-rules.md"
+      ],
+      "expectedFacts": [
+        "It must be registered in ŠkoNET and LeanIX.",
+        "It must have an assigned Product Owner and IT Product Manager who are employees of Škoda, take responsibility for the application and its compliance."
+      ],
+      "area": "application-integration",
+      "reviewed": true,
+      "note": "Drafted 2026-10-27 from integration-rules.md / integration-patterns-guide.md; expectedFacts reviewed by the application-integration domain expert 2026-10-27."
+    },
+    {
+      "id": "topic-23",
+      "query": "Co je FIG?",
       "expectedTopics": [
-        "Microsoft Teams"
+        "FIG"
       ],
       "expectedClaimSubstrings": [
-        "Effective June 1, 2023, placing emergency calls (such"
+        "FIG is the entity responsible for managing the requirements of interested parties"
       ],
       "reviewed": false,
-      "note": "Auto-generated probe (13 active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+      "note": "Auto-generated probe (215 active claims; expects: \"FIG is the entity responsible for managing the requirements of interested parties for the ISMS.\"). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-167",
+      "query": "Co je Organizational Unit (OJ)?",
+      "expectedTopics": [
+        "Organizational Unit (OJ)"
+      ],
+      "expectedClaimSubstrings": [
+        "OJ stands for Organizační jednotka"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (210 active claims; expects: \"OJ stands for Organizační jednotka (Organizational Unit).\"). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-143",
+      "query": "Co je Zaměstnanec?",
+      "expectedTopics": [
+        "Zaměstnanec"
+      ],
+      "expectedClaimSubstrings": [
+        "The Zaměstnanec (Employee) is a primary stakeholder or user associated with Skype"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (108 active claims; expects: \"The Zaměstnanec (Employee) is a primary stakeholder or user associated with Skype Voice and Mobile Client services.\"). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-20",
+      "query": "Co je IT Product manager?",
+      "expectedTopics": [
+        "IT Product manager"
+      ],
+      "expectedClaimSubstrings": [
+        "The IT Product Manager is a role defined within the Application Management"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (104 active claims; expects: \"The IT Product Manager is a role defined within the Application Management domain.\"). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-95",
+      "query": "Co je IT Produkt?",
+      "expectedTopics": [
+        "IT Produkt"
+      ],
+      "expectedClaimSubstrings": [
+        "An IT Produkt is a set of functionalities with potential value for"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (98 active claims; expects: \"An IT Produkt is a set of functionalities with potential value for customers.\"). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-48",
+      "query": "Co je STO?",
+      "expectedTopics": [
+        "STO"
+      ],
+      "expectedClaimSubstrings": [
+        "STO is the authority that determines the numbering for KRL"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (68 active claims; expects: \"STO is the authority that determines the numbering for KRL, ON, MP, and PP document types.\"). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-324",
+      "query": "Co je FIO?",
+      "expectedTopics": [
+        "FIO"
+      ],
+      "expectedClaimSubstrings": [
+        "FIO is the authority responsible for the requirements regarding IT process documentation"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (66 active claims; expects: \"FIO is the authority responsible for the requirements regarding IT process documentation and ITSCM.\"). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-21",
+      "query": "Co je IT Product owner?",
+      "expectedTopics": [
+        "IT Product owner"
+      ],
+      "expectedClaimSubstrings": [
+        "The IT Product Owner is the main contact person for questions regarding"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (63 active claims; expects: \"The IT Product Owner is the main contact person for questions regarding product functionality.\"). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-30",
+      "query": "Co je IT Delivery Manager?",
+      "expectedTopics": [
+        "IT Delivery Manager"
+      ],
+      "expectedClaimSubstrings": [
+        "The IT Delivery Manager is a role categorized under System and Process"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (60 active claims; expects: \"The IT Delivery Manager is a role categorized under System and Process Integration.\"). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
+    },
+    {
+      "id": "topic-1530",
+      "query": "Co je SUMS?",
+      "expectedTopics": [
+        "SUMS"
+      ],
+      "expectedClaimSubstrings": [
+        "SUMS stands for Software Update Management System"
+      ],
+      "reviewed": false,
+      "note": "Auto-generated probe (59 active claims; expects: \"SUMS stands for Software Update Management System (Řízení aktualizací softwaru vozidel).\"). Rewrite as a question a person would ask, and set the topics that should genuinely answer it."
     }
   ]
 }

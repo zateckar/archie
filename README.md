@@ -321,6 +321,7 @@ sessions to terminate.
 |------|--------------|
 | `ask` | A grounded, cited answer via the full RAG pipeline. Appends to a conversation shared with the web UI. Returns clarifying questions instead of an answer when the query is too vague. Slow (10–60s) and rate limited. |
 | `search_knowledge` | Semantic search over topics and claims with relevance scores. No answer is written, so it is cheap — the right tool for "is this documented?". |
+| `search_documents` | Hybrid search returning verbatim document passages with their source. Claims are extracted (and may be paraphrased or translated); passages are the documents' own words, so this is the tool for quoting or verifying. |
 | `list_conversations` | The user's own conversations, filterable by title or message contents. |
 | `get_conversation` | One transcript, turns numbered from zero, with the sources each answer cited. |
 | `pin_conversation` | Pin or unpin, without disturbing `updated_at`. |

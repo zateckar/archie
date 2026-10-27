@@ -25,6 +25,9 @@ import Plug from '@lucide/svelte/icons/plug';
     import MessageBubble from '$lib/components/MessageBubble.svelte';
     import ThemeToggle from '$lib/components/ThemeToggle.svelte';
     import { conversationTitle } from '$lib/conversation-title';
+    import { applyProgress, formatStageTime, STAGE_LABELS, type ChatProgress, type ProgressStep } from '$lib/chat-progress';
+    import Check from '@lucide/svelte/icons/check';
+    import LoaderCircle from '@lucide/svelte/icons/loader-circle';
     import {
         SIDEBAR_WIDTH_KEY,
         SIDEBAR_MIN_WIDTH,
@@ -52,6 +55,19 @@ import Plug from '@lucide/svelte/icons/plug';
     let messages: Message[] = $state([]);
     let currentPrompt = $state('');
     let isChatting = $state(false);
+    /** Stages of the answer being prepared, as the server reports them. */
+    let progressSteps = $state<ProgressStep[]>([]);
+    /** When the running stage started, and a ticking clock for its live timer. */
+    let runningSince = $state(0);
+    let progressNow = $state(Date.now());
+    $effect(() => {
+        if (!isChatting) return;
+        const timer = setInterval(() => (progressNow = Date.now()), 250);
+        return () => clearInterval(timer);
+    });
+    let answerStarted = $derived(
+        messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !!messages[messages.length - 1].content
+    );
     let isUserMenuOpen = $state(false);
     let isSidebarOpen = $state(true);
     let sidebarWidth = $state<number>(
@@ -378,6 +394,7 @@ import Plug from '@lucide/svelte/icons/plug';
         messages = [...messages, { role: 'user', content: prompt }];
 
         isChatting = true;
+        progressSteps = [];
         try {
             const history = messages.slice(0, -1).map(m => ({ role: m.role, content: m.content }));
             const res = await fetch('/api/chat', {
@@ -386,16 +403,27 @@ import Plug from '@lucide/svelte/icons/plug';
                 body: JSON.stringify({ prompt, history, conversationId: currentConversationId, skipAnalysis })
             });
 
-            // Handle non-streaming responses (clarification, low confidence)
+            const showClarification = (questions: string[]) => {
+                messages = [...messages, {
+                    role: 'assistant',
+                    content: `I need a bit more context to help you better:\n\n${questions.map((q: string, i: number) => `${i + 1}. ${q}`).join('\n')}\n\nCould you provide more details?`
+                }];
+            };
+
+            // Non-streaming responses: refusals (rate limit, validation) and
+            // the legacy clarification / low-confidence shapes.
             const contentType = res.headers.get('Content-Type');
             if (contentType?.includes('application/json')) {
                 const data = await res.json();
 
+                if (!res.ok) {
+                    messages = [...messages, { role: 'assistant', content: data.error ?? 'Sorry, something went wrong.' }];
+                    isChatting = false;
+                    return;
+                }
+
                 if (data.type === 'clarification') {
-                    messages = [...messages, {
-                        role: 'assistant',
-                        content: `I need a bit more context to help you better:\n\n${data.questions.map((q: string, i: number) => `${i + 1}. ${q}`).join('\n')}\n\nCould you provide more details?`
-                    }];
+                    showClarification(data.questions);
                     isChatting = false;
                     return;
                 }
@@ -413,8 +441,8 @@ import Plug from '@lucide/svelte/icons/plug';
 
             if (!res.body) throw new Error('No response body');
 
-            const newConvId = res.headers.get('X-Conversation-Id');
-            if (newConvId && !currentConversationId) {
+            const adoptConversation = (newConvId: string | null) => {
+                if (!newConvId || currentConversationId) return;
                 currentConversationId = newConvId;
                 conversations = [
                     {
@@ -425,12 +453,20 @@ import Plug from '@lucide/svelte/icons/plug';
                     },
                     ...conversations
                 ];
-            }
+            };
+            adoptConversation(res.headers.get('X-Conversation-Id'));
 
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
-            let assistantMessage = { role: 'assistant' as const, content: '', sources: [] };
-            messages = [...messages, assistantMessage];
+            let assistantMessage = { role: 'assistant' as const, content: '', sources: [] as any[] };
+            // The bubble appears with the first sources or words; until then
+            // the progress list stands in for it.
+            let assistantShown = false;
+            const ensureAssistant = () => {
+                if (assistantShown) return;
+                assistantShown = true;
+                messages = [...messages, assistantMessage];
+            };
 
             // Batch stream updates to avoid excessive reactivity (max every 60ms)
             let lastFlush = 0;
@@ -455,10 +491,32 @@ import Plug from '@lucide/svelte/icons/plug';
                 if (!line.trim()) return;
                 try {
                     const parsed = JSON.parse(line);
-                    if (parsed.type === 'sources') {
+                    if (parsed.type === 'progress') {
+                        const event = parsed.data as ChatProgress;
+                        progressSteps = applyProgress(progressSteps, event);
+                        if (event.status === 'start') runningSince = Date.now();
+                        return;
+                    } else if (parsed.type === 'clarification') {
+                        showClarification(parsed.questions);
+                        return;
+                    } else if (parsed.type === 'conversation') {
+                        adoptConversation(parsed.id);
+                        return;
+                    } else if (parsed.type === 'sources') {
+                        // Held until the first words: shown now, they would sit
+                        // in an empty bubble above the progress list.
                         assistantMessage.sources = parsed.data;
+                        return;
                     } else if (parsed.type === 'chunk') {
+                        ensureAssistant();
                         assistantMessage.content += parsed.data;
+                    } else if (parsed.type === 'error') {
+                        ensureAssistant();
+                        assistantMessage.content += assistantMessage.content
+                            ? '\n\n*The answer was interrupted.*'
+                            : parsed.data;
+                    } else {
+                        return;
                     }
                     // Schedule a batched update
                     pendingUpdate = () => {
@@ -862,19 +920,46 @@ import Plug from '@lucide/svelte/icons/plug';
                 />
             {/each}
 
-            {#if isChatting}
+            {#if isChatting && !answerStarted}
                 <div class="flex justify-start" in:fade>
-                    <div class="flex gap-3">
+                    <div class="flex gap-3 min-w-0">
                         <div class="w-8 h-8 rounded-lg bg-surface border border-line flex items-center justify-center flex-shrink-0">
                             <Bot class="w-4 h-4 text-accent" />
                         </div>
-                        <div class="bg-raised border border-line-subtle px-4 py-3 rounded-2xl rounded-tl-sm flex items-center gap-2.5">
-                            <div class="flex gap-1" aria-hidden="true">
-                                <div class="w-1.5 h-1.5 bg-accent-quiet rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                                <div class="w-1.5 h-1.5 bg-accent-quiet rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                                <div class="w-1.5 h-1.5 bg-accent-quiet rounded-full animate-bounce"></div>
-                            </div>
-                            <span class="text-[13px] text-mute">Searching your documents…</span>
+                        <div
+                            class="bg-raised border border-line-subtle px-4 py-3 rounded-2xl rounded-tl-sm min-w-0"
+                            role="status"
+                            aria-live="polite"
+                        >
+                            {#if progressSteps.length === 0}
+                                <div class="flex items-center gap-2.5">
+                                    <LoaderCircle class="w-3.5 h-3.5 text-accent animate-spin flex-shrink-0" aria-hidden="true" />
+                                    <span class="text-[13px] text-mute">Starting…</span>
+                                </div>
+                            {:else}
+                                <ol class="progress-steps">
+                                    {#each progressSteps as step, s (s)}
+                                        <li class="progress-step" class:running={!step.done} in:fade={{ duration: 150 }}>
+                                            {#if step.done}
+                                                <Check class="w-3.5 h-3.5 text-accent flex-shrink-0 mt-[3px]" aria-hidden="true" />
+                                            {:else}
+                                                <LoaderCircle class="w-3.5 h-3.5 text-accent animate-spin flex-shrink-0 mt-[3px]" aria-hidden="true" />
+                                            {/if}
+                                            <div class="min-w-0 flex-1">
+                                                <div class="flex items-baseline gap-2">
+                                                    <span class="progress-label">{STAGE_LABELS[step.stage]}</span>
+                                                    <span class="progress-time">
+                                                        {step.done ? formatStageTime(step.ms) : formatStageTime(Math.max(0, progressNow - runningSince))}
+                                                    </span>
+                                                </div>
+                                                {#if step.detail}
+                                                    <p class="progress-detail" title={step.detail}>{step.detail}</p>
+                                                {/if}
+                                            </div>
+                                        </li>
+                                    {/each}
+                                </ol>
+                            {/if}
                         </div>
                     </div>
                 </div>
@@ -1140,6 +1225,42 @@ import Plug from '@lucide/svelte/icons/plug';
         width: 100%;
         max-width: 68rem;
         margin-inline: auto;
+    }
+
+    /* Live stages of the answer being prepared. Finished steps recede; the
+       running one stays at full strength so the eye lands on it. */
+    .progress-steps {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        min-width: 18rem;
+        max-width: 40rem;
+    }
+    .progress-step {
+        display: flex;
+        gap: 0.625rem;
+        color: var(--text-muted);
+    }
+    .progress-step.running {
+        color: var(--text-primary);
+    }
+    .progress-label {
+        font-size: 13px;
+        line-height: 1.4;
+    }
+    .progress-time {
+        font-size: 12px;
+        color: var(--text-faint);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+    .progress-detail {
+        font-size: 12px;
+        line-height: 1.4;
+        color: var(--text-faint);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     /* The composer is one field: the textarea and its buttons share a single

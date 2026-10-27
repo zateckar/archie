@@ -4,6 +4,7 @@ import {
     formatClarificationRequest,
     formatConversationList,
     formatKnowledgeHits,
+    formatPassageHits,
     formatSourceList,
     formatTranscript,
     sourceLabel,
@@ -166,5 +167,21 @@ describe('formatKnowledgeHits', () => {
         const text = formatKnowledgeHits([{ name: 'Braking', description: null, category: null, score: 0.5 }], []);
         expect(text).toContain('**Topics**');
         expect(text).not.toContain('**Facts**');
+    });
+});
+
+describe('formatPassageHits', () => {
+    it('numbers passages, labels them by path and links the wiki page when there is one', () => {
+        const text = formatPassageHits([
+            { content: 'REST APIs are the default.', filename: 'integration-rules.md', path: 'technology-portfolio/integration/integration-rules.md', repo_id: 2 },
+            { content: 'Uploaded text.', filename: 'notes.md', path: null, repo_id: null }
+        ]);
+        expect(text).toContain('### [1] technology-portfolio/integration/integration-rules.md (/wiki/2/technology-portfolio/integration/integration-rules.md)');
+        expect(text).toContain('REST APIs are the default.');
+        expect(text).toContain('### [2] notes.md\nUploaded text.');
+    });
+
+    it('says so when nothing matched', () => {
+        expect(formatPassageHits([])).toBe('No document passage matched that query.');
     });
 });

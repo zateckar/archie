@@ -65,12 +65,18 @@ const DETERMINISTIC_JSON_CONFIG = { temperature: 0.1, responseMimeType: 'applica
 // it. Override via LLM_CLEAN_MAX_OUTPUT_TOKENS for a model with a smaller cap.
 const CLEAN_MAX_OUTPUT_TOKENS = Number(process.env.LLM_CLEAN_MAX_OUTPUT_TOKENS) || 65536;
 const CLEAN_JSON_CONFIG = { temperature: 0.1, responseMimeType: 'application/json', maxOutputTokens: CLEAN_MAX_OUTPUT_TOKENS };
-const RERANK_CONFIG = { temperature: 0, responseMimeType: 'application/json' };
+// Ranking and query analysis are mechanical; Gemini 3's default (high) thinking
+// tripled their latency without changing the result. Measured 2026-10-27 on a
+// 20-claim rerank: 6.3–9.1 s at default vs 2.2–4.5 s at low, same top-5 items.
+const RERANK_CONFIG = { temperature: 0, responseMimeType: 'application/json', reasoning: 'low' as const };
+const QUERY_ANALYSIS_CONFIG = { ...DETERMINISTIC_JSON_CONFIG, reasoning: 'low' as const };
 const EXTRACTION_CONFIG = { temperature: 0.15, responseMimeType: 'application/json' };
 const REWRITE_CONFIG = { temperature: 0.2 }; // faithful rewriting (cleaning) — free text
 const SUMMARY_CONFIG = { temperature: 0.3 }; // summarization — free text
 const SYNTHESIS_CONFIG = { temperature: 0.4 }; // briefing synthesis — free text
-const CHAT_CONFIG = { temperature: 0.4 }; // final user-facing answer — free text
+// Final user-facing answer — free text. Thinks before answering: a correct,
+// on-point answer matters more here than latency.
+const CHAT_CONFIG = { temperature: 0.4, reasoning: 'high' as const };
 
 export async function listModels() {
     const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
@@ -884,7 +890,7 @@ ${DUAL_LEVEL_KEYWORD_RULES}
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'analyze_query' }));
+        const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, QUERY_ANALYSIS_CONFIG, { op: 'analyze_query' }));
         const text = result.response.text();
         return normalizeQueryAnalysis(parseJSON<QueryAnalysis>(text, {
             needsClarification: false,
@@ -974,7 +980,7 @@ ${DUAL_LEVEL_KEYWORD_RULES}
     `;
 
     try {
-        const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'analyze_condense_query' }));
+        const result = await withRetry(() => providers.generateContent(analysisPrompt, { model: TEXT_MODEL }, QUERY_ANALYSIS_CONFIG, { op: 'analyze_condense_query' }));
         const text = result.response.text();
         return normalizeQueryAnalysis(parseJSON<QueryAnalysis>(text, {
             needsClarification: false,
@@ -1008,7 +1014,7 @@ export async function condenseQuery(history: { role: string, content: string }[]
             Standalone Search Query:
         `;
 
-        const result = await withRetry(() => providers.generateContent(condensePrompt, { model: TEXT_MODEL }, { temperature: 0.1 }, { op: 'condense_query' }));
+        const result = await withRetry(() => providers.generateContent(condensePrompt, { model: TEXT_MODEL }, { temperature: 0.1, reasoning: 'low' }, { op: 'condense_query' }));
         const text = result.response.text().trim();
         return text || prompt;
     } catch (e) {
@@ -1025,25 +1031,35 @@ function buildSystemPrompt(context: string): string {
 
 ${hasKnowledge
     ? `KNOWLEDGE BRIEFING:
-The following briefing was prepared from a structured knowledge base. Treat every fact in it as verified. Ground your answer in this briefing.
+The following briefing was prepared from the organisation's documentation. Facts are tagged with the document they come from, in [square brackets]. Ground every statement about the organisation in this briefing.
 
 ${context}`
     : hasContext
     ? `CONTEXT:\n${context}`
     : 'No relevant knowledge was found for this query. Say so clearly and suggest how the user might rephrase.'}
 
+BEFORE YOU WRITE, THINK IT THROUGH:
+1. What exactly is the user asking? Name the specific thing they need to know or decide.
+2. Which facts in the briefing answer THAT question? Retrieval returns neighbouring material too: a fact about a related topic, a different scope or a different system is not an answer, however close it sounds.
+3. Does the answer make sense? Check it against the question and against common sense: does it contradict itself or another source, is a date, number or version implausible or plainly outdated, does a rule seem to apply to a different situation than the one asked about?
+4. Only then write the answer.
+
 RESPONSE GUIDELINES:
-- Answer the question directly and completely using the briefing above
-- Synthesize information across topics; do not just enumerate facts
-- State specific details: numbers, dates, thresholds, names — never be vague when the briefing is specific
-- If the briefing partially answers the question, deliver what you have and note what's missing
-- If the briefing contains contradictions, present both sides with their sources
-- Never fabricate information not present in the briefing
-- Use markdown: headers for sections, **bold** for key terms, bullet lists for enumerations, tables for comparisons
-- Be direct and confident — you are the expert on this topic
+- Answer in the language of the user's question
+- Lead with the direct answer to the question asked, in one or two sentences, then give only the supporting detail that question needs. Be concise: no restating the question, no tour of everything the briefing contains, no generic background the user did not ask for
+- If the briefing does not actually answer the question (it is about something adjacent), say so plainly and stop; do not stretch unrelated facts into an answer
+- State specific details: numbers, dates, thresholds, names, document codes — never be vague when the briefing is specific, and keep the source's own terms rather than paraphrasing them
+- Cite the source of each specific fact inline, reusing its tag from the briefing exactly, e.g. [ON_1_047_cz_01042023_p3.md]. Do not invent tags, and do not cite the THEMATIC OVERVIEW
+- If the briefing only partially answers the question, give what it supports and say plainly what it does not cover
+- If the briefing marks something as disputed, present both versions with their sources rather than choosing one
+- If a fact you rely on looks implausible, contradictory or outdated, say so next to it rather than passing it on as settled; if the briefing has VERIFICATION NOTES, follow them
+- Organisational rules, responsibilities, numbers, deadlines, owners and procedures come ONLY from the briefing. General knowledge is allowed only to explain a widely known concept or term (what Kafka or mTLS is) when that helps answer the question; mark it as general background, never cite a source tag for it, and never present it as the organisation's rule
+- Match the length to the question. A yes/no, "what is X", "which/who/how much" question gets a short paragraph or up to about five bullets, no headers, no diagram. Only a broad question (describe a whole process, compare several options) earns sections. Leave out facts that are true but do not change the answer to THIS question
+- Use markdown where it helps: **bold** for key terms, bullet lists for enumerations, tables for comparisons; headers only for long answers
+- Be direct: state what the documentation says without hedging, and be equally direct about what it does not say
 
 DIAGRAMS (Mermaid):
-- For processes, architectures, data flows, sequences, state machines, relationships, or hierarchies, include a Mermaid diagram in a fenced code block tagged \`mermaid\`. Example:
+- Include a Mermaid diagram only when the user asks about a process, architecture, data flow, sequence or hierarchy AND a diagram shows it more clearly than a few bullets would. Never for definitions, yes/no questions or single rules. Put it in a fenced code block tagged \`mermaid\`. Example:
 
 \`\`\`mermaid
 flowchart TD
@@ -1111,14 +1127,14 @@ ${knowledgeContext}
 ${verbatimExcerpts ? `SOURCE EXCERPTS:\n${verbatimExcerpts}` : ''}
 
 INSTRUCTIONS:
-1. Write a concise briefing (300-800 words) that directly addresses the user's question
+1. Write a briefing that directly addresses the user's question — typically 300-800 words, longer only when the question genuinely spans many facts
 2. Organize information into coherent paragraphs grouped by sub-topic — do NOT use bullet lists of claims
 3. Make cross-topic connections explicit (e.g., "X governs Y, which in turn depends on Z")
 4. Drop retrieved facts that are irrelevant to the question
 5. Preserve exact figures, dates, names, thresholds, and version numbers verbatim
 6. When claims from different topics relate to each other, weave them together narratively
 7. Note contradictions or gaps: if the data is incomplete, say what's missing. If a topic section contains a "⚠ Disputed / Unverified" claim, explicitly call out that the knowledge base has conflicting information on that point — state both versions and which source each comes from — rather than silently picking one
-8. Cite source documents inline: [filename.md] — but only where you use specific facts from excerpts
+8. Keep provenance: every specific fact you carry over must keep the [source] tag it has in the raw data or excerpts, copied exactly. A fact with no tag in the raw data stays untagged — never invent or guess a tag. The THEMATIC OVERVIEW is derived framing and is never a source
 9. Write in direct factual prose. Never say "the retrieved data shows" or "according to the claims"
 10. If the retrieved data does not contain information relevant to the question, say so in one sentence
 
@@ -1354,52 +1370,106 @@ export async function assessRelevance(query: string, documents: { content: strin
  * If insufficient, suggests refined queries for a second search pass.
  * Used in the multi-pass RAG pipeline to improve answer quality.
  */
+/** A fact the answer would rely on that does not look right, and how to check it. */
+export interface ContextDoubt {
+    fact: string;
+    concern: string;
+    verifyQuery: string;
+}
+
+export interface ContextEvaluation {
+    sufficient: boolean;
+    missingAspects: string[];
+    refinedQueries: string[];
+    doubts: ContextDoubt[];
+}
+
+/** How much of the context the evaluator reads. 8,000 chars saw barely the first topic section. */
+const EVALUATE_CONTEXT_CHARS = 30000;
+
+/**
+ * Coerces the evaluator's JSON into a `ContextEvaluation`. Anything malformed
+ * degrades to "sufficient, no doubts" — the evaluator is an extra check, and a
+ * broken verdict must not block an answer.
+ */
+export function normalizeContextEvaluation(raw: unknown): ContextEvaluation {
+    const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    const strings = (v: unknown) =>
+        Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string' && s.trim() !== '').map((s) => s.trim()) : [];
+    const doubts = (Array.isArray(r.doubts) ? r.doubts : [])
+        .filter((d): d is Record<string, unknown> => !!d && typeof d === 'object')
+        .map((d) => ({
+            fact: typeof d.fact === 'string' ? d.fact.trim() : '',
+            concern: typeof d.concern === 'string' ? d.concern.trim() : '',
+            verifyQuery: typeof d.verifyQuery === 'string' ? d.verifyQuery.trim() : ''
+        }))
+        .filter((d) => d.fact && d.concern)
+        .slice(0, 3);
+    return {
+        sufficient: r.sufficient !== false,
+        missingAspects: strings(r.missingAspects),
+        refinedQueries: strings(r.refinedQueries),
+        doubts
+    };
+}
+
 export async function evaluateContext(
     query: string,
     context: string,
-): Promise<{ sufficient: boolean; missingAspects: string[]; refinedQueries: string[] }> {
+): Promise<ContextEvaluation> {
     if (!context || context.includes('No relevant knowledge found')) {
         return {
             sufficient: false,
             missingAspects: ['No relevant information found in the knowledge base'],
-            refinedQueries: [query]
+            refinedQueries: [query],
+            doubts: []
         };
     }
 
     const prompt = `
-        You are evaluating whether retrieved context is sufficient to answer a user's question.
+        You are checking retrieved context before it is used to answer a user's question. Two checks: coverage and plausibility.
 
         User Query: "${query}"
 
         Retrieved Context (truncated):
-        ${context.substring(0, 8000)}
+        ${context.substring(0, EVALUATE_CONTEXT_CHARS)}
 
-        Evaluate:
-        1. Does the context contain information directly relevant to answering the query?
-        2. Are there important aspects of the query that are NOT covered by the context?
-        3. If coverage is insufficient, suggest 1-2 alternative search queries that might find the missing information using different terminology or angles.
+        1. COVERAGE
+           - Does the context contain information that directly answers the query, not just material on a neighbouring topic?
+           - Which important aspects of the query are NOT covered?
+           - If coverage is insufficient, suggest 1-2 alternative search queries using different terminology or angles.
+
+        2. PLAUSIBILITY: look only at the facts an answer to THIS query would rely on. List a fact as a doubt when, by the context itself or by common sense:
+           - it contradicts another fact in the context (different value, owner, rule or date for the same thing);
+           - it looks outdated (an older document version, a superseded system, a past deadline presented as current);
+           - it is implausible (impossible date or number, a rule that seems to belong to a different scope or situation);
+           - it is the only support for a key point and is vague or cut off.
+           For each doubt give a short search query that would confirm or correct it (e.g. the newer version of the rule, the other document's statement).
+           Do not raise doubts about style, about facts the answer does not need, or merely because something is surprising.
+           Two facts about different things (different services, roles, scopes, environments, e.g. "support" vs "customer care") are not a contradiction, even when their values differ.
 
         Return ONLY a JSON object:
         {
             "sufficient": true/false,
-            "missingAspects": ["aspect 1", "aspect 2"] or [],
-            "refinedQueries": ["alternative query 1", "alternative query 2"] or []
+            "missingAspects": ["aspect 1"] or [],
+            "refinedQueries": ["alternative query 1"] or [],
+            "doubts": [{"fact": "short quote of the fact", "concern": "why it looks wrong", "verifyQuery": "search query"}] or []
         }
 
         Rules:
         - Set sufficient=true if the context covers the main intent of the query, even if not perfectly
-        - Set sufficient=false only if the context is clearly off-topic or missing critical information the user asked about
-        - refinedQueries should use DIFFERENT terminology or angles than the original query to find complementary information
-        - Keep refinedQueries concise and search-friendly
+        - Set sufficient=false if the context is off-topic (about something adjacent) or missing critical information the user asked about
+        - refinedQueries and verifyQuery should be concise and search-friendly, in the language of the documents the context comes from
+        - At most 3 doubts; an empty list is the normal case
     `;
 
     try {
         const result = await withRetry(() => providers.generateContent(prompt, { model: RERANK_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'evaluate_context' }));
         const text = result.response.text();
-        return parseJSON(text, { sufficient: true, missingAspects: [], refinedQueries: [] });
+        return normalizeContextEvaluation(parseJSON<unknown>(text, {}));
     } catch (e) {
         console.error('Context evaluation failed:', e);
-        return { sufficient: true, missingAspects: [], refinedQueries: [] };
+        return { sufficient: true, missingAspects: [], refinedQueries: [], doubts: [] };
     }
 }
 
@@ -1410,7 +1480,11 @@ export async function evaluateContext(
 // of characters and risked a truncated/malformed JSON response on the way
 // back out. assessRelevance() already truncated to 300 chars for the same
 // reason; this brings rerank() in line with that.
-const RERANK_CONTENT_PREVIEW_CHARS = 500;
+//
+// 500 proved too tight: chunks average ~1,000 chars (up to ~4,300), so the
+// reranker judged most chunks on their first half. 1,500 covers the typical
+// chunk whole while still bounding a 20-candidate prompt at ~30K chars.
+const RERANK_CONTENT_PREVIEW_CHARS = 1500;
 
 export async function rerank(query: string, documents: { content: string }[]): Promise<number[]> {
     if (documents.length === 0) return [];
@@ -1560,6 +1634,8 @@ export interface ExtractedKnowledge {
         name: string;
         description: string;
         category: string;
+        /** Other names for the topic as written in the source (e.g. the Czech term, an acronym). */
+        aliases?: string[];
     }[];
     claims: {
         topic: string;
@@ -1601,7 +1677,13 @@ const ALLOWED_CATEGORIES = [
  * JSON response would drop a chunk's entire contribution to the knowledge
  * base with nothing but a console.error to show for it.
  */
-export async function extractKnowledge(text: string, existingTopicNames: string[] = [], documentSummary?: string): Promise<ExtractedKnowledge | null> {
+export async function extractKnowledge(
+    text: string,
+    existingTopicNames: string[] = [],
+    documentSummary?: string,
+    /** Path or filename of the source document, so claims can name it. */
+    documentLabel?: string | null
+): Promise<ExtractedKnowledge | null> {
     const vocabularyHint = existingTopicNames.length > 0
         ? `
         EXISTING CANONICAL TOPICS (reuse these names verbatim whenever the same concept appears; only create a new topic if genuinely absent from this list):
@@ -1618,8 +1700,14 @@ export async function extractKnowledge(text: string, existingTopicNames: string[
 
     const prompt = `
         You are an expert knowledge engineer. Extract structured knowledge from the following document chunk.
+        ${documentLabel ? `\n        SOURCE DOCUMENT: ${documentLabel}\n` : ''}
         ${summaryContext}
         ${vocabularyHint}
+
+        LANGUAGE RULES (the corpus mixes Czech and English documents):
+        - Topic "name": always in ENGLISH, so the same concept gets one topic whichever language a document is written in. Reuse an existing canonical topic whenever it is the same concept, even if the source uses the Czech term.
+        - Topic "aliases": every other name the source uses for that topic — the Czech term, the original-language title, acronyms (e.g. ["Tým obnovy"] for "Recovery Team", ["ITPM"] for "IT Product Manager"). Empty array if none.
+        - Claim "claim": in the SAME LANGUAGE as the [CURRENT SECTION]. Do not translate. Copy role names, document codes, system names, numbers and thresholds exactly as written.
 
         The text may include [PRECEDING SECTION] and [FOLLOWING SECTION] markers showing adjacent content for context.
         Extract knowledge ONLY from the [CURRENT SECTION]. Use the adjacent sections solely to:
@@ -1644,7 +1732,7 @@ export async function extractKnowledge(text: string, existingTopicNames: string[
            BOUNDARY: Scope limitations ("X applies only to production", "X excludes external users")
 
            Each claim must:
-           - Be SELF-CONTAINED: understandable without the original document
+           - Be SELF-CONTAINED: understandable without the original document. Never write "the document", "this instruction", "this section" or "the policy" — name it by its code or title (e.g. "ON.1.055", "MP.1.808 Bezpečnost WLAN"), taken from the SOURCE DOCUMENT or DOCUMENT CONTEXT
            - Convey ACTIONABLE or IMPORTANT information (not trivial observations)
            - Include SPECIFIC DETAILS: numbers, names, dates, thresholds, tools, roles when present in the text
            - Reference one of the topics you identified
@@ -1660,7 +1748,7 @@ export async function extractKnowledge(text: string, existingTopicNames: string[
 
         Return ONLY a valid JSON object:
         {
-            "topics": [{"name": "...", "description": "...", "category": "..."}],
+            "topics": [{"name": "...", "description": "...", "category": "...", "aliases": ["..."]}],
             "claims": [{"topic": "...", "claim": "...", "type": "assertion|negation|condition|comparison|boundary"}],
             "relationships": [{"source": "...", "target": "...", "type": "..."}]
         }
@@ -1923,43 +2011,8 @@ export async function summarizeCommunity(
     }
 }
 
-export async function checkConsistency(newClaim: string, existingClaims: string[]): Promise<{ status: 'unique' | 'duplicate' | 'conflict' | 'update', reason?: string }> {
-    if (existingClaims.length === 0) return { status: 'unique' };
-
-    const prompt = `
-        You are a consistency checker for a knowledge base.
-        Compare the following "New Claim" against a list of "Existing Claims" in the same topic.
-
-        Determine if the New Claim is:
-        - **unique**: It provides new information that doesn't overlap with existing claims.
-        - **duplicate**: It says the same thing as an existing claim.
-        - **conflict**: It contradicts an existing claim.
-        - **update**: It provides a more recent or more specific version of an existing claim.
-
-        New Claim: ${newClaim}
-
-        Existing Claims:
-        ${existingClaims.map((c, i) => `[${i}] ${c}`).join('\n')}
-
-        Return ONLY a valid JSON object:
-        {"status": "unique" | "duplicate" | "conflict" | "update", "reason": "brief explanation"}
-
-        Do not include any markdown formatting.
-    `;
-
-    try {
-        const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'consistency_check' }));
-        const responseText = result.response.text();
-        return parseJSON<{ status: 'unique' | 'duplicate' | 'conflict' | 'update', reason?: string }>(responseText, { status: 'unique' });
-    } catch (e) {
-        console.error('Consistency check failed:', e);
-    }
-    return { status: 'unique' };
-}
-
 /**
- * Batch version of checkConsistency - checks multiple new claims at once.
- * More efficient than calling checkConsistency repeatedly.
+ * Verdict for one new claim from `checkConsistencyBatch`.
  */
 export interface ConsistencyResult {
     status: 'unique' | 'duplicate' | 'conflict' | 'update';
@@ -1972,26 +2025,58 @@ export interface ConsistencyResult {
      * target, and the caller must not supersede anything.
      */
     supersedesIndex?: number;
+    /**
+     * For a `conflict` verdict: the index into `existingClaims` of the claim it
+     * contradicts. Mandatory — a conflict that cannot name its counterpart is
+     * downgraded to `unique` by normalizeConsistencyResult.
+     */
+    conflictsWithIndex?: number;
+}
+
+/** An existing claim as the consistency checker sees it. */
+export interface ExistingClaimRef {
+    text: string;
+    /** Document the claim comes from (path or filename), when known. */
+    source?: string | null;
 }
 
 export async function checkConsistencyBatch(
     newClaims: string[],
-    existingClaims: string[]
+    existingClaims: ExistingClaimRef[],
+    /** Document the new claims come from. */
+    newSource?: string | null,
+    options: { throwOnError?: boolean } = {}
 ): Promise<ConsistencyResult[]> {
     if (newClaims.length === 0) return [];
     if (existingClaims.length === 0) {
         return newClaims.map((_, index) => ({ status: 'unique' as const, claimIndex: index }));
     }
 
+    // Sources are shown because most false conflicts in the production corpus
+    // were claims from DIFFERENT documents filed under one generic topic
+    // ("Document Issuer", "Methodical"): each document's issuer, scope or
+    // audience differs, and without provenance the model read that as a
+    // contradiction. A ⚠ conflict is shown to every user who asks about the
+    // topic, so a false one is a correctness defect, not a cosmetic one.
     const prompt = `
         You are a consistency checker for a knowledge base.
         Compare multiple "New Claims" against a list of "Existing Claims" in the same topic.
+        Each claim shows the document it comes from in {curly braces}.
 
         For EACH new claim, determine if it is:
         - **unique**: Provides new information that doesn't overlap with existing claims.
         - **duplicate**: Says the same thing as an existing claim.
-        - **conflict**: Contradicts an existing claim.
+        - **conflict**: Contradicts an existing claim — see the strict rules below.
         - **update**: Provides a more recent or more specific version of an existing claim.
+
+        A "conflict" requires ALL of the following:
+        1. Both claims are about the SAME specific subject (the same system, document, role, process or rule) — not merely the same broad topic.
+        2. Both apply to the SAME scope: the same audience, organisational unit, environment, product, time period and document version.
+        3. They cannot both be true at once.
+        Claims from different documents that describe different instructions, standards, products, roles or document versions are NOT in conflict, even if they are worded alike — e.g. two directives that each name a different issuer, a different validity date or a different target group are "unique". When you are unsure, use "unique".
+
+        When and ONLY when the status is "conflict", also return "conflictsWithIndex":
+        the number E of the single existing claim [E<number>] it contradicts.
 
         When and ONLY when the status is "update", also return "supersedesIndex":
         the number E of the single existing claim [E<number>] that the new claim
@@ -2002,16 +2087,17 @@ export async function checkConsistencyBatch(
         would replace several existing claims, or you cannot identify exactly
         which one, use "unique" and explain in "reason".
 
-        New Claims:
+        New Claims${newSource ? ` {${newSource}}` : ''}:
         ${newClaims.map((c, i) => `[${i}] ${c}`).join('\n')}
 
         Existing Claims:
-        ${existingClaims.map((c, i) => `[E${i}] ${c}`).join('\n')}
+        ${existingClaims.map((c, i) => `[E${i}] ${c.text}${c.source ? ` {${c.source}}` : ''}`).join('\n')}
 
         Return ONLY a valid JSON array with one object per new claim:
         [
             {"claimIndex": 0, "status": "unique" | "duplicate" | "conflict" | "update", "reason": "brief explanation"},
             {"claimIndex": 1, "status": "update", "supersedesIndex": 3, "reason": "..."},
+            {"claimIndex": 2, "status": "conflict", "conflictsWithIndex": 0, "reason": "..."},
             ...
         ]
 
@@ -2021,10 +2107,13 @@ export async function checkConsistencyBatch(
     try {
         const result = await withRetry(() => providers.generateContent(prompt, { model: TEXT_MODEL }, DETERMINISTIC_JSON_CONFIG, { op: 'consistency_check_batch' }));
         const responseText = result.response.text();
-        const parsed = parseJSON<ConsistencyResult[]>(
-            responseText,
-            newClaims.map((_, index) => ({ status: 'unique' as const, claimIndex: index }))
-        );
+        const raw = tryParseJSON<unknown>(responseText);
+        const parsed = coerceConsistencyResults(raw);
+        if (!parsed) {
+            if (options.throwOnError) throw new Error('Consistency check returned no parsable verdicts');
+            console.error('Batch consistency check: unparsable response, treating all claims as unique.');
+            return newClaims.map((_, index) => ({ status: 'unique' as const, claimIndex: index }));
+        }
 
         // Ensure we have results for all claims
         if (parsed.length !== newClaims.length) {
@@ -2039,6 +2128,10 @@ export async function checkConsistencyBatch(
 
         return parsed.map(normalizeConsistencyResult);
     } catch (e) {
+        // Ingestion degrades to "unique" so one bad call cannot block a
+        // document. A caller that WRITES verdicts back over existing data (the
+        // conflict re-check) must not read a failure as "no conflict".
+        if (options.throwOnError) throw e;
         console.error('Batch consistency check failed:', e);
         return newClaims.map((_, index) => ({ status: 'unique' as const, claimIndex: index }));
     }
@@ -2059,16 +2152,44 @@ export async function checkConsistencyBatch(
  * Exported for direct unit testing.
  */
 export function normalizeConsistencyResult(r: ConsistencyResult): ConsistencyResult {
-    if (r.status !== 'update') {
-        const { supersedesIndex, ...rest } = r;
-        return rest;
+    const { supersedesIndex, conflictsWithIndex, ...rest } = r;
+    if (r.status === 'conflict') {
+        // A conflict must name its counterpart. One that cannot is the model
+        // expressing unease rather than identifying a contradiction, and storing
+        // it would put a ⚠ in front of every user who asks about the topic.
+        const target = toIndex(conflictsWithIndex);
+        if (target === undefined) {
+            return { ...rest, status: 'unique', reason: `unattributed conflict downgraded${r.reason ? `: ${r.reason}` : ''}` };
+        }
+        return { ...rest, conflictsWithIndex: target };
     }
-    const idx = typeof r.supersedesIndex === 'string' ? Number(r.supersedesIndex) : r.supersedesIndex;
-    if (idx === undefined || !Number.isInteger(idx) || idx < 0) {
-        const { supersedesIndex, ...rest } = r;
-        return rest;
+    if (r.status !== 'update') return rest;
+    const target = toIndex(supersedesIndex);
+    return target === undefined ? rest : { ...rest, supersedesIndex: target };
+}
+
+/**
+ * The verdict array from a consistency response, or null if there is none.
+ * JSON-mode gateways cannot return a bare array, so they wrap it
+ * (`{"results": [...]}`); a single-claim check may also come back as one bare
+ * verdict object. Exported for unit tests.
+ */
+export function coerceConsistencyResults(raw: unknown): ConsistencyResult[] | null {
+    const isVerdict = (v: unknown): v is ConsistencyResult =>
+        !!v && typeof v === 'object' && typeof (v as ConsistencyResult).status === 'string';
+    if (Array.isArray(raw)) return raw.filter(isVerdict);
+    if (isVerdict(raw)) return [{ ...raw, claimIndex: raw.claimIndex ?? 0 }];
+    if (raw && typeof raw === 'object') {
+        const inner = Object.values(raw).find(Array.isArray);
+        if (inner) return inner.filter(isVerdict);
     }
-    return { ...r, supersedesIndex: idx };
+    return null;
+}
+
+/** A non-negative integer index from a model-emitted value, else undefined. */
+function toIndex(value: unknown): number | undefined {
+    const idx = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+    return typeof idx === 'number' && Number.isInteger(idx) && idx >= 0 ? idx : undefined;
 }
 
 // ── Market research ─────────────────────────────────────────────────────────

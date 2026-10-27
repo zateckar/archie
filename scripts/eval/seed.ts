@@ -15,8 +15,9 @@
  *     until real feedback accumulates.
  *
  *  2. The knowledge graph — for well-populated topics, emit "what is X" style
- *     probes with the topic itself as the expected result and one of its own
- *     claims as an expected substring. These are weak by construction (they
+ *     probes with the topic itself as the expected result and the claim that
+ *     best defines it as an expected substring (see probe.ts for why not the
+ *     longest one). These are weak by construction (they
  *     mostly test that a topic can retrieve itself) and exist to give the set
  *     shape; the real value comes from editing them into questions people
  *     actually ask, with the topics that *should* answer them.
@@ -26,6 +27,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { db } from '../../src/lib/server/db.ts';
+import { blobToVector } from '../../src/lib/server/claim-similarity.ts';
+import { pickDefiningClaim, fragmentForProbe, isProbeableTopic } from './probe.ts';
 import type { GoldenSet, GoldenCase } from './types.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -88,36 +91,43 @@ for (const f of feedback) {
 const remaining = Math.max(0, COUNT - drafts.length);
 if (remaining > 0) {
     const topics = db.prepare(`
-        SELECT t.id, t.name, t.description, COUNT(kc.id) AS claim_count
+        SELECT t.id, t.name, t.embedding, COUNT(kc.id) AS claim_count
         FROM topics t
         JOIN knowledge_claims kc ON kc.topic_id = t.id AND kc.status = 'active'
         GROUP BY t.id
         HAVING claim_count >= 3
         ORDER BY claim_count DESC
         LIMIT ?
-    `).all(remaining * 2) as { id: number; name: string; description: string | null; claim_count: number }[];
+    `).all(remaining * 20) as { id: number; name: string; embedding: Buffer | null; claim_count: number }[];
+
+    const claimsOf = db.prepare(
+        "SELECT claim_text, claim_type, embedding FROM knowledge_claims WHERE topic_id = ? AND status = 'active'"
+    );
 
     for (const t of topics) {
         if (drafts.length >= COUNT) break;
+        if (!isProbeableTopic(t.name)) continue;
         const id = `topic-${t.id}`;
         const query = `Co je ${t.name}?`;
         if (seenIds.has(id) || seenQueries.has(query.toLowerCase())) continue;
 
-        const claim = db.prepare(
-            "SELECT claim_text FROM knowledge_claims WHERE topic_id = ? AND status = 'active' ORDER BY LENGTH(claim_text) DESC LIMIT 1"
-        ).get(t.id) as { claim_text: string } | undefined;
-
+        // The claim that says what the topic IS, not its longest rule; a topic
+        // with no such claim gets no probe rather than a mismatched one.
+        const claims = (claimsOf.all(t.id) as { claim_text: string; claim_type: string; embedding: Buffer | null }[])
+            .map((c) => ({ ...c, embedding: blobToVector(c.embedding) }));
+        const claim = pickDefiningClaim({ name: t.name, embedding: blobToVector(t.embedding) }, claims);
         // A distinctive fragment, not the whole sentence: full-sentence matching
         // breaks the moment the claim is re-extracted with different wording.
-        const fragment = claim?.claim_text.split(/\s+/).slice(0, 8).join(' ');
+        const fragment = claim && fragmentForProbe(claim.claim_text);
+        if (!fragment) continue;
 
         drafts.push({
             id,
             query,
             expectedTopics: [t.name],
-            expectedClaimSubstrings: fragment ? [fragment] : undefined,
+            expectedClaimSubstrings: [fragment],
             reviewed: false,
-            note: `Auto-generated probe (${t.claim_count} active claims). Rewrite as a question a person would ask, and set the topics that should genuinely answer it.`
+            note: `Auto-generated probe (${t.claim_count} active claims; expects: "${claim.claim_text}"). Rewrite as a question a person would ask, and set the topics that should genuinely answer it.`
         });
         seenIds.add(id);
     }

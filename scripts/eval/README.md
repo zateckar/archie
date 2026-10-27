@@ -17,7 +17,12 @@ have never been measured:
 | `COMMUNITY_REPORT_MIN_SIZE = 3` | `communities.ts` | Smallest community that gets a report |
 | `ALIGNMENT_SIMILARITY_THRESHOLD = 0.35` | `knowledge.ts` | Claim → `flagged` |
 | `CHUNK_COVERAGE_THRESHOLD = 0.8` | `rag.ts` | Semantic-chunk fallback trigger |
-| `1.5×` negation boost | `rag.ts` | Yes/no query claim ranking |
+| `MIN_FILLER_CLAIM_RELEVANCE = 0.3` | `rag.ts` | Topic-restricted claims allowed into spare slots |
+| `CHAT_SYNTHESIS` (`auto`/`off`/`always`) | env, `chat-pipeline.ts` | Whether context is rewritten before answering |
+| `CHAT_VERBATIM_CHUNKS` (default 3) | env, `chat-pipeline.ts` | Verbatim passages on the primary pass |
+
+(The `1.5×` negation boost that used to be listed here was removed: it was
+applied after selection and could not change what the model saw.)
 
 Moving any of them is currently a coin flip. With a golden set, it's a
 measurement.
@@ -87,17 +92,60 @@ npm run eval -- --json after.json
 
 and diff the two summaries.
 
+```bash
+npm run eval -- --area application-integration   # one subject area
+npm run eval -- --raw                            # skip query analysis
+npm run eval -- --answers                        # also generate + judge answers
+CHAT_SYNTHESIS=off npm run eval -- --answers --json raw.json   # A/B the synthesis pass
+```
+
 ## What it measures
 
-Retrieval only — no answer generation. The same query against the same corpus
-should retrieve the same things, so a score that moves means the pipeline
-changed rather than the chat model phrasing itself differently. Embedding calls
-still hit the provider, so a run is not free.
+By default the query first goes through `analyzeAndCondenseQuery`, exactly as a
+chat turn does, and its keyword sets drive retrieval (`--raw` skips that). Before
+2026-10 the harness skipped it, so it scored a code path no user hit.
 
 - **topic recall / precision / MRR** over `searchTopics(query, k, floor, rerank)`
-- **claim hit rate** — expected substrings present in `buildKnowledgeContext(query).text`
+- **claim hit rate** — expected substrings present in the knowledge context or the retrieved passages
+- **source recall** — `expectedSources` (path substrings) among the verbatim chunks the chat would retrieve
 - **leaks** — `mustNotRetrieve` substrings that appeared anyway
 - **latency** — median per case
+
+With `--answers`, each case also builds the real answer context
+(`buildAnswerContext`), generates the answer and has an LLM judge
+(`judge.ts`) report:
+
+- **answer facts** — which of the expert-written `expectedFacts` the answer states correctly
+- **unsupported** — answer statements the retrieved context does not support (hallucination signal)
+- **cited** — share of factual statements carrying an inline `[source]`
+- **off-topic** — answers that do not address the question asked (answer a
+  different question, or lead with an incidental rule when asked what something
+  is). An off-topic answer fails the case even if it states every expected fact.
+
+This is the only mode that says whether answers are *right*, and the way to
+choose `CHAT_SYNTHESIS` and `CHAT_VERBATIM_CHUNKS` on evidence. It costs several
+model calls per case, and the judge is itself a model: compare aggregates across
+runs and read the per-case lists before trusting a single number.
+
+## Case fields
+
+| Field | Used for |
+|---|---|
+| `query` | The question, as a user would ask it (Czech or English) |
+| `expectedTopics` | Topic recall/MRR. Brittle while the graph has synonym topics — leave empty if unsure |
+| `expectedClaimSubstrings` | Short verbatim fragments that must reach the context |
+| `expectedSources` | Path substrings of documents that should supply passages |
+| `expectedFacts` | Plain-language facts a correct answer states (`--answers`) |
+| `mustNotRetrieve` | Regressions to lock out |
+| `area` | `--area` filter |
+| `reviewed` | Only reviewed cases run by default |
+
+The `application-integration` cases were drafted from `integration-rules.md` and
+`integration-patterns-guide.md` and reviewed by the domain expert on 2026-10-27.
+
+Before running, the harness warns `STALE <id>` for any `expectedTopics` entry
+that no longer exists as a topic or alias. Topic names change when the graph is
+re-extracted, and a stale case otherwise looks like a retrieval miss.
 
 ## Sources for cases
 
@@ -107,7 +155,12 @@ still hit the provider, so a run is not free.
    worth checking back once it has rows.
 2. **Corpus probes** — auto-generated "what is X" questions over well-populated
    topics. Weak by construction (they mostly test that a topic retrieves
-   itself); they exist to give the set shape.
+   itself); they exist to give the set shape. The expected fragment comes from
+   a claim that *defines* the topic ("X is…", "X stands for…", "X je…"), never
+   a duty or a rule, and is cut at a clause boundary (`probe.ts`). Topics with
+   no defining claim, or named after a document code, get no probe. The first
+   seeder used each topic's longest claim, which produced pairs like
+   "Co je Microsoft Teams?" → "Effective June 1, 2023, placing emergency calls (such".
 3. **Regressions** — the most valuable cases you will write. When retrieval gets
    something wrong, add the query with the correct expectations, and add the
    wrong answer to `mustNotRetrieve`.

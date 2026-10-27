@@ -1,7 +1,7 @@
 import { db, getAppStateNumber, setAppState } from './db';
 import { extractKnowledge, checkConsistencyBatch, deriveTaxonomyPlacements, deriveTaxonomyFull, getEmbedding } from './llm';
 import { embedTopic, embedClaim, searchTopics, mapWithConcurrency } from './rag';
-import { normalizeTopicName, foldDiacritics } from './topic-normalize';
+import { normalizeTopicName, foldDiacritics, cleanTopicAliases } from './topic-normalize';
 import { markVectorIndexDirty } from './vector-index';
 import { inCategory } from './usage';
 import {
@@ -12,22 +12,16 @@ import {
     resolveFullRebuildInterval,
     type IntervalSource
 } from './taxonomy-schedule';
+import { cosineSimilarity, pickComparableClaims, blobToVector } from './claim-similarity';
 import crypto from 'crypto';
 
 export { normalizeTopicName };
 
-/** Cosine similarity between two equal-length vectors. */
-function cosineSimilarity(a: Float32Array, b: Float32Array): number {
-    let dot = 0, normA = 0, normB = 0;
-    const len = Math.min(a.length, b.length);
-    for (let i = 0; i < len; i++) {
-        dot += a[i] * b[i];
-        normA += a[i] * a[i];
-        normB += b[i] * b[i];
-    }
-    const denom = Math.sqrt(normA) * Math.sqrt(normB);
-    return denom > 0 ? dot / denom : 0;
-}
+/**
+ * Most existing claims the consistency checker is shown for one topic. Beyond
+ * this, the ones closest to the new claims are picked (see pickComparableClaims).
+ */
+const MAX_COMPARABLE_CLAIMS = 40;
 
 // Minimum cosine similarity between a claim and its assigned topic's stored
 // embedding for the semantic fallback (below) to consider them aligned.
@@ -62,13 +56,17 @@ const ALIGNMENT_SIMILARITY_THRESHOLD = 0.35;
  * (`/api/knowledge/topics/:id/claims?status=flagged`).
  */
 async function validateClaimTopicAlignment(claimText: string, topicName: string, topicId: number): Promise<boolean> {
-    const normalized = topicName.toLowerCase();
-    const words = normalized.split(/[\s\-_]+/).filter(w => w.length > 3);
-    const claimLower = claimText.toLowerCase();
+    const fold = (s: string) => foldDiacritics(s.toLowerCase());
+    const wordsOf = (s: string) => fold(s).split(/[\s\-_]+/).filter(w => w.length > 3);
+    const words = wordsOf(topicName);
+    if (words.length < 2) return true;
 
-    // Tier 1: literal word overlap (fast path, no API call)
-    const matchCount = words.filter(w => claimLower.includes(w)).length;
-    if (matchCount >= 1 || words.length < 2) return true;
+    // Tier 1: literal word overlap (fast path, no API call). The topic's aliases
+    // count too: topic names are English while claims keep the source language,
+    // so a Czech claim usually shares words with the Czech alias, not the name.
+    const claimFolded = fold(claimText);
+    const candidates = [...words, ...topicAliasNames(topicId).flatMap(wordsOf)];
+    if (candidates.some(w => claimFolded.includes(w))) return true;
 
     // Tier 2: embedding similarity fallback
     try {
@@ -282,16 +280,70 @@ function lookupTopicId(name: string, topicIds: Map<string, number>): number | un
     if (!key) return undefined;
     try {
         const row = db.prepare('SELECT id FROM topics WHERE canonical_key = ?').get(key) as { id: number } | undefined;
-        if (row) {
+        const id = row?.id ?? topicIdForAliasKey(key);
+        if (id) {
             // Memoise so siblings resolve it without another query.
-            topicIds.set(`__key__:${key}`, row.id);
-            topicIds.set(name, row.id);
-            return row.id;
+            topicIds.set(`__key__:${key}`, id);
+            topicIds.set(name, id);
+            return id;
         }
     } catch (err) {
         console.warn(`[Knowledge] canonical_key lookup failed for "${name}":`, (err as Error).message);
     }
     return undefined;
+}
+
+/**
+ * The one topic an alias key names, or undefined when there is none or the key
+ * is ambiguous (an acronym shared by several topics must not pick one at random).
+ */
+function topicIdForAliasKey(key: string): number | undefined {
+    if (!key) return undefined;
+    try {
+        const rows = db.prepare('SELECT DISTINCT topic_id FROM topic_aliases WHERE alias_key = ? LIMIT 2').all(key) as { topic_id: number }[];
+        return rows.length === 1 ? rows[0].topic_id : undefined;
+    } catch {
+        return undefined; // pre-migration database
+    }
+}
+
+/**
+ * An existing topic that an extracted topic is the same concept as, judged by
+ * names alone: an existing topic whose canonical name equals one of the new
+ * topic's aliases (a legacy Czech-named topic, typically), or an existing alias
+ * equal to the new name or one of its aliases. This is what lets "Recovery Team"
+ * {aliases: ["Tým obnovy"]} land on an existing "Tým obnovy" topic.
+ */
+function resolveByAlias(key: string, aliases: { key: string }[], topicIds: Map<string, number>): number | undefined {
+    for (const alias of aliases) {
+        const byName = topicIds.get(`__key__:${alias.key}`)
+            ?? (db.prepare('SELECT id FROM topics WHERE canonical_key = ?').get(alias.key) as { id: number } | undefined)?.id;
+        if (byName) return byName;
+    }
+    for (const k of [key, ...aliases.map(a => a.key)]) {
+        const byAlias = topicIdForAliasKey(k);
+        if (byAlias) return byAlias;
+    }
+    return undefined;
+}
+
+function recordTopicAliases(topicId: number, aliases: { alias: string; key: string }[]): void {
+    if (aliases.length === 0) return;
+    try {
+        const insert = db.prepare('INSERT OR IGNORE INTO topic_aliases (topic_id, alias, alias_key) VALUES (?, ?, ?)');
+        for (const a of aliases) insert.run(topicId, a.alias, a.key);
+    } catch (err) {
+        console.warn(`[Knowledge] Could not record aliases for topic ${topicId}:`, (err as Error).message);
+    }
+}
+
+/** All aliases of a topic, for the alignment check. */
+function topicAliasNames(topicId: number): string[] {
+    try {
+        return (db.prepare('SELECT alias FROM topic_aliases WHERE topic_id = ?').all(topicId) as { alias: string }[]).map(r => r.alias);
+    } catch {
+        return [];
+    }
 }
 
 /**
@@ -430,6 +482,8 @@ const EMPTY_CHUNK_STATS: ChunkStats = {
 interface IngestContext {
     docId: number;
     docContentHash: string | null;
+    /** Path (or filename) of the document, shown to the consistency checker as provenance. */
+    docLabel: string | null;
     documentSummary?: string;
     topicIds: Map<string, number>;
     droppedRelTypes: Map<string, number>;
@@ -469,12 +523,13 @@ async function processDocumentKnowledgeImpl(docId: number, chunks: { id: number;
         return;
     }
 
-    const docRow = db.prepare('SELECT content_hash FROM documents WHERE id = ?').get(docId) as
-        { content_hash: string | null } | undefined;
+    const docRow = db.prepare('SELECT content_hash, path, filename FROM documents WHERE id = ?').get(docId) as
+        { content_hash: string | null; path: string | null; filename: string } | undefined;
 
     const ctx: IngestContext = {
         docId,
         docContentHash: docRow?.content_hash ?? null,
+        docLabel: docRow ? (docRow.path || docRow.filename) : null,
         documentSummary,
         // Seed the per-document map with everything we already know so the LLM's
         // topic names are folded into existing canonical entries.
@@ -683,10 +738,10 @@ async function extractAndUpsertTopics(
     // JSON response on one attempt is often clean on the next) — and if it
     // still fails, mark the chunk so the failure is visible instead of being
     // silently swallowed with just a console.error.
-    let knowledge = await extractKnowledge(contextualizedChunk, existingNames, ctx.documentSummary);
+    let knowledge = await extractKnowledge(contextualizedChunk, existingNames, ctx.documentSummary, ctx.docLabel);
     if (knowledge === null) {
         console.warn(`[Knowledge] Extraction failed for chunk ${chunk.id} (doc ${ctx.docId}), retrying once...`);
-        knowledge = await extractKnowledge(contextualizedChunk, existingNames, ctx.documentSummary);
+        knowledge = await extractKnowledge(contextualizedChunk, existingNames, ctx.documentSummary, ctx.docLabel);
     }
     if (knowledge === null) {
         console.error(`[Knowledge] Extraction failed for chunk ${chunk.id} (doc ${ctx.docId}) after retry — this chunk's knowledge was NOT extracted.`);
@@ -713,10 +768,12 @@ async function extractAndUpsertTopics(
     for (const topic of knowledge.topics) {
         if (!topic?.name) continue;
         const { displayName, key } = normalizeTopicName(topic.name);
+        const aliases = cleanTopicAliases(topic.aliases, key);
 
         try {
-            // First, try to reuse an existing topic with the same canonical key.
-            let topicId = topicIds.get(`__key__:${key}`);
+            // First, try to reuse an existing topic with the same canonical key,
+            // then one that the names say is the same concept.
+            let topicId = topicIds.get(`__key__:${key}`) ?? resolveByAlias(key, aliases, topicIds);
 
             if (!topicId) {
                 // Upsert keyed on canonical_key (not name) so that two differently
@@ -772,6 +829,13 @@ async function extractAndUpsertTopics(
             topicIds.set(topic.name, topicId);
             topicIds.set(displayName, topicId);
             topicIds.set(`__key__:${key}`, topicId);
+
+            // The extracted name is an alias too when it landed on a topic with
+            // a different canonical name (e.g. on a legacy Czech-named topic).
+            const canonicalKey = (db.prepare('SELECT canonical_key FROM topics WHERE id = ?').get(topicId) as
+                { canonical_key: string | null } | undefined)?.canonical_key;
+            recordTopicAliases(topicId, [...aliases, { alias: displayName, key }].filter(a => a.key !== canonicalKey));
+            for (const a of aliases) topicIds.set(a.alias, topicId);
 
             // Link document to topic
             db.prepare('INSERT OR IGNORE INTO document_topics (doc_id, topic_id) VALUES (?, ?)').run(
@@ -956,15 +1020,36 @@ async function processRelationshipsAndClaims(
     await mapWithConcurrency(topicWork, CLAIM_CONCURRENCY, async ([topicId, claims]) => {
         if (ctx.aborted) return;
 
-        // `id` comes along so an `update` verdict can retire the specific
-        // claim it replaces; the checker refers to them by list position.
-        const existingClaims = db
-            .prepare("SELECT id, claim_text FROM knowledge_claims WHERE topic_id = ? AND status = 'active' ORDER BY id")
-            .all(topicId) as { id: number; claim_text: string }[];
+        // `id` comes along so an `update` or `conflict` verdict can point at
+        // the specific claim; the checker refers to them by list position.
+        const allExisting = (db
+            .prepare(`
+                SELECT kc.id, kc.claim_text, kc.embedding, COALESCE(d.path, d.filename) AS source
+                FROM knowledge_claims kc
+                LEFT JOIN documents d ON d.id = kc.doc_id
+                WHERE kc.topic_id = ? AND kc.status = 'active'
+                ORDER BY kc.id
+            `)
+            .all(topicId) as { id: number; claim_text: string; embedding: Buffer | null; source: string | null }[])
+            .map(c => ({ ...c, embedding: blobToVector(c.embedding) }));
+
+        // Hub topics: show the checker only the existing claims nearest the new
+        // ones. The query-side embeddings are the same cached RETRIEVAL_QUERY
+        // vectors the alignment check uses.
+        let existingClaims = allExisting;
+        if (allExisting.length > MAX_COMPARABLE_CLAIMS) {
+            try {
+                const newVectors = await Promise.all(claims.map(c => getEmbedding(c.claim, 'RETRIEVAL_QUERY')));
+                existingClaims = pickComparableClaims(allExisting, newVectors, MAX_COMPARABLE_CLAIMS);
+            } catch (err) {
+                console.warn(`[Knowledge] Could not narrow ${allExisting.length} existing claims on topic ${topicId}; comparing against all:`, (err as Error).message);
+            }
+        }
 
         const batchResults = await checkConsistencyBatch(
             claims.map(c => c.claim),
-            existingClaims.map(c => c.claim_text)
+            existingClaims.map(c => ({ text: c.claim_text, source: c.source })),
+            ctx.docLabel
         );
 
         if (ctx.aborted) return;
@@ -989,20 +1074,26 @@ async function processRelationshipsAndClaims(
             // match its assigned topic is routed to `flagged` for human review
             // regardless of what the consistency checker concluded, since a
             // conflict/update verdict against the wrong topic's claims is meaningless.
+            // A conflict counts only if its counterpart is a claim the checker
+            // was actually shown; an out-of-range index is a hallucinated pair.
+            const conflictTarget = result.status === 'conflict' && result.conflictsWithIndex !== undefined
+                ? existingClaims[result.conflictsWithIndex]
+                : undefined;
+
             let status: string;
             if (!claimData.aligned) {
                 status = 'flagged';
                 stats.flagged++;
             } else {
-                status = result.status === 'conflict' ? 'conflicting' : 'active';
+                status = conflictTarget ? 'conflicting' : 'active';
             }
 
             try {
                 const insertResult = db.prepare(
-                    `INSERT INTO knowledge_claims (topic_id, doc_id, chunk_id, claim_text, claim_hash, status, doc_content_hash, claim_type)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    `INSERT INTO knowledge_claims (topic_id, doc_id, chunk_id, claim_text, claim_hash, status, doc_content_hash, claim_type, conflicts_with)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                      RETURNING id`
-                ).get(topicId, ctx.docId, chunk.id, claimData.claim, claimHash, status, ctx.docContentHash, claimData.type || 'assertion') as { id: number } | undefined;
+                ).get(topicId, ctx.docId, chunk.id, claimData.claim, claimHash, status, ctx.docContentHash, claimData.type || 'assertion', status === 'conflicting' ? conflictTarget!.id : null) as { id: number } | undefined;
 
                 if (!insertResult) continue;
                 stats.claims++;

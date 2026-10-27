@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeTopicName, foldDiacritics } from './topic-normalize';
+import { normalizeTopicName, foldDiacritics, cleanTopicAliases } from './topic-normalize';
 
 const key = (name: string) => normalizeTopicName(name).key;
 const display = (name: string) => normalizeTopicName(name).displayName;
@@ -90,5 +90,30 @@ describe('normalizeTopicName — existing behaviour is preserved', () => {
         // fallback keeps it addressable rather than colliding every such topic
         // on the empty string.
         expect(key('数据治理')).toBe('数据治理');
+    });
+});
+
+describe('cleanTopicAliases', () => {
+    const key = normalizeTopicName('Recovery Team').key;
+
+    it('keeps distinct string aliases with their normalised keys', () => {
+        const out = cleanTopicAliases(['Tým obnovy', 'RT'], key);
+        expect(out.map(a => a.alias)).toEqual(['Tým obnovy', 'RT']);
+        expect(out[0].key).toBe(normalizeTopicName('Tým obnovy').key);
+    });
+
+    it('drops the topic name itself, diacritic/case duplicates and non-strings', () => {
+        const out = cleanTopicAliases(['recovery team', 'Tým obnovy', 'TYM OBNOVY', 42, null, ''], key);
+        expect(out.map(a => a.alias)).toEqual(['Tým obnovy']);
+    });
+
+    it('accepts anything without throwing', () => {
+        for (const raw of [undefined, null, 'Tým obnovy', { a: 1 }]) {
+            expect(cleanTopicAliases(raw, key)).toEqual([]);
+        }
+    });
+
+    it('caps the number of aliases', () => {
+        expect(cleanTopicAliases(Array.from({ length: 20 }, (_, i) => `Alias ${i}`), key, 3)).toHaveLength(3);
     });
 });

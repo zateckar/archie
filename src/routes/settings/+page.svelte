@@ -192,6 +192,7 @@
             <ul class="mt-2 space-y-1 text-xs text-dim">
                 <li><code class="font-mono text-faint">ask</code> — a grounded, cited answer; the same pipeline as this chat</li>
                 <li><code class="font-mono text-faint">search_knowledge</code> — topics and facts, without writing an answer</li>
+                <li><code class="font-mono text-faint">search_documents</code> — verbatim passages from the documents, for quoting or checking a fact</li>
                 <li><code class="font-mono text-faint">list_conversations</code> / <code class="font-mono text-faint">get_conversation</code> — your threads, shared with this page</li>
                 <li><code class="font-mono text-faint">pin_conversation</code> / <code class="font-mono text-faint">delete_conversation</code> — the same rules as the sidebar</li>
                 <li><code class="font-mono text-faint">rate_answer</code> — thumbs up or down on an answer</li>

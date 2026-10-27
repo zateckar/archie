@@ -26,6 +26,7 @@ import {
     warmVectorIndexes
 } from './vector-index';
 import { inCategory } from './usage';
+import { selectContextClaims, topicsToAdopt, type ContextClaim } from './context-claims';
 
 /**
  * Escapes the LIKE metacharacters `%` and `_` (and the escape character itself)
@@ -97,6 +98,17 @@ export async function mapWithConcurrency<T, R>(
 }
 
 const EMBED_CONCURRENCY = 5;
+
+/**
+ * The text a chunk is embedded as: its document path, then the chunk. Every
+ * path that writes a chunk embedding goes through here. `reembedAll` used to
+ * embed the bare chunk while ingestion prefixed the path, so after any
+ * dimension migration the whole corpus represented chunks differently from
+ * documents ingested afterwards.
+ */
+function chunkEmbeddingText(documentLabel: string, chunk: string): string {
+    return `Document: ${documentLabel}\n\n${chunk}`;
+}
 
 // ── Embedding dimension configuration ───────────────────────────────────────
 // Fallback dimension used ONLY when a vector index needs to be initialized
@@ -274,7 +286,7 @@ async function addDocumentImpl(
     // semanticChunkSection for the 80%-coverage safety check).
     const chunks = await semanticChunkDocument(cleanedContent, filename);
     // Enrich chunks with metadata for better embedding context
-    const chunksWithMetadata = chunks.map(chunk => `Document: ${metadata.path || filename}\n\n${chunk}`);
+    const chunksWithMetadata = chunks.map(chunk => chunkEmbeddingText(metadata.path || filename, chunk));
 
     // Fetch all embeddings before opening any transaction. Independent calls,
     // so run them with bounded concurrency instead of one at a time.
@@ -409,7 +421,18 @@ async function ensureVectorInit() {
  * Generate and store embedding for a topic. Called when topic is created or updated.
  */
 export async function embedTopic(topicId: number, name: string, description: string | null, category: string | null) {
-    const embeddingText = `Topic: ${name}\nCategory: ${category || 'Uncategorized'}\nDescription: ${description || 'No description'}`;
+    // Aliases (the Czech term, acronyms) go into the embedding so a question
+    // phrased with the source's own term still lands near the English-named topic.
+    let aliases: string[] = [];
+    try {
+        aliases = (db.prepare('SELECT alias FROM topic_aliases WHERE topic_id = ?').all(topicId) as { alias: string }[]).map(r => r.alias);
+    } catch {
+        // pre-migration database
+    }
+    const embeddingText =
+        `Topic: ${name}\n` +
+        (aliases.length > 0 ? `Also known as: ${aliases.join(', ')}\n` : '') +
+        `Category: ${category || 'Uncategorized'}\nDescription: ${description || 'No description'}`;
     const embedding = await getEmbedding(embeddingText, "RETRIEVAL_DOCUMENT", name);
     // Topics have no FTS fallback — searchTopics is pure vector — so a
     // wrong-dimension row here is a topic that can never be retrieved again.
@@ -573,13 +596,13 @@ async function reembedAllImpl(): Promise<{ chunks: number; topics: number; claim
     };
 
     // 2. Re-embed chunks (from their existing, already-cleaned content).
-    const chunkRows = db.prepare('SELECT c.id, c.content, d.filename FROM chunks c JOIN documents d ON c.doc_id = d.id').all() as
-        { id: number; content: string; filename: string }[];
+    const chunkRows = db.prepare('SELECT c.id, c.content, d.filename, d.path FROM chunks c JOIN documents d ON c.doc_id = d.id').all() as
+        { id: number; content: string; filename: string; path: string | null }[];
     console.log(`[Reembed] Re-embedding ${chunkRows.length} chunks...`);
     const chunkEmbeddings = await mapWithConcurrency(
         chunkRows,
         EMBED_CONCURRENCY,
-        (row) => getEmbedding(row.content, 'RETRIEVAL_DOCUMENT', row.filename)
+        (row) => getEmbedding(chunkEmbeddingText(row.path || row.filename, row.content), 'RETRIEVAL_DOCUMENT', row.filename)
     );
     // A fallback partway through THIS batch is the worst case for the whole
     // system: a re-embed exists to make the corpus uniform, so finishing one that
@@ -1061,7 +1084,7 @@ async function embedAndStoreChunks(
     options: { replaceExisting?: boolean } = {}
 ): Promise<string[]> {
     const chunks = await semanticChunkDocument(content, filename);
-    const chunksWithMetadata = chunks.map((chunk) => `Document: ${pathHint || filename}\n\n${chunk}`);
+    const chunksWithMetadata = chunks.map((chunk) => chunkEmbeddingText(pathHint || filename, chunk));
 
     // Independent calls — fetch with bounded concurrency, then write sequentially
     // (DB writes are cheap/synchronous; only the network-bound embedding calls
@@ -1254,40 +1277,18 @@ const MIN_TOPIC_RELEVANCE = 0.45;
 const MIN_CLAIM_RELEVANCE = 0.4;
 
 /**
- * Words that mark a query as asking whether something is permitted/required, as
- * opposed to asking what something is. `buildKnowledgeContext` boosts
- * negation/condition/boundary claims when one is present, because those are the
- * claims that actually answer such a question.
+ * Floor for the topic-restricted filler search in buildKnowledgeContext. Lower
+ * than MIN_CLAIM_RELEVANCE because the topic filter has already established
+ * relevance; this only keeps a topic's plainly unrelated claims out of the
+ * spare slots.
  *
- * The list was English-only, which made the boost dead code on this corpus —
- * measured as producing no boost: "Kdo musí schválit bezpečnostní řízení?",
- * "Lze změnit řízení projektů?", "Může vedoucí zamítnout žádost?". The
- * consequence is the worst kind: the governing exception keeps its base score,
- * loses the ordering contest to plainly-worded assertions, falls outside the
- * maxClaims cut, and the model answers confidently from general assertions while
- * the rule that contradicts it sits unretrieved in the graph.
- *
- * Unicode lookarounds rather than `\b`, which is ASCII-only and places a false
- * boundary between an accented letter and an adjacent ASCII run — that is how
- * short alternatives like "is" or "may" could match *inside* an accented Czech
- * word and boost on a query that asks nothing. (Same mechanism that truncated
- * "ČSN" to "SN" in llm.ts's acronym extractor.)
- *
- * Exported so the eval harness can cover it; see scripts/eval/README.md.
+ * (A ×1.5 "interrogative boost" for negation/condition/boundary claims used to
+ * live near here. It was removed: it ran after selection and multiplied every
+ * constraint claim by the same factor, and constraints render in their own
+ * list, so it could not change what the model saw. If constraint claims need
+ * priority, it has to happen at selection and be measured with the eval harness.)
  */
-export const INTERROGATIVE_WORDS = [
-    // English
-    'does', 'can', 'is', 'should', 'will', 'could', 'would', 'may', 'might', 'must',
-    // Czech modals and interrogatives
-    'musí', 'může', 'lze', 'smí', 'má', 'mají', 'je', 'jsou',
-    'kdo', 'kdy', 'jak', 'jaká', 'jaké', 'jaký', 'který', 'která', 'které',
-    'nutné', 'povinné', 'zakázáno', 'povoleno'
-];
-
-const INTERROGATIVE_PATTERN = new RegExp(
-    `(?<![\\p{L}\\p{N}])(?:${INTERROGATIVE_WORDS.join('|')})(?![\\p{L}\\p{N}])`,
-    'iu'
-);
+const MIN_FILLER_CLAIM_RELEVANCE = 0.3;
 
 /**
  * Relevance floor for community reports. Lower than the topic floor on purpose:
@@ -1469,7 +1470,7 @@ export async function searchClaims(
     limit = 20,
     minScore = MIN_CLAIM_RELEVANCE,
     useRerank = false
-): Promise<{ id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number; claim_type: string; filename: string; path: string | null }[]> {
+): Promise<{ id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number; claim_type: string; filename: string; path: string | null; repo_id: number | null }[]> {
     await ensureEmbeddingsMigrated();
     const queryEmbedding = await getEmbedding(query, "RETRIEVAL_QUERY");
 
@@ -1490,7 +1491,7 @@ export async function searchClaims(
             buildSql = scan => `
                 SELECT kc.id, kc.claim_text, kc.topic_id, kc.doc_id, t.name as topic_name,
                        COALESCE(kc.claim_type, 'assertion') as claim_type,
-                       COALESCE(d.filename, '') as filename, d.path,
+                       COALESCE(d.filename, '') as filename, d.path, d.repo_id,
                        (1 - v.distance) as score
                 FROM ${scan}('knowledge_claims', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
                 JOIN knowledge_claims kc ON kc.id = v.rowid
@@ -1506,7 +1507,7 @@ export async function searchClaims(
             buildSql = scan => `
                 SELECT kc.id, kc.claim_text, kc.topic_id, kc.doc_id, t.name as topic_name,
                        COALESCE(kc.claim_type, 'assertion') as claim_type,
-                       COALESCE(d.filename, '') as filename, d.path,
+                       COALESCE(d.filename, '') as filename, d.path, d.repo_id,
                        (1 - v.distance) as score
                 FROM ${scan}('knowledge_claims', 'embedding', vector_as_f32(?), CAST(? AS INTEGER)) v
                 JOIN knowledge_claims kc ON kc.id = v.rowid
@@ -1521,7 +1522,7 @@ export async function searchClaims(
 
         const results = runVectorScan('knowledge_claims', buildSql, sql =>
             db.prepare(sql).all(...params)
-        ) as { id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number; claim_type: string; filename: string; path: string | null }[];
+        ) as { id: number; claim_text: string; topic_name: string; topic_id: number; doc_id: number; score: number; claim_type: string; filename: string; path: string | null; repo_id: number | null }[];
         const filtered = results.filter(r => r.score >= minScore);
 
         if (!useRerank || filtered.length <= limit) {
@@ -1632,44 +1633,36 @@ export function getTopicClaims(topicIds: number[], status = 'active'): { id: num
 }
 
 /**
- * Get active AND conflicting claims for a set of topics, tagged with their
- * status. Unlike `getTopicClaims('active')`, this surfaces `conflicting`
- * claims too (capped per topic) so callers can present documented
- * contradictions instead of silently hiding them. Previously, claims flagged
- * `conflicting` by the consistency checker were written to the DB but never
- * read back by anything — `synthesizeContext`'s prompt explicitly asks the
- * model to "note contradictions or gaps", but it never had any contradictory
- * material to work with because this data path excluded them entirely.
+ * `conflicting` claims for a set of topics, capped per topic, so callers can
+ * present documented contradictions instead of silently hiding them. Active
+ * claims are not read here any more: the context's spare slots are filled by a
+ * topic-restricted semantic search (see buildKnowledgeContext), not by a
+ * topic's claims in creation order.
  */
-export function getTopicClaimsWithConflicts(
+export function getConflictingClaims(
     topicIds: number[],
     maxConflictingPerTopic = 3
-): { id: number; claim_text: string; topic_name: string; topic_id: number; claim_type: string; filename: string; path: string | null; status: string }[] {
+): { id: number; claim_text: string; topic_name: string; topic_id: number; claim_type: string; filename: string; path: string | null; repo_id: number | null }[] {
     if (topicIds.length === 0) return [];
 
     const placeholders = topicIds.map(() => '?').join(',');
-    const sql = `
+    const rows = db.prepare(`
         SELECT kc.id, kc.claim_text, kc.topic_id, t.name as topic_name,
                COALESCE(kc.claim_type, 'assertion') as claim_type,
-               COALESCE(d.filename, '') as filename, d.path, kc.status
+               COALESCE(d.filename, '') as filename, d.path, d.repo_id
         FROM knowledge_claims kc
         JOIN topics t ON kc.topic_id = t.id
         LEFT JOIN documents d ON kc.doc_id = d.id
         WHERE kc.topic_id IN (${placeholders})
-          AND kc.status IN ('active', 'conflicting')
-        ORDER BY kc.topic_id, kc.status, kc.created_at
-    `;
+          AND kc.status = 'conflicting'
+        ORDER BY kc.topic_id, kc.created_at
+    `).all(...topicIds) as { id: number; claim_text: string; topic_name: string; topic_id: number; claim_type: string; filename: string; path: string | null; repo_id: number | null }[];
 
-    const rows = db.prepare(sql).all(...topicIds) as { id: number; claim_text: string; topic_name: string; topic_id: number; claim_type: string; filename: string; path: string | null; status: string }[];
-
-    // Cap conflicting claims per topic so a topic with a long history of
-    // superseded/contradicted claims doesn't crowd out the active facts.
-    const conflictingCountByTopic = new Map<number, number>();
+    const countByTopic = new Map<number, number>();
     return rows.filter(r => {
-        if (r.status !== 'conflicting') return true;
-        const count = conflictingCountByTopic.get(r.topic_id) ?? 0;
+        const count = countByTopic.get(r.topic_id) ?? 0;
         if (count >= maxConflictingPerTopic) return false;
-        conflictingCountByTopic.set(r.topic_id, count + 1);
+        countByTopic.set(r.topic_id, count + 1);
         return true;
     });
 }
@@ -1683,6 +1676,12 @@ export interface KnowledgeContextResult {
     communityCount: number;
     /** True when topics were seeded from a community because nothing else matched. */
     thematicFallbackUsed: boolean;
+    /**
+     * Documents the rendered claims come from, de-duplicated. The chat's source
+     * list used to be built from verbatim chunks alone, so a document that only
+     * reached the answer through the knowledge graph was never listed.
+     */
+    sources: { filename: string; path: string | null; repo_id: number | null }[];
 }
 
 /**
@@ -1788,12 +1787,17 @@ export async function buildKnowledgeContext(
                 // `description` has no folded equivalent, hence fold() — which
                 // full-scans. Acceptable only because this is the rare
                 // last-resort path before "No relevant knowledge found".
+                // Aliases matter most here: topic names are English, so a Czech
+                // query word can only match a Czech alias or the description.
                 const likeConditions = words
-                    .map(() => "(canonical_key LIKE ? ESCAPE '\\' OR fold(COALESCE(description, '')) LIKE ? ESCAPE '\\')")
+                    .map(() =>
+                        "(canonical_key LIKE ? ESCAPE '\\' OR fold(COALESCE(description, '')) LIKE ? ESCAPE '\\'" +
+                        " OR id IN (SELECT topic_id FROM topic_aliases WHERE alias_key LIKE ? ESCAPE '\\'))"
+                    )
                     .join(' OR ');
                 const likeParams = words.flatMap(w => {
                     const pattern = `%${escapeLikePattern(foldDiacritics(w.toLowerCase()))}%`;
-                    return [pattern, pattern];
+                    return [pattern, pattern, pattern];
                 });
                 const fallbackTopics = db.prepare(
                     `SELECT id, name, description, category FROM topics WHERE ${likeConditions} LIMIT ?`
@@ -1838,7 +1842,8 @@ export async function buildKnowledgeContext(
                 claimCount: 0,
                 hasConflicts: false,
                 communityCount: 0,
-                thematicFallbackUsed: false
+                thematicFallbackUsed: false,
+                sources: []
             };
         }
     }
@@ -1867,21 +1872,24 @@ export async function buildKnowledgeContext(
         }
     }
 
-    // Step 3: Get claims for all topics (primary + related), including
-    // documented conflicts so they can be surfaced rather than silently
-    // dropped (previously `status='conflicting'` claims were written to the
-    // DB but never read back by any retrieval path).
-    const topicClaims = getTopicClaimsWithConflicts(Array.from(allTopicIds));
+    // Step 3: Documented conflicts on the PRIMARY topics, so they are surfaced
+    // rather than silently dropped. Related (one-hop) topics are excluded: a
+    // dispute in a neighbouring topic the question never asked about is noise,
+    // and these claims are guaranteed a slot below.
+    const conflictingClaims = getConflictingClaims(relevantTopics.map(t => t.id));
 
     // Step 4: Semantic search for the most relevant claims. Same dual-level
     // pooling as the topic search: query probe + entity-keyword probe, merged,
-    // then one rerank pass over the union.
+    // then one rerank pass over the union. The topic-restricted search runs
+    // alongside: it supplies the filler for spare slots, ranked by relevance
+    // to the question instead of by creation date.
     const claimPoolSize = Math.max(maxClaims * 2, 20);
-    const [queryClaims, keywordClaims] = await Promise.all([
+    const [queryClaims, keywordClaims, fillerClaims] = await Promise.all([
         searchClaims(query, null, claimPoolSize, MIN_CLAIM_RELEVANCE, false),
         lowLevelProbe
             ? searchClaims(lowLevelProbe, null, claimPoolSize, MIN_CLAIM_RELEVANCE, false)
-            : Promise.resolve([] as Awaited<ReturnType<typeof searchClaims>>)
+            : Promise.resolve([] as Awaited<ReturnType<typeof searchClaims>>),
+        searchClaims(query, Array.from(allTopicIds), maxClaims, MIN_FILLER_CLAIM_RELEVANCE, false)
     ]);
 
     const pooledClaims = mergeByIdKeepingBestScore(queryClaims, keywordClaims);
@@ -1899,46 +1907,37 @@ export async function buildKnowledgeContext(
         }
     }
 
-    // Step 5: Merge and deduplicate claims, prioritizing semantic search results
-    const claimMap = new Map<number, { claim_text: string; topic_name: string; topic_id: number; score: number; claim_type: string; filename?: string; path?: string | null; status: string }>();
+    // Step 5: Merge and deduplicate claims (see ./context-claims for the rules).
+    const asContextClaim = (c: Awaited<ReturnType<typeof searchClaims>>[number], status: 'active' | 'conflicting'): ContextClaim => ({
+        id: c.id,
+        claim_text: c.claim_text,
+        topic_id: c.topic_id,
+        topic_name: c.topic_name,
+        claim_type: c.claim_type || 'assertion',
+        filename: c.filename,
+        path: c.path,
+        repo_id: c.repo_id,
+        score: c.score,
+        status
+    });
+    const selectedClaims = selectContextClaims({
+        conflicting: conflictingClaims.map(c => ({ ...c, claim_type: c.claim_type || 'assertion', score: 0.2, status: 'conflicting' as const })),
+        semantic: semanticClaims.map(c => asContextClaim(c, 'active')),
+        filler: fillerClaims.map(c => asContextClaim(c, 'active')),
+        maxClaims
+    });
 
-    // Conflicting claims are inserted FIRST and unconditionally (they're already
-    // capped per-topic at the source by getTopicClaimsWithConflicts). If these
-    // were subject to the same `claimMap.size < maxClaims` cap as everything
-    // else, a topic with many active claims — like the pre-existing "SLA
-    // Management" topic in this corpus — fills the cap before the loop ever
-    // reaches its one conflicting claim (status sorts after 'active' in the
-    // source query), silently dropping exactly the signal `getTopicClaimsWithConflicts`
-    // exists to surface. Conflicts are rare in practice, so guaranteeing them a
-    // slot doesn't meaningfully crowd out active facts.
-    for (const claim of topicClaims) {
-        if (claim.status === 'conflicting' && !claimMap.has(claim.id)) {
-            claimMap.set(claim.id, { ...claim, score: 0.2, claim_type: claim.claim_type || 'assertion' });
-        }
+    // A selected claim brings its topic into the context. Without this, claims
+    // found by the corpus-wide search whose topic missed the topic cut were
+    // selected, counted, and then never rendered.
+    for (const [topicId, score] of topicsToAdopt(selectedClaims, new Set(topicMap.keys()))) {
+        const topicRow = db.prepare('SELECT id, name, description, category FROM topics WHERE id = ?').get(topicId) as
+            { id: number; name: string; description: string | null; category: string | null } | undefined;
+        if (topicRow) topicMap.set(topicRow.id, { ...topicRow, score });
     }
 
-    for (const claim of semanticClaims) {
-        if (!claimMap.has(claim.id)) {
-            claimMap.set(claim.id, { ...claim, score: claim.score, claim_type: claim.claim_type || 'assertion', status: 'active' });
-        }
-    }
-
-    for (const claim of topicClaims) {
-        if (claim.status !== 'conflicting' && !claimMap.has(claim.id) && claimMap.size < maxClaims) {
-            claimMap.set(claim.id, { ...claim, score: 0.3, claim_type: claim.claim_type || 'assertion' });
-        }
-    }
-
-    // Boost constraint claims for question queries
-    if (INTERROGATIVE_PATTERN.test(query)) {
-        for (const [id, claim] of claimMap) {
-            if (['negation', 'condition', 'boundary'].includes(claim.claim_type)) {
-                claim.score *= 1.5;
-            }
-        }
-    }
-
-    const hasConflicts = Array.from(claimMap.values()).some(c => c.status === 'conflicting');
+    const claimMap = new Map(selectedClaims.map(c => [c.id, c]));
+    const hasConflicts = selectedClaims.some(c => c.status === 'conflicting');
     console.log(
         `[KnowledgeContext] query="${query.slice(0, 60)}" topics=${relevantTopics.length} claims=${claimMap.size} ` +
         `communities=${communities.length}` +
@@ -2080,6 +2079,19 @@ export async function buildKnowledgeContext(
         claimCount: claimMap.size,
         hasConflicts,
         communityCount: communities.length,
-        thematicFallbackUsed
+        thematicFallbackUsed,
+        sources: claimSources(selectedClaims)
     };
+}
+
+function claimSources(claims: ContextClaim[]): KnowledgeContextResult['sources'] {
+    const seen = new Set<string>();
+    const out: KnowledgeContextResult['sources'] = [];
+    for (const c of claims) {
+        const key = c.path || c.filename;
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push({ filename: c.filename ?? '', path: c.path ?? null, repo_id: c.repo_id ?? null });
+    }
+    return out;
 }

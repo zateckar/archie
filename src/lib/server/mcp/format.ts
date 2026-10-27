@@ -180,3 +180,22 @@ export function formatKnowledgeHits(topics: TopicHit[], claims: ClaimHit[]): str
 
     return parts.length > 0 ? parts.join('\n\n') : 'Nothing in the knowledge base matched that query.';
 }
+
+export interface PassageHit extends SourceLike {
+    content: string;
+}
+
+/**
+ * Verbatim document passages as text, best first. Unlike knowledge-graph claims
+ * (extracted and possibly paraphrased), these are the documents' own words, so
+ * they are what an agent should quote or check a fact against.
+ */
+export function formatPassageHits(passages: PassageHit[]): string {
+    if (passages.length === 0) return 'No document passage matched that query.';
+    return passages
+        .map((p, i) => {
+            const url = wikiUrl(p);
+            return `### [${i + 1}] ${sourceLabel(p)}${url ? ` (${url})` : ''}\n${p.content}`;
+        })
+        .join('\n\n');
+}

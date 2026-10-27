@@ -1,5 +1,21 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeConsistencyResult } from './llm';
+import { normalizeConsistencyResult, coerceConsistencyResults } from './llm';
+
+describe('coerceConsistencyResults', () => {
+    it('accepts a bare array, a wrapped array and a single verdict object', () => {
+        const v = { status: 'unique', claimIndex: 0 };
+        expect(coerceConsistencyResults([v])).toEqual([v]);
+        expect(coerceConsistencyResults({ results: [v] })).toEqual([v]);
+        expect(coerceConsistencyResults({ status: 'conflict', conflictsWithIndex: 1 }))
+            .toEqual([{ status: 'conflict', conflictsWithIndex: 1, claimIndex: 0 }]);
+    });
+
+    it('returns null when there is nothing verdict-shaped', () => {
+        expect(coerceConsistencyResults(undefined)).toBeNull();
+        expect(coerceConsistencyResults('unique')).toBeNull();
+        expect(coerceConsistencyResults({ note: 'x' })).toBeNull();
+    });
+});
 
 /**
  * `supersedesIndex` is the only value in the extraction pipeline that causes
@@ -42,14 +58,44 @@ describe('normalizeConsistencyResult', () => {
         }
     });
 
-    it('strips a target from any non-update verdict', () => {
+    it('strips a supersession target from any non-update verdict', () => {
         // A model that returns "conflict" plus an index must not retire
         // anything — conflicts are surfaced for review, not resolved silently.
-        for (const status of ['unique', 'duplicate', 'conflict'] as const) {
+        for (const status of ['unique', 'duplicate'] as const) {
             const r = normalizeConsistencyResult({ status, claimIndex: 0, supersedesIndex: 1 });
             expect(r.supersedesIndex, status).toBeUndefined();
             expect(r.status).toBe(status);
         }
+        const conflict = normalizeConsistencyResult({ status: 'conflict', claimIndex: 0, supersedesIndex: 1, conflictsWithIndex: 2 });
+        expect(conflict.supersedesIndex).toBeUndefined();
+        expect(conflict).toMatchObject({ status: 'conflict', conflictsWithIndex: 2 });
+    });
+
+    it('downgrades a conflict that does not name its counterpart', () => {
+        // Most stored conflicts were scope differences the model could not pin
+        // to a specific claim; each one put a ⚠ in front of users.
+        for (const bad of [undefined, -1, 1.5, 'E0', null]) {
+            const r = normalizeConsistencyResult({
+                status: 'conflict',
+                claimIndex: 0,
+                conflictsWithIndex: bad as unknown as number,
+                reason: 'different issuer'
+            });
+            expect(r.status, `input ${JSON.stringify(bad)}`).toBe('unique');
+            expect(r.conflictsWithIndex).toBeUndefined();
+            expect(r.reason).toContain('different issuer');
+        }
+    });
+
+    it('keeps a conflict with a numeric-string counterpart', () => {
+        const r = normalizeConsistencyResult({ status: 'conflict', claimIndex: 0, conflictsWithIndex: '0' as unknown as number });
+        expect(r).toMatchObject({ status: 'conflict', conflictsWithIndex: 0 });
+    });
+
+    it('drops a conflict counterpart from non-conflict verdicts', () => {
+        const r = normalizeConsistencyResult({ status: 'update', claimIndex: 0, supersedesIndex: 1, conflictsWithIndex: 2 });
+        expect(r.conflictsWithIndex).toBeUndefined();
+        expect(r.supersedesIndex).toBe(1);
     });
 
     it('preserves claimIndex and reason', () => {
