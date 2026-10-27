@@ -18,6 +18,7 @@
  *   - chained links `A --x B --x C`   -> split onto separate statements
  *   - reserved word `end` used as id  -> renamed
  *   - unbalanced brackets in labels   -> best-effort balancing
+ *   - `A -->|OIDC (Preferred)| B`     -> `A -->|"OIDC (Preferred)"| B`
  */
 
 /** Fenced-code diagram-type keywords Mermaid understands on the first line. */
@@ -61,6 +62,7 @@ export function sanitizeMermaid(input: string): string {
 	if (isFlowchart) {
 		src = fixSubgraphTitles(src);
 		src = fixArrowOperators(src);
+		src = quoteEdgeLabels(src);
 		src = splitChainedLinks(src);
 		src = renameReservedIds(src);
 		src = balanceLabelBrackets(src);
@@ -159,6 +161,31 @@ function fixArrowOperators(src: string): string {
 			return line
 				.replace(/(^|[^-])\s-x\s/g, '$1 --x ')
 				.replace(/(^|[^-])\s-o\s/g, '$1 --o ');
+		})
+		.join('\n');
+}
+
+/**
+ * Quote pipe-delimited edge labels that contain shape characters:
+ *   `A -->|OIDC (Preferred)| B`  -> `A -->|"OIDC (Preferred)"| B`
+ * Unquoted, Mermaid lexes `(`, `[`, `{` etc. inside the label as the start of a
+ * node shape and fails with "Expecting ... got 'PS'". Plain labels and labels
+ * that are already quoted are left alone; a stray `"` inside becomes `#quot;`.
+ */
+function quoteEdgeLabels(src: string): string {
+	return src
+		.split('\n')
+		.map((line) => {
+			if (isNonLinkLine(line)) return line;
+			return line.replace(
+				/([-=.]{2,}[>xo]?)\s*\|([^|\n]*)\|/g,
+				(match, arrow: string, label: string) => {
+					const text = label.trim();
+					if (/^".*"$/.test(text)) return match;
+					if (!/[()[\]{}<>;#&"]/.test(text)) return match;
+					return `${arrow}|"${text.replace(/"/g, '#quot;')}"|`;
+				}
+			);
 		})
 		.join('\n');
 }

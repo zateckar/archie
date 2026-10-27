@@ -19,6 +19,8 @@ import {
     buildSubject,
     exposureScore,
     isCurrentEvent,
+    isRelevantAlert,
+    isShownAlert,
     normalizeAssessment,
     normalizeEventDate,
     normalizeIdentity,
@@ -940,6 +942,44 @@ describe('normalizeAssessment', () => {
         // 1st of January and thrown away.
         expect(normalize({ ...good, alerts: [{ ...good.alerts[0], date: '2026' }] }).alerts).toHaveLength(1);
         expect(normalize({ ...good, alerts: [{ ...good.alerts[0], date: '2024' }] }).alerts).toEqual([]);
+    });
+
+    it('drops non-critical security, breach and outage alerts but keeps architecture news', () => {
+        const alerts = [
+            { severity: 'high', category: 'security', title: 'Patched XSS in admin console', date: RECENT },
+            { severity: 'medium', category: 'outage', title: 'Two-hour EU outage', date: RECENT },
+            { severity: 'high', category: 'data_breach', title: 'Vendor support portal breach', date: RECENT },
+            { severity: 'critical', category: 'security', title: 'RCE exploited in the wild', date: RECENT },
+            { severity: 'medium', category: 'strategy', title: 'Moves to subscription-only licensing', date: RECENT },
+            { severity: 'low', category: 'ownership', title: 'Acquired by a private equity firm', date: RECENT }
+        ];
+        const titles = normalize({ ...good, alerts }).alerts.map(a => a.title);
+        expect(titles).toEqual([
+            'RCE exploited in the wild',
+            'Moves to subscription-only licensing',
+            'Acquired by a private equity firm'
+        ]);
+    });
+});
+
+describe('isRelevantAlert / isShownAlert', () => {
+    it('keeps incidents only when critical', () => {
+        expect(isRelevantAlert('security', 'critical')).toBe(true);
+        expect(isRelevantAlert('security', 'high')).toBe(false);
+        expect(isRelevantAlert('data_breach', 'high')).toBe(false);
+        expect(isRelevantAlert('outage', 'medium')).toBe(false);
+    });
+
+    it('keeps every severity of architecture news', () => {
+        for (const category of ['ownership', 'strategy', 'end_of_life', 'financial', 'compliance', 'other']) {
+            expect(isRelevantAlert(category, 'low')).toBe(true);
+        }
+    });
+
+    it('requires both recency and relevance for a stored row', () => {
+        expect(isShownAlert({ category: 'security', severity: 'critical', event_date: '2026-07-01' }, TODAY)).toBe(true);
+        expect(isShownAlert({ category: 'security', severity: 'high', event_date: '2026-07-01' }, TODAY)).toBe(false);
+        expect(isShownAlert({ category: 'end_of_life', severity: 'low', event_date: '2025-01-01' }, TODAY)).toBe(false);
     });
 });
 

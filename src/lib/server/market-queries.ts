@@ -7,7 +7,7 @@ import {
     ALERT_WINDOW_MONTHS,
     VERDICT_LABELS,
     exposureScore,
-    isCurrentEvent,
+    isShownAlert,
     severityRank,
     type AlertCategory,
     type MarketAlternative,
@@ -64,7 +64,9 @@ export interface MarketAlertView {
 }
 
 /**
- * Every stored alert still dated inside the alert window.
+ * Every stored alert still dated inside the alert window and relevant to the
+ * feed — see isShownAlert. Relevance is re-checked here too, so rows stored
+ * before the incident rule existed drop out now rather than at their next refresh.
  *
  * Read-side filtering exists because the write side cannot be the whole answer.
  * normalizeAssessment refuses to store an event older than the window, but a
@@ -75,9 +77,9 @@ export interface MarketAlertView {
  * Rows are not deleted on the way past: the next refresh reconciles them anyway,
  * and a read path that quietly deletes is a read path that surprises someone.
  */
-function currentAlertRows<T extends { event_date: string | null }>(rows: T[]): T[] {
+function currentAlertRows<T extends { event_date: string | null; category: string; severity: string }>(rows: T[]): T[] {
     const now = Date.now();
-    return rows.filter(r => isCurrentEvent(r.event_date, now));
+    return rows.filter(r => isShownAlert(r, now));
 }
 
 /**
@@ -242,9 +244,9 @@ export function getAssessments(): Record<string, AssessmentView> {
  */
 export function getAlertCounts(): Record<string, { total: number; worst: Severity }> {
     const rows = currentAlertRows(db.prepare(`
-        SELECT factsheet_id, severity, event_date
+        SELECT factsheet_id, severity, category, event_date
         FROM leanix_market_alerts
-    `).all() as { factsheet_id: string; severity: Severity; event_date: string | null }[]);
+    `).all() as { factsheet_id: string; severity: Severity; category: string; event_date: string | null }[]);
 
     const out: Record<string, { total: number; worst: Severity }> = {};
     for (const row of rows) {

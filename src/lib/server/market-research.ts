@@ -6,7 +6,7 @@ import {
     ALERT_WINDOW_MONTHS,
     applyIdentity,
     briefIsEmpty,
-    isCurrentEvent,
+    isShownAlert,
     selectDue,
     type IdentityInput,
     type MarketAssessment,
@@ -496,9 +496,9 @@ export function marketResearchStatus() {
     // duplicated rule produces.
     const now = Date.now();
     const alertRows = db.prepare(
-        'SELECT severity, event_date FROM leanix_market_alerts'
-    ).all() as { severity: string; event_date: string | null }[];
-    const current = alertRows.filter(a => isCurrentEvent(a.event_date, now));
+        'SELECT severity, category, event_date FROM leanix_market_alerts'
+    ).all() as { severity: string; category: string; event_date: string | null }[];
+    const current = alertRows.filter(a => isShownAlert(a, now));
 
     return {
         configured: marketResearchConfigured(),
