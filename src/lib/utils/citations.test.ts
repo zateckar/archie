@@ -88,6 +88,15 @@ describe('linkCitations', () => {
         expect(linkCitations(md, SOURCES)).toBe(md);
     });
 
+    it('links a tag followed by a colon, but not a reference definition', () => {
+        const doc = render('Dvě varianty [system-architecture/backend-development-standards.md]:\n\n* mTLS');
+        expect(doc.querySelector('a.cite')?.getAttribute('href')).toBe(
+            '/wiki/3/system-architecture/backend-development-standards.md'
+        );
+        const def = 'Viz [ref].\n\n[EA_Integration.md]: https://example.com\n';
+        expect(linkCitations(def, SOURCES)).toBe(def);
+    });
+
     it('does not touch code', () => {
         const md = 'Kód `[EA_Integration.md]` a\n\n```\n[EA_Integration.md]\n```\n';
         expect(linkCitations(md, SOURCES)).toBe(md);

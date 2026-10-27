@@ -65,9 +65,18 @@ function indexSources(sources: CitableSource[]): Map<string, Citation> {
 
 /**
  * Code is left alone (a `[x]` in a snippet is not a citation), and a bracket
- * already followed by `(`, `[` or `:` is markdown link syntax, not a tag.
+ * already followed by `(` or `[` is markdown link syntax, not a tag. A tag
+ * followed by `:` is a citation ("…two variants [doc.md]:") unless it opens
+ * its line, where it is a reference definition — see `isReferenceDefinition`.
  */
-const CODE_OR_TAG = /(```[\s\S]*?(?:```|$)|`[^`\n]*`)|\[([^\[\]\n]+)\](?![(\[:])/g;
+const CODE_OR_TAG = /(```[\s\S]*?(?:```|$)|`[^`\n]*`)|\[([^\[\]\n]+)\](?![(\[])/g;
+
+/** `[label]: url` at the start of a line (up to three spaces of indent). */
+function isReferenceDefinition(text: string, start: number, end: number): boolean {
+    if (text[end] !== ':') return false;
+    const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+    return /^ {0,3}$/.test(text.slice(lineStart, start));
+}
 
 /**
  * Turns the answer's inline `[source]` tags into links to the cited document.
@@ -85,8 +94,9 @@ export function linkCitations(markdown: string, sources: CitableSource[] | null 
     const byKey = indexSources(sources);
     if (byKey.size === 0) return markdown;
 
-    return markdown.replace(CODE_OR_TAG, (match, code: string | undefined, tag: string | undefined) => {
+    return markdown.replace(CODE_OR_TAG, (match, code: string | undefined, tag: string | undefined, offset: number) => {
         if (code !== undefined || tag === undefined) return match;
+        if (isReferenceDefinition(markdown, offset, offset + match.length)) return match;
         const whole = byKey.get(tag.trim());
         if (whole) return citation(whole);
         // A grouped tag, "[a.md, b.md]": linked only if every part is a source,

@@ -688,14 +688,12 @@ body {
 /* Inline source citation in a chat answer (see utils/citations.ts). Quiet at
    rest so a citation-dense paragraph still reads as prose; reads as a link on
    hover or focus. A <span> variant is a cited document with no wiki page. */
+/* Stays `display: inline` so its text sits on the line's baseline: an
+   inline-block with overflow hidden aligns its bottom edge there instead,
+   which lifts the chip above the surrounding words. */
 .prose .cite {
-  display: inline-block;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
-  vertical-align: baseline;
-  padding: 0 0.4em;
+  padding: 0.1em 0.4em;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-muted);
@@ -703,7 +701,6 @@ body {
   font-family: var(--font-mono);
   font-size: 0.75em;
   font-weight: 500;
-  line-height: 1.6;
   text-decoration: none;
 }
 
