@@ -9,7 +9,7 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
     import { renderMermaidBlocksIn } from '$lib/utils/mermaidRender';
     import { theme } from '$lib/stores/theme';
     import Search from '@lucide/svelte/icons/search';
-    import ExternalLink from '@lucide/svelte/icons/external-link';
+    import { linkCitations } from '$lib/utils/citations';
     import SourceResultsPanel from '$lib/components/SourceResultsPanel.svelte';
 
     type Message = { role: 'user' | 'assistant', content: string, sources?: any[] };
@@ -26,55 +26,15 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
     let isDark = $state(true);
     theme.subscribe(t => isDark = t === 'dark');
 
+    // Sources are shown once, where they are cited: each inline [source] tag
+    // becomes a link to that document's wiki page. There is no separate list
+    // under the answer — `msg.sources` is everything retrieved, not what the
+    // answer actually relied on, so a list of it overstated the grounding.
     let renderedContent = $derived(
         msg.role === 'assistant'
-            ? sanitizeHtml(marked.parse(msg.content.replace(/\$\\rightarrow\$/g, '→')) as string)
+            ? sanitizeHtml(marked.parse(linkCitations(msg.content.replace(/\$\\rightarrow\$/g, '→'), msg.sources)) as string)
             : msg.content
     );
-
-    /**
-     * Wiki URL for a cited source, or null when there is no page to open.
-     *
-     * Both halves are required: `repo_id` identifies the repository the wiki route
-     * is scoped to, and `path` is the file within it. A document uploaded directly
-     * (rather than synced from a repository) has no repo_id and no wiki page, so
-     * its chip stays plain text instead of becoming a link to nowhere.
-     *
-     * Segments are encoded individually so the separators survive — this corpus
-     * has filenames with spaces ("ID.FI.005 IT Product shutdown management.md"),
-     * which `encodeURIComponent` on the whole path would turn into %2F-mangled
-     * nonsense. Same construction as SourceResultsPanel's deep link.
-     */
-    function wikiHref(source: any): string | null {
-        const repoId = source?.repo_id;
-        const path = source?.path;
-        if (repoId == null || typeof path !== 'string' || path === '') return null;
-        return `/wiki/${repoId}/${path.split('/').map(encodeURIComponent).join('/')}`;
-    }
-
-    /**
-     * The source chips to show under an answer: one per document, in the order the
-     * retriever ranked them.
-     *
-     * Deduplicated by path — a live answer streams one source entry per retrieved
-     * *chunk*, so two passages from the same document used to render the same file
-     * twice (the copy saved to history was already deduplicated, which made an
-     * answer's chips change when you reopened the conversation). An entry carrying
-     * a wiki link wins over one that doesn't, since the same document can arrive
-     * both ways when a second retrieval pass merges in extra chunks.
-     */
-    let sourceLinks = $derived.by(() => {
-        const byKey = new Map<string, { label: string; href: string | null }>();
-        for (const source of msg.sources ?? []) {
-            const label = source?.path || source?.filename;
-            if (typeof label !== 'string' || label === '') continue;
-            const href = wikiHref(source);
-            const existing = byKey.get(label);
-            if (existing && (existing.href || !href)) continue;
-            byKey.set(label, { label, href });
-        }
-        return Array.from(byKey.values());
-    });
 
     // Render mermaid blocks in the assistant message.
     // Suppress during streaming to avoid render-thrashing on partial blocks;
@@ -248,30 +208,6 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
                     {msg.content}
                 {/if}
             </div>
-            {#if sourceLinks.length > 0}
-                <div class="flex flex-wrap items-center gap-1.5">
-                    <span class="eyebrow">Sources</span>
-                    {#each sourceLinks as source (source.label)}
-                        {#if source.href}
-                            <a
-                                href={source.href}
-                                class="chip chip-link font-mono text-[11px]"
-                                title={`Open ${source.label} in the wiki`}
-                            >
-                                {source.label}
-                                <ExternalLink class="w-3 h-3 flex-shrink-0 opacity-60" />
-                            </a>
-                        {:else}
-                            <span
-                                class="chip font-mono text-[11px]"
-                                title={`${source.label} — no wiki page for this document`}
-                            >
-                                {source.label}
-                            </span>
-                        {/if}
-                    {/each}
-                </div>
-            {/if}
             {#if msg.role === 'assistant' && msg.content}
                 <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                     <button

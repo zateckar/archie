@@ -1,6 +1,7 @@
 <script lang="ts">
     import { setContext } from 'svelte';
     import { page } from '$app/state';
+    import { goto } from '$app/navigation';
     import MessageSquare from '@lucide/svelte/icons/message-square';
 import BookOpen from '@lucide/svelte/icons/book-open';
 import Plus from '@lucide/svelte/icons/plus';
@@ -66,12 +67,17 @@ import Plus from '@lucide/svelte/icons/plus';
         return () => window.removeEventListener('wiki:tree:refresh', handler);
     });
 
-    // ── Load repos for the landing page ────────────────────────────────────────
+    // ── Load repos: the landing list, and the switcher above a repo's tree ─────
     $effect(() => {
-        if (!selectedRepoId && repos.length === 0) {
+        if (repos.length === 0) {
             loadRepos();
         }
     });
+
+    function switchRepo(event: Event) {
+        const id = (event.currentTarget as HTMLSelectElement).value;
+        goto(id ? `/wiki/${id}` : '/wiki');
+    }
 
     async function loadRepos() {
         try {
@@ -191,10 +197,10 @@ import Plus from '@lucide/svelte/icons/plus';
     <aside class="w-80 bg-surface border-r border-line flex flex-col flex-shrink-0">
         <!-- Header -->
         <div class="h-14 px-4 border-b border-line-subtle flex items-center justify-between">
-            <div class="flex items-center gap-2">
+            <a href="/wiki" class="flex items-center gap-2" title="All repositories">
                 <BookOpen class="w-4 h-4 text-accent" />
                 <h1 class="text-sm font-semibold text-body">Wiki</h1>
-            </div>
+            </a>
             <a href="/" class="btn btn-ghost btn-sm" title="Back to chat">
                 <MessageSquare class="w-4 h-4" />
                 Chat
@@ -223,6 +229,20 @@ import Plus from '@lucide/svelte/icons/plus';
         {:else}
             <!-- Tree sidebar -->
             <div class="flex-1 overflow-y-auto p-2">
+                <div class="px-3 pt-1 pb-2">
+                    <label for="wiki-repo-switch" class="eyebrow block mb-1.5">Repository</label>
+                    <select
+                        id="wiki-repo-switch"
+                        class="field text-xs w-full"
+                        value={String(selectedRepoId)}
+                        onchange={switchRepo}
+                    >
+                        {#each repos as repo (repo.id)}
+                            <option value={String(repo.id)}>{getRepoName(repo)}</option>
+                        {/each}
+                        <option value="">All repositories…</option>
+                    </select>
+                </div>
                 <div class="flex items-center justify-between px-3 py-2">
                     <p class="eyebrow">Documents</p>
                     {#if canEdit}

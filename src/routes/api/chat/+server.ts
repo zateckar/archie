@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { admitChat, answerChat } from '$lib/server/chat-pipeline';
 import { withUsageCategory } from '$lib/server/usage';
+import { withFactsheetUrls } from '$lib/server/conversations';
 import type { RequestHandler } from './$types';
 
 /**
@@ -59,7 +60,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
                 send({ type: 'conversation', id: outcome.conversationId });
                 // Sources before any prose: the client renders the citation
                 // chips while the answer is still being written.
-                send({ type: 'sources', data: outcome.sources });
+                send({ type: 'sources', data: withFactsheetUrls(outcome.sources) });
                 for await (const text of outcome.stream) {
                     // Browser gone: stop generating. Leaving the loop runs the
                     // pipeline's `finally`, which saves the partial answer.

@@ -1,4 +1,6 @@
 import { db } from './db';
+import { getWorkspaceUrl } from './leanix';
+import { factsheetUrl } from './leanix-format';
 
 /**
  * Everything the app does to a conversation *besides* answering in it.
@@ -32,6 +34,8 @@ export interface SourceRecord {
     filename: string;
     path?: string | null;
     repo_id?: number | null;
+    /** External page for a document with no wiki page (a LeanIX factsheet). */
+    url?: string | null;
 }
 
 /** Escapes the LIKE wildcards so a query of "100%" matches literally. */
@@ -159,6 +163,43 @@ function withRepoIds(messages: { sources: SourceRecord[] }[]): void {
 }
 
 /**
+ * Sets `url` on every source that is a LeanIX factsheet, so its citation opens
+ * the factsheet in LeanIX — factsheets live only in the database, so they have
+ * no wiki page to link to instead.
+ *
+ * Resolved at read time, never stored: the workspace URL is learned from the
+ * LeanIX token (or set by LEANIX_WORKSPACE_URL) and may change, and an old
+ * conversation should link to where the factsheet is now. While the workspace
+ * URL is unknown, no link is made rather than a guessed one that 404s.
+ */
+export function withFactsheetUrls<T extends SourceRecord>(sources: T[]): T[] {
+    const workspace = getWorkspaceUrl();
+    if (!workspace) return sources;
+
+    const keys = new Set<string>();
+    for (const s of sources) {
+        if (s && s.repo_id == null && typeof s.filename === 'string' && s.filename) keys.add(s.filename);
+    }
+    if (keys.size === 0) return sources;
+
+    const placeholders = Array.from(keys, () => '?').join(',');
+    const rows = db.prepare(`
+        SELECT d.filename, f.id, f.fs_type
+        FROM documents d
+        JOIN leanix_factsheets f ON f.id = d.source_ref
+        WHERE d.source = 'leanix' AND d.filename IN (${placeholders})
+    `).all(...keys) as { filename: string; id: string; fs_type: string }[];
+
+    const byFilename = new Map(rows.map((r) => [r.filename, factsheetUrl(r, workspace)]));
+    for (const s of sources) {
+        if (!s || s.repo_id != null) continue;
+        const url = byFilename.get(s.filename);
+        if (url) s.url = url;
+    }
+    return sources;
+}
+
+/**
  * Every turn of one conversation, oldest first, with each answer's sources
  * parsed back out of the stored JSON.
  *
@@ -179,6 +220,7 @@ export function conversationTranscript(userId: number, conversationId: string): 
         sources: r.sources ? safeParseSources(r.sources) : []
     }));
     withRepoIds(history);
+    withFactsheetUrls(history.flatMap((m) => m.sources));
     return history;
 }
 
