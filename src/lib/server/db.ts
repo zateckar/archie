@@ -1211,7 +1211,7 @@ try {
 
 export function getDocuments() {
     return db.prepare(`
-        SELECT d.id, d.filename, d.context, d.created_at, d.path, r.url as repo_url 
+        SELECT d.id, d.filename, d.context, d.created_at, d.path, d.source, r.url as repo_url
         FROM documents d
         LEFT JOIN git_repos r ON d.repo_id = r.id
         ORDER BY d.created_at DESC

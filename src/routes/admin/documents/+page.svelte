@@ -8,10 +8,12 @@ import Search from '@lucide/svelte/icons/search';
 import ArrowUpDown from '@lucide/svelte/icons/arrow-up-down';
 import ChevronLeft from '@lucide/svelte/icons/chevron-left';
 import ChevronRight from '@lucide/svelte/icons/chevron-right';
+    import UploadToRepoModal from '$lib/components/UploadToRepoModal.svelte';
 
     let documents: any[] = $state([]);
     let loading = $state(true);
-    let isUploading = $state(false);
+    let uploadOpen = $state(false);
+    let notice = $state<{ text: string; warning: boolean } | null>(null);
     let searchQuery = $state('');
     let sortField = $state('created_at');
     let sortOrder = $state<'asc' | 'desc'>('desc');
@@ -36,29 +38,12 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
         }
     }
 
-    async function handleUpload(event: Event) {
-        const input = event.target as HTMLInputElement;
-        const file = input.files?.[0];
-        if (!file) return;
-
-        isUploading = true;
-        try {
-            const content = await file.text();
-            const res = await fetch('/api/documents', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename: file.name, content })
-            });
-            if (res.ok) {
-                await loadDocuments();
-            }
-            input.value = '';
-        } catch (err) {
-            console.error(err);
-            alert('Upload failed');
-        } finally {
-            isUploading = false;
-        }
+    async function handleUploaded(path: string, warning?: string) {
+        uploadOpen = false;
+        notice = warning
+            ? { text: warning, warning: true }
+            : { text: `Committed ${path} to Git and added it to the knowledge base.`, warning: false };
+        await loadDocuments();
     }
 
     async function handleDelete(id: number) {
@@ -82,11 +67,21 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
         }
     }
 
+    // Where a document comes from. "No repository" is not the same as "uploaded":
+    // LeanIX factsheets have no repository either, and were shown as manual uploads.
+    function sourceLabel(doc: any): string {
+        if (doc.repo_url) return doc.repo_url.replace(/[\\/]+$/, '').split('/').pop().replace(/\.git$/i, '');
+        if (doc.source === 'leanix') return 'LeanIX';
+        if (doc.source === 'upload') return 'Manual upload';
+        return doc.source || 'Unknown';
+    }
+
     let filteredDocuments = $derived(
         documents
-            .filter(doc => 
+            .map(doc => ({ ...doc, source_label: sourceLabel(doc) }))
+            .filter(doc =>
                 doc.filename.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                (doc.repo_url && doc.repo_url.toLowerCase().includes(searchQuery.toLowerCase()))
+                doc.source_label.toLowerCase().includes(searchQuery.toLowerCase())
             )
             .sort((a, b) => {
                 let valA = a[sortField];
@@ -116,21 +111,24 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
             <p class="page-subtitle mt-1">Manage documents used for RAG.</p>
         </div>
         
-        <label 
-            class="btn btn-primary cursor-pointer"
-            class:opacity-50={isUploading}
-            class:pointer-events-none={isUploading}
-        >
-            {#if isUploading}
-                <Loader2 class="w-4 h-4 animate-spin" />
-                <span>Uploading...</span>
-            {:else}
-                <Upload class="w-5 h-5" />
-                <span>Upload Document</span>
-            {/if}
-            <input type="file" onchange={handleUpload} accept=".txt,.md,.mdx" class="hidden" disabled={isUploading} />
-        </label>
+        <button type="button" class="btn btn-primary" onclick={() => { notice = null; uploadOpen = true; }}>
+            <Upload class="w-5 h-5" />
+            <span>Upload Document</span>
+        </button>
     </header>
+
+    {#if notice}
+        <div
+            class="mb-6 rounded-xl border px-4 py-3 text-sm flex items-start justify-between gap-4
+            {notice.warning ? 'border-[var(--danger)] text-danger' : 'border-[var(--border-primary)] text-[var(--text-secondary)]'}"
+            role="status"
+        >
+            <span>{notice.text}</span>
+            <button type="button" class="text-[var(--text-faint)] hover:text-[var(--text-primary)]" onclick={() => (notice = null)} aria-label="Dismiss">✕</button>
+        </div>
+    {/if}
+
+    <UploadToRepoModal open={uploadOpen} onClose={() => (uploadOpen = false)} onUploaded={handleUploaded} />
 
     <div class="card overflow-hidden">
         <div class="p-6 border-b border-[var(--border-primary)] flex flex-col md:flex-row gap-4 justify-between items-center">
@@ -165,7 +163,7 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
                                 <ArrowUpDown class="w-3 h-3" />
                             </div>
                         </th>
-                        <th class="eyebrow px-4 py-3 cursor-pointer hover:text-body transition-colors" onclick={() => toggleSort('repo_url')}>
+                        <th class="eyebrow px-4 py-3 cursor-pointer hover:text-body transition-colors" onclick={() => toggleSort('source_label')}>
                             <div class="flex items-center gap-2">
                                 Source
                                 <ArrowUpDown class="w-3 h-3" />
@@ -199,16 +197,21 @@ import ChevronRight from '@lucide/svelte/icons/chevron-right';
                                         <div class="w-10 h-10 rounded-xl bg-[var(--bg-muted)] flex items-center justify-center text-accent">
                                             <FileText class="w-5 h-5" />
                                         </div>
-                                        <span class="font-medium text-[var(--text-secondary)]">{doc.filename}</span>
+                                        <div class="flex flex-col">
+                                            <span class="font-medium text-[var(--text-secondary)]">{doc.filename}</span>
+                                            {#if doc.path && doc.path !== doc.filename}
+                                                <span class="text-xs font-mono text-[var(--text-faint)]">{doc.path}</span>
+                                            {/if}
+                                        </div>
                                     </div>
                                 </td>
                                 <td class="p-6">
-                                    {#if doc.repo_url}
-                                        <span class="text-xs font-mono text-[var(--text-faint)] bg-[var(--bg-well)] px-2 py-1 rounded-lg border border-[var(--border-primary)]">
-                                            {doc.repo_url.split('/').pop()}
-                                        </span>
+                                    {#if doc.source === 'upload' && !doc.repo_url}
+                                        <span class="text-xs text-[var(--text-faintest)] italic">{doc.source_label}</span>
                                     {:else}
-                                        <span class="text-xs text-[var(--text-faintest)] italic">Manual Upload</span>
+                                        <span class="text-xs font-mono text-[var(--text-faint)] bg-[var(--bg-well)] px-2 py-1 rounded-lg border border-[var(--border-primary)]">
+                                            {doc.source_label}
+                                        </span>
                                     {/if}
                                 </td>
                                 <td class="p-6">

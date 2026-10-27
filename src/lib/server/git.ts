@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import path from 'path';
 import { db, reattributeSharedClaims } from './db';
 import { isIgnoredPath, CLEAN_FOLDER, LEGACY_CLEAN_FOLDER } from './wiki-ignore';
+import { supportedExtensions } from './repo-upload';
 import { addDocument } from './rag';
 import {
     rebuildTaxonomy,
@@ -169,8 +170,9 @@ export async function syncGitRepo(repoId: number) {
         // Get all files in the repo (recursive)
         const files = await git.listFiles({ fs, dir });
         
-        // Filter for supported files (e.g., .md, .txt)
-        const supportedExtensions = process.env.SUPPORTED_EXTENSIONS ? process.env.SUPPORTED_EXTENSIONS.split(',') : ['.md', '.mdx'];
+        // Filter for supported files (e.g., .md, .txt). Shared with the upload
+        // path so an upload can never be of a type this sync then deletes.
+        const extensions = supportedExtensions();
         // `!`-prefixed files and folders are excluded from ingestion (see
         // wiki-ignore), which now covers the cleaned-copies folder itself;
         // LEGACY_CLEAN_FOLDER stays excluded by name for repositories that still
@@ -182,7 +184,7 @@ export async function syncGitRepo(repoId: number) {
         // corpus — which is the intended reading of "ignore", not just "stop
         // updating".
         const docFiles = files.filter(f =>
-            supportedExtensions.includes(path.extname(f).toLowerCase())
+            extensions.includes(path.extname(f).toLowerCase())
             && !f.startsWith(LEGACY_CLEAN_FOLDER)
             && !isIgnoredPath(f)
         );

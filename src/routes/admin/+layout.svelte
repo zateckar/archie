@@ -8,6 +8,7 @@ import ChevronLeft from '@lucide/svelte/icons/chevron-left';
 import LogOut from '@lucide/svelte/icons/log-out';
 import Network from '@lucide/svelte/icons/network';
 import Coins from '@lucide/svelte/icons/coins';
+import FolderInput from '@lucide/svelte/icons/folder-input';
 
     let { children } = $props();
 
@@ -15,6 +16,7 @@ import Coins from '@lucide/svelte/icons/coins';
         { name: 'Dashboard', href: '/admin', icon: LayoutDashboard },
         { name: 'Documents', href: '/admin/documents', icon: FileText },
         { name: 'Git Repos', href: '/admin/repos', icon: GitBranch },
+        { name: 'Move uploads to Git', href: '/admin/move-uploads', icon: FolderInput },
         { name: 'Users', href: '/admin/users', icon: Users },
         { name: 'Knowledge', href: '/admin/knowledge', icon: Network },
         { name: 'Token usage', href: '/admin/usage', icon: Coins },
