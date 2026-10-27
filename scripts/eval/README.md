@@ -18,7 +18,7 @@ have never been measured:
 | `ALIGNMENT_SIMILARITY_THRESHOLD = 0.35` | `knowledge.ts` | Claim → `flagged` |
 | `CHUNK_COVERAGE_THRESHOLD = 0.8` | `rag.ts` | Semantic-chunk fallback trigger |
 | `MIN_FILLER_CLAIM_RELEVANCE = 0.3` | `rag.ts` | Topic-restricted claims allowed into spare slots |
-| `CHAT_SYNTHESIS` (`auto`/`off`/`always`) | env, `chat-pipeline.ts` | Whether context is rewritten before answering |
+| `CHAT_SYNTHESIS` (`off` default / `auto` / `always`) | env, `chat-pipeline.ts` | Whether context is rewritten before answering |
 | `CHAT_VERBATIM_CHUNKS` (default 3) | env, `chat-pipeline.ts` | Verbatim passages on the primary pass |
 
 (The `1.5×` negation boost that used to be listed here was removed: it was
@@ -96,7 +96,7 @@ and diff the two summaries.
 npm run eval -- --area application-integration   # one subject area
 npm run eval -- --raw                            # skip query analysis
 npm run eval -- --answers                        # also generate + judge answers
-CHAT_SYNTHESIS=off npm run eval -- --answers --json raw.json   # A/B the synthesis pass
+CHAT_SYNTHESIS=auto npm run eval -- --answers --json synth.json   # A/B the synthesis pass
 ```
 
 ## What it measures

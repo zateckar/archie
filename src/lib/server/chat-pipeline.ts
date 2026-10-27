@@ -341,17 +341,20 @@ function progressReporter(sink: ProgressSink | undefined) {
 
 /**
  * How the retrieved context reaches the answering model:
- *   - `auto` (default): through the synthesis pass, except for simple,
- *     single-topic, well-covered queries, which pass through raw.
- *   - `off`: always raw. Removes one paraphrase hop and its drift risk; the
- *     raw context keeps every fact's [source] tag.
+ *   - `off` (default): always raw. Removes one paraphrase hop and its drift
+ *     risk; the raw context keeps every fact's [source] tag.
+ *   - `auto`: through the synthesis pass, except for simple, single-topic,
+ *     well-covered queries, which pass through raw.
  *   - `always`: always synthesized.
- * A knob rather than a decision because which one answers better is an
- * empirical question — compare them with `npm run eval -- --answers`.
+ * `off` became the default on 2026-10-27, once the answering model reasons
+ * for itself: on the 15 reviewed application-integration cases it matched
+ * `auto` exactly (21/22 facts, no unsupported statements) while answering in
+ * a median 45 s instead of 67 s, with answers 30% shorter. Re-check with
+ * `npm run eval -- --answers` before changing it.
  */
 function synthesisMode(): 'auto' | 'off' | 'always' {
     const v = (process.env.CHAT_SYNTHESIS ?? '').trim().toLowerCase();
-    return v === 'off' || v === 'always' ? v : 'auto';
+    return v === 'auto' || v === 'always' ? v : 'off';
 }
 
 /** Verbatim chunks retrieved on the primary pass (CHAT_VERBATIM_CHUNKS, default 3). */

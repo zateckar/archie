@@ -185,7 +185,7 @@ async function runCase(c: GoldenCase): Promise<CaseResult> {
 
 console.log(
     `Running ${cases.length} case(s) from ${path.basename(setPath)}${skipped ? ` (${skipped} skipped)` : ''}, k=${TOP_K}` +
-    `${raw ? ', raw query' : ', chat-like query analysis'}${withAnswers ? `, answers (synthesis=${process.env.CHAT_SYNTHESIS || 'auto'})` : ''}\n`
+    `${raw ? ', raw query' : ', chat-like query analysis'}${withAnswers ? `, answers (synthesis=${process.env.CHAT_SYNTHESIS || 'off'})` : ''}\n`
 );
 
 const isPass = (r: CaseResult) =>

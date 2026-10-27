@@ -945,6 +945,8 @@ with it off, every field degrades to empty and the portfolio page is unchanged.
 | `PUBLIC_URL` | No | — | Public URL for OIDC redirects |
 | `SUPPORTED_EXTENSIONS` | No | `.md,.mdx` | Comma-separated list of file extensions to sync from git |
 | `CHAT_RATE_LIMIT_PER_MIN` | No | `20` | Answered questions per user per minute, across the web UI and MCP alike |
+| `CHAT_SYNTHESIS` | No | `off` | `off`: the answering model reads the retrieved material directly. `auto`/`always`: rewrite it into a briefing first (slower; matched `off` on accuracy in the 2026-10 eval) |
+| `CHAT_VERBATIM_CHUNKS` | No | `3` | Document passages retrieved verbatim for each question (1–20) |
 | `MCP_RATE_LIMIT_PER_MIN` | No | `120` | MCP requests per user per minute (the cheap read tools; `ask` is bounded by `CHAT_RATE_LIMIT_PER_MIN`) |
 | `MCP_OAUTH_AUDIENCE` | No | the resource URI `<PUBLIC_URL>/api/mcp` | Comma-separated audience values a token may carry to be accepted on `/api/mcp`. Set this when the provider stamps a fixed audience instead of honouring RFC 8707 `resource` |
 | `MCP_OAUTH_REQUIRED_SCOPE` | No | — | Scope(s) a token must carry, e.g. `mcp:access`. Missing scopes give `403 insufficient_scope` |
