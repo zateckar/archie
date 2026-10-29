@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import { setUserPreference } from '$lib/server/db';
-import { SIDEBAR_WIDTH_KEY, clampSidebarWidth } from '$lib/prefs';
+import { SIDEBAR_WIDTH_KEY, clampSidebarWidth, QUICK_VIEW_WIDTH_KEY, clampQuickViewWidth } from '$lib/prefs';
 
 /**
  * Persists per-user UI preferences.
@@ -21,6 +21,12 @@ export async function POST({ request, locals }) {
             const width = clampSidebarWidth(Number(body[SIDEBAR_WIDTH_KEY]));
             setUserPreference(locals.user.id, SIDEBAR_WIDTH_KEY, String(width));
             saved[SIDEBAR_WIDTH_KEY] = String(width);
+        }
+
+        if (QUICK_VIEW_WIDTH_KEY in (body ?? {})) {
+            const width = clampQuickViewWidth(Number(body[QUICK_VIEW_WIDTH_KEY]));
+            setUserPreference(locals.user.id, QUICK_VIEW_WIDTH_KEY, String(width));
+            saved[QUICK_VIEW_WIDTH_KEY] = String(width);
         }
 
         if (Object.keys(saved).length === 0) {

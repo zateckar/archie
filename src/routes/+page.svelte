@@ -23,6 +23,8 @@ import PinOff from '@lucide/svelte/icons/pin-off';
 import Plug from '@lucide/svelte/icons/plug';
     import { fade, fly } from 'svelte/transition';
     import MessageBubble from '$lib/components/MessageBubble.svelte';
+    import QuickView from '$lib/components/QuickView.svelte';
+    import type { QuickViewDoc } from '$lib/utils/citations';
     import ThemeToggle from '$lib/components/ThemeToggle.svelte';
     import { conversationTitle } from '$lib/conversation-title';
     import { applyProgress, formatStageTime, STAGE_LABELS, type ChatProgress, type ProgressStep } from '$lib/chat-progress';
@@ -33,7 +35,10 @@ import Plug from '@lucide/svelte/icons/plug';
         SIDEBAR_MIN_WIDTH,
         SIDEBAR_MAX_WIDTH,
         SIDEBAR_DEFAULT_WIDTH,
-        clampSidebarWidth
+        clampSidebarWidth,
+        QUICK_VIEW_WIDTH_KEY,
+        QUICK_VIEW_DEFAULT_WIDTH,
+        clampQuickViewWidth
     } from '$lib/prefs';
 
     type Conversation = { id: string; title: string; pinned: number; updated_at: string };
@@ -74,6 +79,11 @@ import Plug from '@lucide/svelte/icons/plug';
         untrack(() => clampSidebarWidth(Number(data.sidebarWidth ?? SIDEBAR_DEFAULT_WIDTH)))
     );
     let isResizing = $state(false);
+    /** The cited document shown beside the chat; null when Quick View is closed. */
+    let quickDoc = $state<QuickViewDoc | null>(null);
+    let quickViewWidth = $state<number>(
+        untrack(() => clampQuickViewWidth(Number(data.quickViewWidth ?? QUICK_VIEW_DEFAULT_WIDTH)))
+    );
     let searchQuery = $state('');
     /** Ids the server matched for the active query; null means "not searching". */
     let searchHits = $state<Set<string> | null>(null);
@@ -274,22 +284,29 @@ import Plug from '@lucide/svelte/icons/plug';
 
     // ── Recents list: resizable width ───────────────────────────────────────
 
+    // One debounced write for both resizable columns: whichever was dragged
+    // last, the pending save carries both widths, so neither is dropped.
     let widthSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
-    function saveSidebarWidth(width: number) {
+    function widthPrefs() {
+        return { [SIDEBAR_WIDTH_KEY]: sidebarWidth, [QUICK_VIEW_WIDTH_KEY]: quickViewWidth };
+    }
+
+    function saveWidths() {
         if (widthSaveTimer) clearTimeout(widthSaveTimer);
         widthSaveTimer = setTimeout(() => {
+            widthSaveTimer = null;
             fetch('/api/preferences', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ [SIDEBAR_WIDTH_KEY]: width })
-            }).catch((err) => console.error('Failed to save sidebar width:', err));
+                body: JSON.stringify(widthPrefs())
+            }).catch((err) => console.error('Failed to save panel widths:', err));
         }, 400);
     }
 
     function setSidebarWidth(width: number) {
         sidebarWidth = clampSidebarWidth(width);
-        saveSidebarWidth(sidebarWidth);
+        saveWidths();
     }
 
     function startResize(e: PointerEvent) {
@@ -308,7 +325,7 @@ import Plug from '@lucide/svelte/icons/plug';
             window.removeEventListener('pointermove', onMove);
             window.removeEventListener('pointerup', onUp);
             window.removeEventListener('pointercancel', onUp);
-            saveSidebarWidth(sidebarWidth);
+            saveWidths();
         };
 
         window.addEventListener('pointermove', onMove);
@@ -620,7 +637,7 @@ import Plug from '@lucide/svelte/icons/plug';
             clearTimeout(widthSaveTimer);
             navigator.sendBeacon?.(
                 '/api/preferences',
-                new Blob([JSON.stringify({ [SIDEBAR_WIDTH_KEY]: sidebarWidth })], {
+                new Blob([JSON.stringify(widthPrefs())], {
                     type: 'application/json'
                 })
             );
@@ -851,7 +868,7 @@ import Plug from '@lucide/svelte/icons/plug';
     </aside>
 
     <!-- Main: Chat Interface -->
-    <main class="flex-1 flex flex-col relative w-full bg-page">
+    <main class="flex-1 min-w-0 flex flex-col relative w-full bg-page">
         <header class="h-14 px-4 border-b border-line-subtle flex items-center justify-between bg-page/90 backdrop-blur-md sticky top-0 z-10">
             <div class="flex items-center gap-2">
                 {#if !isSidebarOpen}
@@ -917,6 +934,7 @@ import Plug from '@lucide/svelte/icons/plug';
                     conversationId={currentConversationId}
                     messageIndex={i}
                     streaming={isChatting && i === messages.length - 1 && msg.role === 'assistant'}
+                    onOpenDocument={(doc) => (quickDoc = doc)}
                 />
             {/each}
 
@@ -1016,6 +1034,17 @@ import Plug from '@lucide/svelte/icons/plug';
             </div>
         </footer>
     </main>
+
+    {#if quickDoc}
+        <QuickView
+            doc={quickDoc}
+            bind:width={quickViewWidth}
+            reserve={(isSidebarOpen ? sidebarWidth : 0) + 360}
+            onWidthCommit={saveWidths}
+            onOpen={(doc) => (quickDoc = doc)}
+            onClose={() => (quickDoc = null)}
+        />
+    {/if}
 </div>
 
 <style>

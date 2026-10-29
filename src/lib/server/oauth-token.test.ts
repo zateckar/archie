@@ -25,6 +25,7 @@ const ENV = {
     OIDC_CLIENT_ID: 'archie',
     OIDC_CLIENT_SECRET: 'shh'
 };
+const ENV_AUD = { ...ENV, MCP_OAUTH_VALIDATE_AUDIENCE: 'true' };
 
 let signingKey: CryptoKey;
 let jwks: JWTVerifyGetKey;
@@ -97,9 +98,14 @@ describe('verifyAccessToken (JWT)', () => {
         expect(result.token.via).toBe('jwt');
     });
 
-    it('rejects a token minted for another service behind the same IdP', async () => {
+    it('by default accepts any token the trusted IdP issued, whatever its audience', async () => {
+        expect((await verify(await signToken({ audience: 'https://other-service.example.com' }))).ok).toBe(true);
+        expect((await verify(await signToken({ audience: [] }))).ok).toBe(true);
+    });
+
+    it('rejects a token minted for another service when audience validation is on', async () => {
         // The confused-deputy case, and the entire reason audience validation exists.
-        const result = await verify(await signToken({ audience: 'https://other-service.example.com' }));
+        const result = await verify(await signToken({ audience: 'https://other-service.example.com' }), ENV_AUD);
         expect(result.ok).toBe(false);
         if (result.ok) return;
         expect(result.error).toBe('invalid_token');
@@ -107,7 +113,7 @@ describe('verifyAccessToken (JWT)', () => {
     });
 
     it('accepts a token whose audience array includes this resource', async () => {
-        const result = await verify(await signToken({ audience: ['account', RESOURCE] }));
+        const result = await verify(await signToken({ audience: ['account', RESOURCE] }), ENV_AUD);
         expect(result.ok).toBe(true);
     });
 
@@ -138,7 +144,7 @@ describe('verifyAccessToken (JWT)', () => {
     });
 
     it('honours a configured audience instead of the resource identifier', async () => {
-        const env = { ...ENV, MCP_OAUTH_AUDIENCE: 'archie-mcp' };
+        const env = { ...ENV_AUD, MCP_OAUTH_AUDIENCE: 'archie-mcp' };
         expect((await verify(await signToken({ audience: 'archie-mcp' }), env)).ok).toBe(true);
         // …and stops accepting the default once overridden, which is what makes the
         // setting a real restriction rather than an addition.
@@ -227,12 +233,12 @@ describe('verifyAccessToken (opaque tokens)', () => {
         expect(result.error).toBe('invalid_token');
     });
 
-    it('still checks the audience, so introspection is not the weaker path', async () => {
+    it('still checks the audience when enabled, so introspection is not the weaker path', async () => {
         // `active: true` only means the token exists and has not expired — it says
         // nothing about who it was issued for.
         const result = await verifyAccessToken(opaque, {
             origin: ORIGIN,
-            env: ENV,
+            env: ENV_AUD,
             fetchImpl: fetchWithIntrospection({
                 active: true,
                 sub: 'subject-123',

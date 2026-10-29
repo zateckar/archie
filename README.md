@@ -376,13 +376,15 @@ claude mcp add --transport http archie https://your-host/api/mcp
 For a client that only speaks stdio, bridge it with `npx mcp-remote https://your-host/api/mcp`,
 which runs the same OAuth flow.
 
-**What the provider needs (two things), for Keycloak:**
+**What the provider needs, for Keycloak:**
 
-1. **An audience Archie accepts.** If the provider honours the `resource` parameter
-   (RFC 8707) it stamps `https://your-host/api/mcp` and nothing needs configuring.
-   Otherwise add an audience mapper to the client and set `MCP_OAUTH_AUDIENCE` to whatever
-   it emits (often a client id). There is no "accept any audience" switch — that is the
-   whole confused-deputy defence.
+1. **Optionally, an audience Archie accepts.** By default the audience is not checked:
+   any token the `OIDC_ISSUER` provider signed for an authenticated user is accepted.
+   Set `MCP_OAUTH_VALIDATE_AUDIENCE=true` to also require the audience to name this
+   server (the confused-deputy defence — without it, a token another service behind the
+   same IdP obtained also works here). Then, if the provider honours the `resource`
+   parameter (RFC 8707) it stamps `https://your-host/api/mcp` and nothing more is needed;
+   otherwise add an audience mapper and set `MCP_OAUTH_AUDIENCE` to whatever it emits.
 2. **A way for clients to get a client id.** Either enable dynamic client registration
    (Keycloak: a client-registration policy that permits anonymous registration), which is
    what Claude clients expect, or pre-register a public client using authorization code +
@@ -948,7 +950,8 @@ with it off, every field degrades to empty and the portfolio page is unchanged.
 | `CHAT_SYNTHESIS` | No | `off` | `off`: the answering model reads the retrieved material directly. `auto`/`always`: rewrite it into a briefing first (slower; matched `off` on accuracy in the 2026-10 eval) |
 | `CHAT_VERBATIM_CHUNKS` | No | `3` | Document passages retrieved verbatim for each question (1–20) |
 | `MCP_RATE_LIMIT_PER_MIN` | No | `120` | MCP requests per user per minute (the cheap read tools; `ask` is bounded by `CHAT_RATE_LIMIT_PER_MIN`) |
-| `MCP_OAUTH_AUDIENCE` | No | the resource URI `<PUBLIC_URL>/api/mcp` | Comma-separated audience values a token may carry to be accepted on `/api/mcp`. Set this when the provider stamps a fixed audience instead of honouring RFC 8707 `resource` |
+| `MCP_OAUTH_VALIDATE_AUDIENCE` | No | `false` | Require a token's audience (RFC 8707 `resource`, or `MCP_OAUTH_AUDIENCE`) to name this server. Off: anyone authenticated by the `OIDC_ISSUER` provider may connect (signature, issuer, expiry and scopes are still checked) |
+| `MCP_OAUTH_AUDIENCE` | No | the resource URI `<PUBLIC_URL>/api/mcp` | Comma-separated audience values a token may carry to be accepted on `/api/mcp`, when `MCP_OAUTH_VALIDATE_AUDIENCE=true`. Set this when the provider stamps a fixed audience instead of honouring RFC 8707 `resource` |
 | `MCP_OAUTH_REQUIRED_SCOPE` | No | — | Scope(s) a token must carry, e.g. `mcp:access`. Missing scopes give `403 insufficient_scope` |
 | `MCP_OAUTH_INTROSPECT` | No | `false` | Force RFC 7662 introspection even for JWTs (immediate revocation, one round trip per token, cached 60s) |
 | `LEANIX_TOKEN_URL` | No | — | LeanIX OAuth2 client-credentials token endpoint. The datasource is disabled unless this, `LEANIX_TOKEN_CREDENTIALS` and `LEANIX_API_URL` are all set |

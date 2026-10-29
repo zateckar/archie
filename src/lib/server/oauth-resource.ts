@@ -72,9 +72,7 @@ export function resourceMetadataUrl(origin: string, env?: Record<string, string 
  * comma-separated list so a deployment can migrate from one to the other without
  * a flag day.
  *
- * There is deliberately no "accept any audience" setting. Audience validation is
- * the whole of the confused-deputy defence: without it, a token any other service
- * behind the same IdP obtained for itself would also open this one.
+ * Only consulted when {@link audienceValidationEnabled} is true.
  */
 export function acceptedAudiences(
     origin: string,
@@ -87,6 +85,21 @@ export function acceptedAudiences(
         .map((v) => v.trim())
         .filter(Boolean);
     return values.length > 0 ? values : [resourceIdentifier(origin, env)];
+}
+
+/**
+ * Whether a token's audience (the RFC 8707 resource claim, or a fixed audience
+ * standing in for it) must name this server. Off unless
+ * `MCP_OAUTH_VALIDATE_AUDIENCE=true`.
+ *
+ * Off by default because the corporate provider does not stamp a per-service
+ * audience, and the intent is that anyone the trusted IdP has authenticated may
+ * connect. Signature, issuer, expiry and required scopes are still checked either
+ * way — what is given up is the confused-deputy defence: a token another service
+ * behind the same IdP obtained for itself will also open this one.
+ */
+export function audienceValidationEnabled(env: Record<string, string | undefined> = process.env): boolean {
+    return env.MCP_OAUTH_VALIDATE_AUDIENCE?.trim().toLowerCase() === 'true';
 }
 
 /** Scopes a token must carry, if the deployment wants to require any. */

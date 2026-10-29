@@ -597,41 +597,6 @@ import Workflow from '@lucide/svelte/icons/workflow';
     :global(.tiptap code) { font-size: 0.875rem; }
     :global(.tiptap blockquote) { border-left: 2px solid var(--accent-quiet); padding-left: 1rem; color: var(--text-muted); margin-bottom: 0.5rem; }
     :global(.tiptap a) { color: var(--accent-quiet); text-decoration: underline; }
-
-    /* Tailwind Typography ships a very airy rhythm (1.75 line-height, 1.25em
-       paragraph gaps) which reads like double-spacing in a wiki document.
-       Tighten it for both the rendered view and the editor so they match.
-       Declared after the .tiptap rules above so it wins on source order. */
-    :global(.wiki-prose.prose) { line-height: 1.55; }
-    :global(.wiki-prose p),
-    :global(.wiki-prose li),
-    :global(.wiki-prose blockquote),
-    :global(.wiki-prose td),
-    :global(.wiki-prose th) { line-height: 1.55; }
-    :global(.wiki-prose p) { margin-top: 0.7em; margin-bottom: 0.7em; }
-    :global(.wiki-prose ul), :global(.wiki-prose ol) { margin-top: 0.7em; margin-bottom: 0.7em; }
-    :global(.wiki-prose li) { margin-top: 0.2em; margin-bottom: 0.2em; }
-    :global(.wiki-prose li > p) { margin-top: 0.2em; margin-bottom: 0.2em; }
-    :global(.wiki-prose h1) { margin-top: 1.2em; margin-bottom: 0.5em; line-height: 1.2; }
-    :global(.wiki-prose h2) { margin-top: 1.1em; margin-bottom: 0.45em; line-height: 1.25; }
-    :global(.wiki-prose h3), :global(.wiki-prose h4) { margin-top: 1em; margin-bottom: 0.4em; line-height: 1.3; }
-    :global(.wiki-prose > :first-child) { margin-top: 0; }
-    :global(.wiki-prose pre) { line-height: 1.5; margin-top: 0.8em; margin-bottom: 0.8em; }
-
-    /* Highlight for sentences matching the chat "Find sources" selection. Uses
-       the same treatment as the source panel's snippet highlight, so a match
-       looks the same wherever it is shown. */
-    :global(mark.doc-highlight) {
-        background: color-mix(in oklab, var(--accent) 26%, transparent);
-        color: var(--text-strong);
-        border-radius: 3px;
-        padding: 0.05em 0.15em;
-        font-weight: 600;
-        box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 18%, transparent);
-        animation: doc-hl-pulse 1.2s ease-in-out 2;
-    }
-    @keyframes doc-hl-pulse {
-        0%, 100% { box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 18%, transparent); }
-        50% { box-shadow: 0 0 0 5px color-mix(in oklab, var(--accent) 32%, transparent); }
-    }
+    /* .wiki-prose typography and mark.doc-highlight live in layout.css, shared
+       with the chat's Quick View. */
 </style>

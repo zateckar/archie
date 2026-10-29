@@ -4,6 +4,7 @@
     import FileText from '@lucide/svelte/icons/file-text';
     import Search from '@lucide/svelte/icons/search';
     import ExternalLink from '@lucide/svelte/icons/external-link';
+    import type { QuickViewDoc } from '$lib/utils/citations';
 
     type SourceMatch = {
         doc_id: number;
@@ -21,7 +22,8 @@
         results = [],
         error = null,
         hasSources = true,
-        onClose
+        onClose,
+        onOpenDocument
     }: {
         open?: boolean;
         query?: string;
@@ -31,7 +33,17 @@
         /** Whether the answer had any source documents to search at all. */
         hasSources?: boolean;
         onClose: () => void;
+        /** Shows a match in the chat's Quick View instead of navigating to the wiki. */
+        onOpenDocument?: (doc: QuickViewDoc) => void;
     } = $props();
+
+    /** Plain click → Quick View; a modified click still opens the wiki page. */
+    function openMatch(e: MouseEvent, m: SourceMatch) {
+        if (!onOpenDocument || m.repo_id == null || !m.path) return;
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        onOpenDocument({ repoId: m.repo_id, path: m.path, highlight: query });
+    }
 
     // Turn the [[HL]]...[[/HL]] markers from the FTS snippet into highlighted
     // spans. The raw snippet is escaped first so document content can't inject
@@ -123,6 +135,7 @@
                             {#if url}
                                 <a
                                     href={url}
+                                    onclick={(e) => openMatch(e, m)}
                                     class="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-accent hover:underline"
                                 >
                                     Open and review

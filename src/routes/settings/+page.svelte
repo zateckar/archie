@@ -213,15 +213,21 @@
                 for a client to connect:
             </p>
             <ol class="mt-3 space-y-2.5 text-xs text-dim list-decimal list-inside">
-                <li>
-                    Tokens issued for this server carry an audience Archie accepts. Either the provider honours
-                    the <code class="font-mono">resource</code> parameter (RFC 8707) and stamps
-                    <code class="font-mono">{data.mcpUrl}</code>, or add an audience mapper and set
-                    <code class="font-mono">MCP_OAUTH_AUDIENCE</code> to whatever it emits.
-                    {#if data.audiences.length > 0}
+                {#if data.audiences}
+                    <li>
+                        Tokens issued for this server carry an audience Archie accepts. Either the provider honours
+                        the <code class="font-mono">resource</code> parameter (RFC 8707) and stamps
+                        <code class="font-mono">{data.mcpUrl}</code>, or add an audience mapper and set
+                        <code class="font-mono">MCP_OAUTH_AUDIENCE</code> to whatever it emits.
                         Currently accepting: <code class="font-mono">{data.audiences.join(', ')}</code>.
-                    {/if}
-                </li>
+                    </li>
+                {:else}
+                    <li>
+                        Token audience is not checked: anyone this provider authenticated can connect. Set
+                        <code class="font-mono">MCP_OAUTH_VALIDATE_AUDIENCE=true</code> to require tokens issued
+                        for <code class="font-mono">{data.mcpUrl}</code> only.
+                    </li>
+                {/if}
                 <li>
                     MCP clients can obtain a client ID — either by enabling dynamic client registration, or by
                     pre-registering a public client (authorization code + PKCE, with the client's loopback

@@ -1,6 +1,13 @@
 import { redirect } from '@sveltejs/kit';
 import { db, getUserPreference } from '$lib/server/db';
-import { SIDEBAR_WIDTH_KEY, SIDEBAR_DEFAULT_WIDTH, clampSidebarWidth } from '$lib/prefs';
+import {
+    SIDEBAR_WIDTH_KEY,
+    SIDEBAR_DEFAULT_WIDTH,
+    clampSidebarWidth,
+    QUICK_VIEW_WIDTH_KEY,
+    QUICK_VIEW_DEFAULT_WIDTH,
+    clampQuickViewWidth
+} from '$lib/prefs';
 
 export const load = async ({ locals }) => {
     if (!locals.user) {
@@ -18,9 +25,13 @@ export const load = async ({ locals }) => {
     // paint instead of snapping from the default once the client hydrates.
     const savedWidth = getUserPreference(locals.user.id, SIDEBAR_WIDTH_KEY);
     const sidebarWidth = savedWidth === null ? SIDEBAR_DEFAULT_WIDTH : clampSidebarWidth(Number(savedWidth));
+    const savedQuickView = getUserPreference(locals.user.id, QUICK_VIEW_WIDTH_KEY);
+    const quickViewWidth =
+        savedQuickView === null ? QUICK_VIEW_DEFAULT_WIDTH : clampQuickViewWidth(Number(savedQuickView));
 
     return {
         conversations,
-        sidebarWidth
+        sidebarWidth,
+        quickViewWidth
     };
 };

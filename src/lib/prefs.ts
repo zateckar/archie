@@ -16,3 +16,15 @@ export function clampSidebarWidth(width: number): number {
     if (!Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH;
     return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
 }
+
+/** The chat's Quick View column (a cited document, read-only, beside the answer). */
+export const QUICK_VIEW_WIDTH_KEY = 'quickViewWidth';
+
+export const QUICK_VIEW_MIN_WIDTH = 320;
+export const QUICK_VIEW_MAX_WIDTH = 1200;
+export const QUICK_VIEW_DEFAULT_WIDTH = 560;
+
+export function clampQuickViewWidth(width: number): number {
+    if (!Number.isFinite(width)) return QUICK_VIEW_DEFAULT_WIDTH;
+    return Math.min(QUICK_VIEW_MAX_WIDTH, Math.max(QUICK_VIEW_MIN_WIDTH, Math.round(width)));
+}

@@ -1,7 +1,14 @@
 import crypto from 'crypto';
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import { oidcConfig, requireIdpEndpoints, type IdpEndpoints, type OidcConfig } from './oidc-discovery';
-import { acceptedAudiences, hasRequiredScopes, looksLikeJwt, parseScopes, requiredScopes } from './oauth-resource';
+import {
+    acceptedAudiences,
+    audienceValidationEnabled,
+    hasRequiredScopes,
+    looksLikeJwt,
+    parseScopes,
+    requiredScopes
+} from './oauth-resource';
 
 /**
  * Validating an access token the identity provider issued.
@@ -13,14 +20,15 @@ import { acceptedAudiences, hasRequiredScopes, looksLikeJwt, parseScopes, requir
  * the app already has for sign-in. The first is tried when the token looks like a
  * JWT; the second is the fallback, and can be forced.
  *
- * Whichever path runs, the same four things are checked, and a failure of any of
- * them is `invalid_token`:
+ * Whichever path runs, the same things are checked, and a failure of any of them
+ * is `invalid_token`:
  *   - the signature (or the provider's own verdict, for introspection);
  *   - the issuer, against the configured OIDC_ISSUER;
- *   - the audience, against this server's resource identifier (see
- *     ./oauth-resource — this is the confused-deputy defence, and it is why a
- *     token minted for another service behind the same IdP does not work here);
- *   - expiry.
+ *   - expiry;
+ *   - optionally (MCP_OAUTH_VALIDATE_AUDIENCE=true), the audience, against this
+ *     server's resource identifier (see ./oauth-resource — the confused-deputy
+ *     defence that stops a token minted for another service behind the same IdP
+ *     from working here). Off by default: anyone the IdP authenticated may connect.
  */
 
 export interface VerifiedToken {
@@ -103,7 +111,8 @@ export async function verifyAccessToken(rawToken: string, options: VerifyOptions
         return { ok: false, error: 'server_error', description: (e as Error).message };
     }
 
-    const audiences = acceptedAudiences(options.origin, env);
+    // null = audience not checked.
+    const audiences = audienceValidationEnabled(env) ? acceptedAudiences(options.origin, env) : null;
     const forceIntrospection = env.MCP_OAUTH_INTROSPECT?.trim().toLowerCase() === 'true';
 
     const result =
@@ -128,17 +137,17 @@ export async function verifyAccessToken(rawToken: string, options: VerifyOptions
 async function verifyJwt(
     rawToken: string,
     endpoints: IdpEndpoints,
-    audiences: string[],
+    audiences: string[] | null,
     options: VerifyOptions
 ): Promise<VerifyResult> {
     try {
         const { payload } = await jwtVerify(rawToken, options.keyResolver ?? jwksFor(endpoints.jwksUri), {
             issuer: endpoints.issuer,
-            audience: audiences,
+            audience: audiences ?? undefined,
             clockTolerance: CLOCK_TOLERANCE_SECONDS,
             // `sub` is the identity this server maps to a user, so a token without
             // one cannot be honoured however well it is signed.
-            requiredClaims: ['sub', 'aud', 'iss', 'exp']
+            requiredClaims: audiences ? ['sub', 'aud', 'iss', 'exp'] : ['sub', 'iss', 'exp']
         });
 
         const sub = typeof payload.sub === 'string' ? payload.sub : null;
@@ -187,7 +196,7 @@ async function verifyByIntrospection(
     rawToken: string,
     config: OidcConfig,
     endpoints: IdpEndpoints,
-    audiences: string[],
+    audiences: string[] | null,
     options: VerifyOptions
 ): Promise<VerifyResult> {
     if (!endpoints.introspectionEndpoint) {
@@ -225,7 +234,7 @@ async function introspect(
     rawToken: string,
     config: OidcConfig,
     endpoints: IdpEndpoints,
-    audiences: string[],
+    audiences: string[] | null,
     options: VerifyOptions
 ): Promise<VerifyResult> {
     const fetchImpl = options.fetchImpl ?? fetch;
@@ -271,7 +280,7 @@ async function introspect(
     }
 
     const tokenAudiences = parseAudience(payload.aud);
-    if (!tokenAudiences.some((aud) => audiences.includes(aud))) {
+    if (audiences && !tokenAudiences.some((aud) => audiences.includes(aud))) {
         return {
             ok: false,
             error: 'invalid_token',

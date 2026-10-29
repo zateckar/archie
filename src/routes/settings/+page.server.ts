@@ -1,6 +1,6 @@
 import { redirect } from '@sveltejs/kit';
 import { fetchIdpMetadata, oidcConfig } from '$lib/server/oidc-discovery';
-import { acceptedAudiences, resourceIdentifier, resourceMetadataUrl } from '$lib/server/oauth-resource';
+import { acceptedAudiences, audienceValidationEnabled, resourceIdentifier, resourceMetadataUrl } from '$lib/server/oauth-resource';
 
 /**
  * Everything a person needs to point an MCP client at this deployment — and,
@@ -50,7 +50,7 @@ export const load = async ({ locals, url }) => {
         mcpUrl: resourceIdentifier(url.origin),
         metadataUrl: resourceMetadataUrl(url.origin),
         issuer: config?.issuer ?? null,
-        audiences: acceptedAudiences(url.origin),
+        audiences: audienceValidationEnabled() ? acceptedAudiences(url.origin) : null,
         isAdmin: locals.user.role === 'admin',
         idp
     };

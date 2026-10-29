@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
 import { marked } from 'marked';
-import { linkCitations, wikiHref } from './citations';
+import { linkCitations, parseWikiHref, wikiHref } from './citations';
 import { sanitizeHtml } from './sanitize';
 
 const SOURCES = [
@@ -81,6 +81,19 @@ describe('linkCitations', () => {
         expect(wikiHref(SOURCES[3])).toBe('/wiki/7/id/ID.FI.005%20IT%20Product%20shutdown%20management.md');
         const doc = render('Fakt [id/ID.FI.005 IT Product shutdown management.md].');
         expect(doc.querySelector('a.cite')?.getAttribute('href')).toBe(wikiHref(SOURCES[3]));
+    });
+
+    it('parses a wiki link back into the document it names, for Quick View', () => {
+        expect(parseWikiHref(wikiHref(SOURCES[3]))).toEqual({
+            repoId: 7,
+            path: 'id/ID.FI.005 IT Product shutdown management.md'
+        });
+        expect(parseWikiHref('/wiki/3/a/b.md?highlight=x#top')).toEqual({ repoId: 3, path: 'a/b.md' });
+        expect(parseWikiHref('/wiki/3/')).toBeNull();
+        expect(parseWikiHref('/wiki/x/a.md')).toBeNull();
+        expect(parseWikiHref('https://example.com/wiki/3/a.md')).toBeNull();
+        expect(parseWikiHref('/wiki/3/%E0%A4%A.md')).toBeNull();
+        expect(parseWikiHref(null)).toBeNull();
     });
 
     it('leaves a tag that is not one of the sources exactly as written', () => {

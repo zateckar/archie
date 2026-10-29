@@ -9,7 +9,7 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
     import { renderMermaidBlocksIn } from '$lib/utils/mermaidRender';
     import { theme } from '$lib/stores/theme';
     import Search from '@lucide/svelte/icons/search';
-    import { linkCitations } from '$lib/utils/citations';
+    import { linkCitations, parseWikiHref, type QuickViewDoc } from '$lib/utils/citations';
     import SourceResultsPanel from '$lib/components/SourceResultsPanel.svelte';
 
     type Message = { role: 'user' | 'assistant', content: string, sources?: any[] };
@@ -18,8 +18,32 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
         msg,
         conversationId = null,
         messageIndex = 0,
-        streaming = false
-    }: { msg: Message; conversationId?: string | null; messageIndex?: number; streaming?: boolean } = $props();
+        streaming = false,
+        onOpenDocument
+    }: {
+        msg: Message;
+        conversationId?: string | null;
+        messageIndex?: number;
+        streaming?: boolean;
+        /** Shows a cited document in the chat's Quick View instead of navigating to the wiki. */
+        onOpenDocument?: (doc: QuickViewDoc) => void;
+    } = $props();
+
+    /**
+     * A plain click on a wiki citation opens it in Quick View. A modified or
+     * middle click is left to the browser, so "open in new tab" still reaches
+     * the wiki page itself.
+     */
+    function onProseClick(e: MouseEvent) {
+        if (!onOpenDocument || e.defaultPrevented) return;
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        const link = (e.target as Element | null)?.closest?.('a.cite');
+        if (!link || !proseEl?.contains(link)) return;
+        const doc = parseWikiHref(link.getAttribute('href'));
+        if (!doc) return;
+        e.preventDefault();
+        onOpenDocument(doc);
+    }
 
     let feedbackGiven = $state<number | null>(null);
     let proseEl = $state<HTMLDivElement>();
@@ -194,12 +218,16 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
                     ? 'bg-accent-solid text-on-accent-body rounded-tr-sm whitespace-pre-wrap'
                     : 'bg-surface border border-line-subtle text-dim rounded-tl-sm'}">
                 {#if msg.role === 'assistant'}
+                    <!-- The click handler only acts on citation links, which are
+                         keyboard-activatable themselves (Enter fires click). -->
                     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                    <!-- svelte-ignore a11y_click_events_have_key_events -->
                     <div
                         bind:this={proseEl}
                         class="prose prose-sm max-w-none"
                         class:prose-invert={isDark}
                         onmouseup={handleSelectionEnd}
+                        onclick={onProseClick}
                         role="article"
                     >
                         {@html renderedContent}
@@ -255,4 +283,9 @@ import ThumbsDown from '@lucide/svelte/icons/thumbs-down';
     error={panelError}
     hasSources={(msg.sources ?? []).length > 0}
     onClose={() => (panelOpen = false)}
+    onOpenDocument={onOpenDocument &&
+        ((doc) => {
+            panelOpen = false;
+            onOpenDocument(doc);
+        })}
 />

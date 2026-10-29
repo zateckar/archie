@@ -31,6 +31,29 @@ export function wikiHref(source: CitableSource | null | undefined): string | nul
     return `/wiki/${repoId}/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
+/** A wiki document, as the chat's Quick View opens it. */
+export type WikiDocRef = { repoId: number; path: string };
+
+/** A document for Quick View, optionally with text to highlight (from "Find sources"). */
+export type QuickViewDoc = WikiDocRef & { highlight?: string };
+
+/**
+ * The inverse of {@link wikiHref}: the document a `/wiki/<repoId>/<path>` link
+ * points at, or null for any other URL. Lets the chat open a citation in its
+ * Quick View instead of following the link.
+ */
+export function parseWikiHref(href: string | null | undefined): WikiDocRef | null {
+    if (!href) return null;
+    const match = /^\/wiki\/(\d+)\/([^?#]+)/.exec(href);
+    if (!match) return null;
+    try {
+        const path = match[2].split('/').map(decodeURIComponent).join('/');
+        return path ? { repoId: Number(match[1]), path } : null;
+    } catch {
+        return null; // malformed %-escape
+    }
+}
+
 function basename(p: string): string {
     return p.slice(p.lastIndexOf('/') + 1);
 }
@@ -119,5 +142,5 @@ function citation(entry: Citation): string {
     if (entry.external) {
         return `<a class="cite" href="${href}" target="_blank" rel="noopener noreferrer" title="Open ${full} in LeanIX">${label}</a>`;
     }
-    return `<a class="cite" href="${href}" title="Open ${full} in the wiki">${label}</a>`;
+    return `<a class="cite" href="${href}" title="Show ${full}">${label}</a>`;
 }
